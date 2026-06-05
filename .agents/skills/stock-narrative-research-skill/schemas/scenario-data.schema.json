@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/stock-narrative-research/scenario-data.schema.json",
+  "title": "Stock Narrative Scenario Data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company",
+    "ticker",
+    "currency",
+    "generated_at",
+    "projection_note",
+    "base_year",
+    "scenarios",
+    "monte_carlo"
+  ],
+  "properties": {
+    "company": { "type": "string" },
+    "ticker": { "type": "string" },
+    "currency": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "projection_note": { "type": "string" },
+    "base_year": { "type": "string" },
+    "current_price": { "type": ["number", "null"] },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revenue", "diluted_shares"],
+      "properties": {
+        "revenue": { "type": "number" },
+        "diluted_shares": { "type": "number" },
+        "net_margin": { "type": ["number", "null"] },
+        "eps": { "type": ["number", "null"] }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/scenario" }
+    },
+    "monte_carlo": { "$ref": "#/$defs/monteCarlo" },
+    "source_notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "periods"],
+      "properties": {
+        "name": { "type": "string" },
+        "stance": {
+          "enum": ["bullish", "neutral", "bearish", "mixed", ""]
+        },
+        "probability": { "type": ["number", "null"] },
+        "description": { "type": "string" },
+        "assumption_summary": { "type": "string" },
+        "crux_assumptions": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/$defs/cruxAssumption" }
+            ]
+          }
+        },
+        "sensitivities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "confirming_signals": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "breaking_signals": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "periods": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/period" }
+        }
+      }
+    },
+    "cruxAssumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["crux", "assumption"],
+      "properties": {
+        "crux": { "type": "string" },
+        "assumption": { "type": "string" },
+        "impact": { "type": "string" }
+      }
+    },
+    "period": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "revenue",
+        "diluted_shares",
+        "revenue_per_share",
+        "net_margin",
+        "net_income",
+        "eps"
+      ],
+      "properties": {
+        "label": { "type": "string" },
+        "revenue_growth": { "type": ["number", "null"] },
+        "revenue": { "type": "number" },
+        "diluted_shares": { "type": "number" },
+        "revenue_per_share": { "type": "number" },
+        "gross_margin": { "type": ["number", "null"] },
+        "operating_margin": { "type": ["number", "null"] },
+        "net_margin": { "type": ["number", "null"] },
+        "net_income": { "type": ["number", "null"] },
+        "net_income_growth": { "type": ["number", "null"] },
+        "eps": { "type": ["number", "null"] },
+        "eps_growth": { "type": ["number", "null"] },
+        "ps_multiple": { "$ref": "#/$defs/band" },
+        "pe_multiple": { "$ref": "#/$defs/bandNullable" },
+        "blend_weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ps": { "type": "number" },
+            "pe": { "type": "number" }
+          }
+        },
+        "ps_implied_price": { "$ref": "#/$defs/band" },
+        "pe_implied_price": { "$ref": "#/$defs/bandNullable" },
+        "blended_price": { "$ref": "#/$defs/bandNullable" }
+      }
+    },
+    "band": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["low", "median", "high"],
+      "properties": {
+        "low": { "type": "number" },
+        "median": { "type": "number" },
+        "high": { "type": "number" }
+      }
+    },
+    "bandNullable": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["low", "median", "high"],
+      "properties": {
+        "low": { "type": ["number", "null"] },
+        "median": { "type": ["number", "null"] },
+        "high": { "type": ["number", "null"] }
+      }
+    },
+    "monteCarlo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iterations", "seed", "bins", "summary", "histogram", "scenario_probabilities"],
+      "properties": {
+        "iterations": { "type": "integer" },
+        "seed": { "type": "integer" },
+        "bins": { "type": "integer" },
+        "price_field": { "type": "string" },
+        "probability_basis": { "type": "string" },
+        "normal_distribution_basis": { "type": "string" },
+        "methodology": { "type": "string" },
+        "summary": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "histogram": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/histogramBin" }
+        },
+        "scenario_probabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scenarioProbability" }
+        }
+      }
+    },
+    "histogramBin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["low", "high", "midpoint", "count", "probability"],
+      "properties": {
+        "low": { "type": "number" },
+        "high": { "type": "number" },
+        "midpoint": { "type": "number" },
+        "count": { "type": "integer" },
+        "probability": { "type": "number" }
+      }
+    },
+    "scenarioProbability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "input_probability", "normalized_probability", "sample_count", "observed_probability"],
+      "properties": {
+        "name": { "type": "string" },
+        "input_probability": { "type": ["number", "null"] },
+        "normalized_probability": { "type": "number" },
+        "sample_count": { "type": "integer" },
+        "observed_probability": { "type": "number" }
+      }
+    }
+  }
+}

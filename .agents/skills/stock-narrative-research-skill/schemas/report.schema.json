@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/stock-narrative-research/report.schema.json",
+  "title": "Stock Narrative Research Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company",
+    "generated_at",
+    "projection_note",
+    "source_pack",
+    "claim_table",
+    "sections",
+    "historical_analogues",
+    "watch_items",
+    "source_notes_and_limitations"
+  ],
+  "properties": {
+    "company": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ticker", "name"],
+      "properties": {
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "exchange": { "type": "string" },
+        "currency": { "type": "string" },
+        "sector": { "type": "string" },
+        "industry": { "type": "string" }
+      }
+    },
+    "generated_at": { "type": "string" },
+    "projection_note": { "type": "string" },
+    "source_pack": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "claim_table": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/claim" }
+    },
+    "financial_snapshot": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "number" },
+          { "type": "string" },
+          { "type": "null" }
+        ]
+      }
+    },
+    "scenario_data": {
+      "type": "object",
+      "description": "Calculator output from scenario assumptions. See scenario-data.schema.json for the full contract."
+    },
+    "sections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "orientation",
+        "business_model",
+        "why_now",
+        "narrative_map",
+        "financial_math",
+        "scenario_projection_summary",
+        "industry_context",
+        "final_talk_track"
+      ],
+      "properties": {
+        "orientation": { "$ref": "#/$defs/objectOrText" },
+        "business_model": { "$ref": "#/$defs/objectOrText" },
+        "why_now": { "$ref": "#/$defs/objectOrText" },
+        "narrative_map": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dominant": { "type": "string" },
+            "bull": { "type": "string" },
+            "bear": { "type": "string" },
+            "consensus": { "type": "string" },
+            "counter_narrative": { "type": "string" },
+            "agreements": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "cruxes": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "financial_math": { "$ref": "#/$defs/contentSection" },
+        "scenario_projection_summary": { "$ref": "#/$defs/objectOrText" },
+        "industry_context": { "$ref": "#/$defs/objectOrText" },
+        "final_talk_track": { "$ref": "#/$defs/objectOrText" }
+      }
+    },
+    "historical_analogues": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/analogue" }
+    },
+    "watch_items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/watchItem" }
+    },
+    "source_notes_and_limitations": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "objectOrText": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "number" },
+              {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "contentSection": {
+      "oneOf": [
+        { "$ref": "#/$defs/objectOrText" },
+        {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/$defs/contentBlock" }
+            ]
+          }
+        }
+      ]
+    },
+    "contentBlock": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string" },
+          { "type": "number" },
+          { "type": "boolean" },
+          { "type": "null" },
+          {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "number" },
+                {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "number" },
+                      { "type": "null" }
+                    ]
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "number" },
+                      { "type": "null" }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "paragraph",
+            "callout",
+            "section",
+            "metric_grid",
+            "table",
+            "economic_engine",
+            "tam_bridge",
+            "segment_mix",
+            "scenario_implication"
+          ]
+        },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "tone": { "type": "string" },
+        "columns": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "assumptions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "source_note": { "type": "string" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "type", "date", "why_it_matters", "claims_supported"],
+      "properties": {
+        "source": { "type": "string" },
+        "url": { "type": "string" },
+        "type": {
+          "enum": [
+            "Official company source",
+            "Filing",
+            "Transcript",
+            "Financial news",
+            "Market commentary",
+            "Investor letter",
+            "Short-seller / adversarial",
+            "Regulatory / legal",
+            "Social / retail narrative",
+            "Other"
+          ]
+        },
+        "date": { "type": "string" },
+        "why_it_matters": { "type": "string" },
+        "claims_supported": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim", "source", "date", "type", "side", "confidence"],
+      "properties": {
+        "claim": { "type": "string" },
+        "source": { "type": "string" },
+        "date": { "type": "string" },
+        "type": {
+          "enum": [
+            "demand",
+            "revenue growth",
+            "margin",
+            "earnings",
+            "valuation",
+            "competitive position",
+            "product",
+            "regulatory",
+            "credibility",
+            "accounting",
+            "customer concentration",
+            "supplier dependency",
+            "macro/sector",
+            "management quality",
+            "capital allocation"
+          ]
+        },
+        "side": {
+          "enum": ["bull", "bear", "neutral", "consensus", "counter-narrative", "adversarial"]
+        },
+        "confidence": {
+          "enum": ["High", "Medium", "Low"]
+        },
+        "related_metric": { "type": "string" }
+      }
+    },
+    "analogue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analogue", "why_similar", "lesson", "why_misleading"],
+      "properties": {
+        "analogue": { "type": "string" },
+        "narrative_type": { "type": "string" },
+        "why_similar": { "type": "string" },
+        "how_it_played_out": { "type": "string" },
+        "financial_pattern": { "$ref": "#/$defs/objectOrText" },
+        "key_pivots": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "lesson": { "type": "string" },
+        "why_misleading": { "type": "string" },
+        "source_notes": { "type": "string" }
+      }
+    },
+    "watchItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal", "why_it_matters", "scenario_affected", "bull_signal", "bear_signal"],
+      "properties": {
+        "signal": { "type": "string" },
+        "why_it_matters": { "type": "string" },
+        "scenario_affected": { "type": "string" },
+        "bull_signal": { "type": "string" },
+        "bear_signal": { "type": "string" }
+      }
+    }
+  }
+}

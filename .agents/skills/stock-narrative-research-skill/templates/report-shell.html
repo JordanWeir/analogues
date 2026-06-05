@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock Narrative Research Report</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d9dee8;
+      --accent: #3157d5;
+      --bear: #b42318;
+      --bull: #067647;
+      --band: #d8e2ff;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    header, main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    header {
+      padding-top: 36px;
+    }
+
+    h1, h2, h3 {
+      line-height: 1.15;
+      margin: 0 0 12px;
+    }
+
+    h1 {
+      font-size: 34px;
+      letter-spacing: -0.03em;
+    }
+
+    h2 {
+      font-size: 22px;
+      margin-top: 8px;
+    }
+
+    h3 {
+      font-size: 17px;
+      margin-top: 18px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 8px 24px rgba(20, 30, 55, 0.05);
+      padding: 18px;
+      margin-bottom: 16px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-top: 18px;
+    }
+
+    label {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    input[type="file"] {
+      color: var(--ink);
+      max-width: 320px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 13px;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 650;
+    }
+
+    .metric {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric:last-child {
+      border-bottom: 0;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: var(--accent);
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .note {
+      border-left: 4px solid var(--accent);
+      padding: 10px 12px;
+      background: #eef2ff;
+      border-radius: 8px;
+    }
+
+    svg {
+      width: 100%;
+      min-height: 360px;
+      overflow: visible;
+    }
+
+    .axis text {
+      fill: var(--muted);
+      font-size: 12px;
+    }
+
+    .axis path, .axis line {
+      stroke: var(--line);
+    }
+
+    .chart-label {
+      fill: var(--muted);
+      font-size: 12px;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="badge">v0.1 skill report shell</span>
+    <h1 id="title">Stock Narrative Research Report</h1>
+    <p id="subtitle" class="muted">Load <code>outputs/report.json</code> and <code>outputs/scenario-data.json</code>, or serve this file from the skill folder with those outputs present.</p>
+    <div class="controls panel">
+      <label>
+        Report JSON
+        <input id="reportInput" type="file" accept="application/json">
+      </label>
+      <label>
+        Scenario JSON
+        <input id="scenarioInput" type="file" accept="application/json">
+      </label>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel note" id="projectionNote">
+      These scenario projections are illustrative and assumption-driven. They are not predictions, price targets, or investment advice. They show how different narrative outcomes could translate into financial assumptions and valuation ranges.
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>Orientation</h2>
+        <div id="orientation" class="empty">No report loaded.</div>
+      </div>
+      <div class="panel">
+        <h2>Financial Snapshot</h2>
+        <div id="financialSnapshot" class="empty">No financial snapshot loaded.</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Narrative Map</h2>
+      <div id="narrativeMap" class="empty">No narrative map loaded.</div>
+    </section>
+
+    <section class="panel">
+      <h2>Scenario Bands</h2>
+      <svg id="scenarioChart" role="img" aria-label="Scenario price bands over time"></svg>
+      <div id="scenarioTables"></div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>Historical Analogues</h2>
+        <div id="analogues" class="empty">No analogues loaded.</div>
+      </div>
+      <div class="panel">
+        <h2>What To Watch</h2>
+        <div id="watchItems" class="empty">No watch items loaded.</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Final Talk Track</h2>
+      <div id="talkTrack" class="empty">No talk track loaded.</div>
+    </section>
+
+    <section class="panel">
+      <h2>Source Notes and Limitations</h2>
+      <div id="sourceNotes" class="empty">No source notes loaded.</div>
+    </section>
+  </main>
+
+  <script>
+    const state = { report: null, scenarios: null };
+
+    document.getElementById("reportInput").addEventListener("change", (event) => {
+      readJsonFile(event.target.files[0]).then((json) => {
+        state.report = json;
+        render();
+      });
+    });
+
+    document.getElementById("scenarioInput").addEventListener("change", (event) => {
+      readJsonFile(event.target.files[0]).then((json) => {
+        state.scenarios = json;
+        render();
+      });
+    });
+
+    Promise.allSettled([
+      fetch("../outputs/report.json").then((r) => r.ok ? r.json() : null),
+      fetch("../outputs/scenario-data.json").then((r) => r.ok ? r.json() : null)
+    ]).then(([reportResult, scenarioResult]) => {
+      if (reportResult.status === "fulfilled") state.report = reportResult.value;
+      if (scenarioResult.status === "fulfilled") state.scenarios = scenarioResult.value;
+      render();
+    });
+
+    function readJsonFile(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            resolve(JSON.parse(reader.result));
+          } catch (error) {
+            reject(error);
+          }
+        };
+        reader.onerror = reject;
+        reader.readAsText(file);
+      });
+    }
+
+    function render() {
+      const report = state.report || {};
+      const scenarios = state.scenarios || {};
+      const company = report.company || scenarios.company || {};
+      const title = [company.ticker, company.name].filter(Boolean).join(" / ");
+      document.getElementById("title").textContent = title ? `Stock Narrative Research Report: ${title}` : "Stock Narrative Research Report";
+      document.getElementById("subtitle").textContent = report.generated_at ? `Generated ${report.generated_at}` : "Load report and scenario JSON to render the artifact.";
+
+      renderKeyValues("orientation", report.sections?.orientation);
+      renderKeyValues("financialSnapshot", report.financial_snapshot);
+      renderNarrative(report.sections?.narrative_map);
+      renderScenarioChart(scenarios);
+      renderScenarioTables(scenarios);
+      renderList("analogues", report.historical_analogues, renderAnalogue);
+      renderWatchItems(report.watch_items);
+      renderKeyValues("talkTrack", report.sections?.final_talk_track);
+      renderSourceNotes(report);
+    }
+
+    function renderKeyValues(id, value) {
+      const el = document.getElementById(id);
+      if (!value) {
+        el.className = "empty";
+        el.textContent = "Not provided.";
+        return;
+      }
+      el.className = "";
+      if (typeof value === "string") {
+        el.textContent = value;
+        return;
+      }
+      el.innerHTML = Object.entries(value).map(([key, val]) => `
+        <div class="metric">
+          <strong>${escapeHtml(labelize(key))}</strong>
+          <span>${escapeHtml(formatValue(val))}</span>
+        </div>
+      `).join("");
+    }
+
+    function renderNarrative(map) {
+      const el = document.getElementById("narrativeMap");
+      if (!map) {
+        el.className = "empty";
+        el.textContent = "Not provided.";
+        return;
+      }
+      el.className = "";
+      el.innerHTML = `
+        <div class="grid">
+          <div><h3>Dominant</h3><p>${escapeHtml(map.dominant || "")}</p></div>
+          <div><h3>Bull</h3><p>${escapeHtml(map.bull || "")}</p></div>
+          <div><h3>Bear</h3><p>${escapeHtml(map.bear || "")}</p></div>
+          <div><h3>Counter-Narrative</h3><p>${escapeHtml(map.counter_narrative || "")}</p></div>
+        </div>
+        <h3>Cruxes</h3>
+        ${renderBullets(map.cruxes || [])}
+      `;
+    }
+
+    function renderScenarioChart(data) {
+      const svg = d3.select("#scenarioChart");
+      svg.selectAll("*").remove();
+      const scenarios = data.scenarios || [];
+      const rows = scenarios.flatMap((scenario) =>
+        (scenario.periods || []).map((period, index) => ({
+          scenario: scenario.name,
+          index,
+          label: period.label,
+          low: period.blended_price?.low ?? period.ps_implied_price?.low ?? period.pe_implied_price?.low,
+          median: period.blended_price?.median ?? period.ps_implied_price?.median ?? period.pe_implied_price?.median,
+          high: period.blended_price?.high ?? period.ps_implied_price?.high ?? period.pe_implied_price?.high
+        }))
+      ).filter((row) => Number.isFinite(row.median));
+
+      if (!rows.length) {
+        svg.append("text").attr("x", 20).attr("y", 40).attr("class", "chart-label").text("No numeric scenario data loaded.");
+        return;
+      }
+
+      const width = 1060;
+      const height = 360;
+      const margin = { top: 28, right: 160, bottom: 42, left: 64 };
+      svg.attr("viewBox", `0 0 ${width} ${height}`);
+
+      const maxIndex = d3.max(rows, (d) => d.index) || 1;
+      const yMax = d3.max(rows, (d) => d.high || d.median) || 1;
+      const x = d3.scaleLinear().domain([0, maxIndex]).range([margin.left, width - margin.right]);
+      const y = d3.scaleLinear().domain([0, yMax * 1.1]).nice().range([height - margin.bottom, margin.top]);
+      const color = d3.scaleOrdinal(d3.schemeTableau10).domain(scenarios.map((s) => s.name));
+
+      svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(0,${height - margin.bottom})`)
+        .call(d3.axisBottom(x).ticks(maxIndex).tickFormat((i) => rows.find((r) => r.index === i)?.label || i));
+
+      svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(${margin.left},0)`)
+        .call(d3.axisLeft(y));
+
+      if (Number.isFinite(data.current_price)) {
+        svg.append("line")
+          .attr("x1", margin.left)
+          .attr("x2", width - margin.right)
+          .attr("y1", y(data.current_price))
+          .attr("y2", y(data.current_price))
+          .attr("stroke", "#98a2b3")
+          .attr("stroke-dasharray", "4 4");
+        svg.append("text")
+          .attr("x", width - margin.right + 8)
+          .attr("y", y(data.current_price) + 4)
+          .attr("class", "chart-label")
+          .text("Current price");
+      }
+
+      const grouped = d3.group(rows, (d) => d.scenario);
+      const line = d3.line().x((d) => x(d.index)).y((d) => y(d.median));
+      const area = d3.area()
+        .x((d) => x(d.index))
+        .y0((d) => y(d.low ?? d.median))
+        .y1((d) => y(d.high ?? d.median));
+
+      for (const [name, values] of grouped) {
+        svg.append("path")
+          .datum(values)
+          .attr("fill", color(name))
+          .attr("opacity", 0.12)
+          .attr("d", area);
+        svg.append("path")
+          .datum(values)
+          .attr("fill", "none")
+          .attr("stroke", color(name))
+          .attr("stroke-width", 2)
+          .attr("d", line);
+        const last = values[values.length - 1];
+        svg.append("text")
+          .attr("x", x(last.index) + 8)
+          .attr("y", y(last.median) + 4)
+          .attr("class", "chart-label")
+          .text(name);
+      }
+    }
+
+    function renderScenarioTables(data) {
+      const el = document.getElementById("scenarioTables");
+      const scenarios = data.scenarios || [];
+      if (!scenarios.length) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = scenarios.map((scenario) => `
+        <h3>${escapeHtml(scenario.name)}</h3>
+        <p>${escapeHtml(scenario.description || "")}</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Period</th>
+              <th>Low</th>
+              <th>Median</th>
+              <th>High</th>
+              <th>Revenue / Share</th>
+              <th>EPS</th>
+              <th>P/S Median</th>
+              <th>P/E Median</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(scenario.periods || []).map((period) => {
+              const band = period.blended_price || period.ps_implied_price || period.pe_implied_price || {};
+              return `
+                <tr>
+                  <td>${escapeHtml(period.label || "")}</td>
+                  <td>${formatNumber(band.low)}</td>
+                  <td>${formatNumber(band.median)}</td>
+                  <td>${formatNumber(band.high)}</td>
+                  <td>${formatNumber(period.revenue_per_share)}</td>
+                  <td>${formatNumber(period.eps)}</td>
+                  <td>${formatNumber(period.ps_multiple?.median)}</td>
+                  <td>${formatNumber(period.pe_multiple?.median)}</td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      `).join("");
+    }
+
+    function renderList(id, list, renderer) {
+      const el = document.getElementById(id);
+      if (!Array.isArray(list) || !list.length) {
+        el.className = "empty";
+        el.textContent = "Not provided.";
+        return;
+      }
+      el.className = "";
+      el.innerHTML = list.map(renderer).join("");
+    }
+
+    function renderAnalogue(item) {
+      return `
+        <h3>${escapeHtml(item.analogue || item.name || "Analogue")}</h3>
+        <p><strong>Why similar:</strong> ${escapeHtml(item.why_similar || "")}</p>
+        <p><strong>Lesson:</strong> ${escapeHtml(item.lesson || "")}</p>
+        <p><strong>Why misleading:</strong> ${escapeHtml(item.why_misleading || "")}</p>
+      `;
+    }
+
+    function renderWatchItems(items) {
+      const el = document.getElementById("watchItems");
+      if (!Array.isArray(items) || !items.length) {
+        el.className = "empty";
+        el.textContent = "Not provided.";
+        return;
+      }
+      el.className = "";
+      el.innerHTML = `
+        <table>
+          <thead><tr><th>Signal</th><th>Why It Matters</th><th>Scenario</th><th>Bull Signal</th><th>Bear Signal</th></tr></thead>
+          <tbody>
+            ${items.map((item) => `
+              <tr>
+                <td>${escapeHtml(item.signal || "")}</td>
+                <td>${escapeHtml(item.why_it_matters || "")}</td>
+                <td>${escapeHtml(item.scenario_affected || "")}</td>
+                <td>${escapeHtml(item.bull_signal || "")}</td>
+                <td>${escapeHtml(item.bear_signal || "")}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderSourceNotes(report) {
+      const notes = report.source_notes_and_limitations || {};
+      renderKeyValues("sourceNotes", notes);
+    }
+
+    function renderBullets(items) {
+      if (!Array.isArray(items) || !items.length) return "<p class=\"empty\">Not provided.</p>";
+      return `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+    }
+
+    function labelize(value) {
+      return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function formatValue(value) {
+      if (Array.isArray(value)) return value.join(", ");
+      if (value && typeof value === "object") return JSON.stringify(value);
+      return value ?? "";
+    }
+
+    function formatNumber(value) {
+      return Number.isFinite(value) ? d3.format(",.2f")(value) : "";
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+  </script>
+</body>
+</html>

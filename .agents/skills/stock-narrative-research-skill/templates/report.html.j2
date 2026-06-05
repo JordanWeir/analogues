@@ -1,0 +1,1716 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{REPORT_TITLE}}</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --panel-soft: #fbfcff;
+      --ink: #111827;
+      --muted: #667085;
+      --muted-2: #98a2b3;
+      --line: #d9dee8;
+      --line-soft: #edf0f5;
+      --accent: #3157d5;
+      --accent-soft: #eef2ff;
+      --success: #067647;
+      --success-soft: #ecfdf3;
+      --warning: #b54708;
+      --warning-soft: #fffaeb;
+      --danger: #b42318;
+      --danger-soft: #fef3f2;
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.035);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(49, 87, 213, 0.08), transparent 34rem),
+        var(--bg);
+      color: var(--ink);
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+    }
+
+    header, main {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    header {
+      padding-top: 40px;
+      padding-bottom: 10px;
+    }
+
+    main {
+      padding-bottom: 56px;
+    }
+
+    h1, h2, h3 {
+      line-height: 1.15;
+      margin: 0;
+      letter-spacing: -0.02em;
+    }
+
+    h1 {
+      max-width: 920px;
+      font-size: clamp(32px, 4vw, 52px);
+      letter-spacing: -0.045em;
+    }
+
+    h2 {
+      font-size: 22px;
+    }
+
+    h3 {
+      font-size: 16px;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    ul {
+      margin: 8px 0 0;
+      padding-left: 20px;
+    }
+
+    li + li {
+      margin-top: 6px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .eyebrow {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .hero {
+      max-width: 980px;
+    }
+
+    .subtitle {
+      max-width: 760px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .badge,
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+
+    .badge {
+      background: var(--accent-soft);
+      color: var(--accent);
+      white-space: nowrap;
+    }
+
+    .pill {
+      background: #f2f4f7;
+      color: var(--muted);
+      max-width: 100%;
+      white-space: normal;
+    }
+
+    .pill.bullish,
+    .pill.success {
+      background: var(--success-soft);
+      color: var(--success);
+    }
+
+    .pill.neutral,
+    .pill.mixed,
+    .pill.warning {
+      background: var(--warning-soft);
+      color: var(--warning);
+    }
+
+    .pill.bearish,
+    .pill.danger {
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+
+    .panel,
+    .mini-card,
+    .stat,
+    .scenario-card,
+    details {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel {
+      padding: 20px;
+      margin-top: 18px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .panel-subtitle {
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 6px;
+    }
+
+    .note {
+      border-left: 5px solid var(--accent);
+      background: var(--accent-soft);
+      color: #253b80;
+      box-shadow: none;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    .grid-wide {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.7fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .section-stack {
+      display: grid;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .stat {
+      padding: 14px;
+    }
+
+    .stat-value {
+      display: block;
+      color: var(--ink);
+      font-size: 21px;
+      font-weight: 800;
+      letter-spacing: -0.035em;
+      line-height: 1.15;
+    }
+
+    .stat-label {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .kv-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .metric {
+      display: grid;
+      grid-template-columns: minmax(130px, 0.35fr) minmax(0, 1fr);
+      gap: 14px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .metric:last-child {
+      border-bottom: 0;
+    }
+
+    .metric strong {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .prose-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+    }
+
+    .mini-card {
+      padding: 15px;
+      background: var(--panel-soft);
+      box-shadow: none;
+    }
+
+    .mini-card h3 {
+      margin-bottom: 8px;
+    }
+
+    .mini-card p {
+      color: #344054;
+    }
+
+    .analysis-list {
+      display: grid;
+      gap: 2px;
+    }
+
+    .analysis-item {
+      display: grid;
+      grid-template-columns: minmax(170px, 0.28fr) minmax(0, 1fr);
+      gap: 18px;
+      padding: 13px 0;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .analysis-item:last-child {
+      border-bottom: 0;
+    }
+
+    .analysis-item h3 {
+      color: var(--ink);
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    .analysis-item p {
+      color: #344054;
+    }
+
+    .content-blocks {
+      display: grid;
+      gap: 14px;
+    }
+
+    .content-block {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 15px;
+      background: var(--panel-soft);
+    }
+
+    .content-block h3 {
+      margin-bottom: 8px;
+    }
+
+    .content-block p + p {
+      margin-top: 8px;
+    }
+
+    .content-block.callout {
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      color: #253b80;
+    }
+
+    .metric-mini-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .metric-mini {
+      border: 1px solid var(--line-soft);
+      border-radius: 12px;
+      padding: 10px;
+      background: var(--panel);
+    }
+
+    .metric-mini-value {
+      display: block;
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .metric-mini-label {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .metric-mini-note {
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .narrative-dominant {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .scenario-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .chart-card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel-soft);
+      padding: 12px;
+      position: relative;
+    }
+
+    .chart-card-wide {
+      grid-column: 1 / -1;
+    }
+
+    .chart-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      margin: 0 0 6px;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      overflow: visible;
+    }
+
+    #terminalBandChart {
+      min-height: 350px;
+    }
+
+    #scenarioPathChart {
+      min-height: 390px;
+    }
+
+    .axis text {
+      fill: var(--muted);
+      font-size: 11px;
+    }
+
+    .axis path,
+    .axis line {
+      stroke: var(--line);
+    }
+
+    .grid-line {
+      stroke: var(--line-soft);
+    }
+
+    .chart-label {
+      fill: var(--muted);
+      font-size: 11px;
+    }
+
+    .chart-tooltip {
+      position: fixed;
+      z-index: 20;
+      min-width: 220px;
+      max-width: 320px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(-50%, calc(-100% - 14px));
+      background: rgba(17, 24, 39, 0.96);
+      color: #ffffff;
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      box-shadow: 0 8px 24px rgba(16, 24, 40, 0.18);
+      transition: opacity 120ms ease;
+    }
+
+    .chart-tooltip strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .scenario-card {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .scenario-card + .scenario-card {
+      margin-top: 12px;
+    }
+
+    .scenario-card-header {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--panel-soft);
+    }
+
+    .scenario-card-body {
+      padding: 14px 16px 16px;
+    }
+
+    details {
+      padding: 0;
+      margin-top: 12px;
+      overflow: hidden;
+    }
+
+    details summary {
+      cursor: pointer;
+      padding: 13px 15px;
+      color: var(--ink);
+      font-weight: 750;
+      list-style: none;
+      background: var(--panel-soft);
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details summary::after {
+      content: "+";
+      float: right;
+      color: var(--muted);
+    }
+
+    details[open] summary::after {
+      content: "-";
+    }
+
+    .details-body {
+      padding: 14px 15px 16px;
+    }
+
+    .watch-grid,
+    .analogue-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+
+    .watch-card,
+    .analogue-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      background: var(--panel-soft);
+      box-shadow: none;
+    }
+
+    .watch-card h3,
+    .analogue-card h3 {
+      margin-bottom: 8px;
+    }
+
+    .signal-columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .scenario-meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .signal-box {
+      border-radius: 12px;
+      padding: 10px;
+      background: #f8fafc;
+      border: 1px solid var(--line-soft);
+      font-size: 13px;
+    }
+
+    .signal-box strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+    }
+
+    table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line-soft);
+      padding: 10px 9px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--panel-soft);
+      color: var(--muted);
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .numeric {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .source-note {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 10px;
+    }
+
+    @media (max-width: 900px) {
+      .hero,
+      .grid-wide,
+      .scenario-layout,
+      .narrative-dominant {
+        grid-template-columns: 1fr;
+      }
+
+      header,
+      main {
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+
+      .metric,
+      .signal-columns,
+      .analysis-item {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="hero">
+      <div>
+        <div id="badges" class="badge-row"></div>
+        <p class="eyebrow">Stock Narrative Research</p>
+        <h1 id="title">{{REPORT_TITLE}}</h1>
+        <p id="subtitle" class="subtitle">Generated {{GENERATED_AT}}</p>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel note" id="projectionNote"></section>
+
+    <section class="stat-grid" id="stats"></section>
+
+    <section class="grid-wide">
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Executive Summary</h2>
+            <p class="panel-subtitle">The report's one-minute version and setup, pulled from the authored analysis.</p>
+          </div>
+        </div>
+        <div id="executiveSummary"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Financial Snapshot</h2>
+            <p class="panel-subtitle">Current baseline metrics used by the scenario model.</p>
+          </div>
+        </div>
+        <div id="financialSnapshot"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Narrative Map</h2>
+          <p class="panel-subtitle">What bulls and bears are really disagreeing about.</p>
+        </div>
+      </div>
+      <div id="narrativeMap"></div>
+    </section>
+
+    <section class="section-stack" id="coreSections"></section>
+
+    <section class="panel" id="historicalGrowthSection" hidden>
+      <div class="panel-header">
+        <div>
+          <h2>Historical Growth Anchor</h2>
+          <p class="panel-subtitle">Past growth and margin context for judging future scenario assumptions.</p>
+        </div>
+      </div>
+      <div id="historicalGrowth"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Scenario-Conditioned Implied Bands</h2>
+          <p class="panel-subtitle">Illustrative, assumption-driven ranges from the deterministic scenario calculator.</p>
+        </div>
+      </div>
+      <div class="scenario-layout">
+        <div class="chart-card chart-card-wide">
+          <div class="chart-title">
+            <span>Terminal implied share price band by scenario</span>
+            <span>Hover bands for details</span>
+          </div>
+          <svg id="terminalBandChart" role="img" aria-label="Terminal scenario-conditioned implied share price bands"></svg>
+        </div>
+        <div class="chart-card chart-card-wide">
+          <div class="chart-title">
+            <span>Median implied path and terminal distribution</span>
+            <span id="monteCarloMeta">10,000 draws; hover paths or distribution bars</span>
+          </div>
+          <svg id="scenarioPathChart" role="img" aria-label="Scenario median implied price paths and probability-weighted terminal price distribution"></svg>
+          <div id="monteCarloSummary"></div>
+        </div>
+      </div>
+      <div id="scenarioTable"></div>
+      <div id="scenarioCards"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>What To Watch</h2>
+          <p class="panel-subtitle">Signals that would confirm or break the scenario paths.</p>
+        </div>
+      </div>
+      <div id="watchItems"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Historical Analogues</h2>
+          <p class="panel-subtitle">Pattern matches, lessons, and why each analogy can mislead.</p>
+        </div>
+      </div>
+      <div id="analogues"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Claim Table</h2>
+          <p class="panel-subtitle">Evidence-backed claims extracted before writing prose.</p>
+        </div>
+      </div>
+      <div id="claims"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Source Pack</h2>
+          <p class="panel-subtitle">Primary sources for facts; secondary sources for interpretation.</p>
+        </div>
+      </div>
+      <div id="sources"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Source Notes and Limitations</h2>
+          <p class="panel-subtitle">Data gaps, source caveats, and projection limitations.</p>
+        </div>
+      </div>
+      <div id="limitations"></div>
+    </section>
+  </main>
+
+  <div id="chartTooltip" class="chart-tooltip" role="status" aria-live="polite"></div>
+  <script id="report-data" type="application/json">{{REPORT_JSON}}</script>
+
+  <script>
+    const report = JSON.parse(document.getElementById("report-data").textContent);
+    const tooltip = d3.select("#chartTooltip");
+
+    function render() {
+      const company = report.company || {};
+      document.getElementById("badges").innerHTML = [
+        company.ticker,
+        company.currency,
+        company.exchange,
+        company.sector,
+        company.industry
+      ].filter(Boolean).map((item) => `<span class="badge">${escapeHtml(item)}</span>`).join("");
+
+      document.getElementById("subtitle").textContent = `Generated ${formatDate(report.generated_at || "{{GENERATED_AT}}")}`;
+      document.getElementById("projectionNote").textContent = report.projection_note || "";
+
+      renderStats();
+      renderExecutiveSummary();
+      renderFinancialSnapshot();
+      renderNarrative(report.sections?.narrative_map);
+      renderCoreSections();
+      renderHistoricalGrowth();
+      renderScenarioCharts(report.scenario_data || {});
+      renderScenarioTable(report.scenario_data || {});
+      renderScenarioCards(report.scenario_data || {});
+      renderWatchItems(report.watch_items || []);
+      renderAnalogues(report.historical_analogues || []);
+      renderClaims(report.claim_table || []);
+      renderSources(report.source_pack || []);
+      renderKeyValues("limitations", report.source_notes_and_limitations, { prose: true });
+    }
+
+    function renderStats() {
+      const snapshot = report.financial_snapshot || {};
+      const scenarioData = report.scenario_data || {};
+      const baseline = scenarioData.baseline || {};
+      const items = [
+        ["Current price", snapshot.current_share_price || money(scenarioData.current_price)],
+        ["Market cap", snapshot.market_cap],
+        ["TTM revenue", snapshot.ttm_revenue || compactMoney(baseline.revenue)],
+        ["TTM EPS", snapshot.ttm_eps || moneyDecimal(baseline.eps)],
+        ["Gross margin", snapshot.gross_margin],
+        ["Net margin", snapshot.net_margin || percent(baseline.net_margin)],
+        ["P/S", snapshot.price_to_sales_ttm || snapshot.ttm_price_to_sales || snapshot.ps_ratio],
+        ["P/E", snapshot.trailing_pe || snapshot.ttm_price_to_earnings || snapshot.pe_ratio],
+        ["Cash & investments", snapshot.cash_and_investments || snapshot.cash]
+      ].filter(([, value]) => hasValue(value)).map(([label, value]) => [label, shortMetricValue(value)]);
+
+      document.getElementById("stats").innerHTML = items.map(([label, value]) => statHtml(label, value)).join("");
+    }
+
+    function statHtml(label, value) {
+      return `
+        <div class="stat">
+          <span class="stat-value">${escapeHtml(value)}</span>
+          <span class="stat-label">${escapeHtml(label)}</span>
+        </div>
+      `;
+    }
+
+    function renderFinancialSnapshot() {
+      const snapshot = report.financial_snapshot || {};
+      const compactSnapshot = Object.fromEntries(
+        Object.entries(snapshot).filter(([key, value]) => hasValue(value) && !["source_note", "notes"].includes(key))
+      );
+      renderKeyValues("financialSnapshot", compactSnapshot, { prose: false, compactValues: true });
+    }
+
+    function renderExecutiveSummary() {
+      const orientation = report.sections?.orientation || {};
+      const talkTrack = report.sections?.final_talk_track || {};
+      const rows = [
+        ["One-minute version", talkTrack.one_minute_version],
+        ["Dominant question", orientation.dominant_question],
+        ["Current setup", orientation.current_setup],
+        ["Time horizon", orientation.time_horizon],
+        ["Base-rate warning", orientation.base_rate_warning]
+      ].filter(([, value]) => hasValue(value));
+      document.getElementById("executiveSummary").innerHTML = rows.map(([label, value]) => `
+        <div class="metric">
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(value)}</span>
+        </div>
+      `).join("");
+    }
+
+    function renderCoreSections() {
+      const sections = report.sections || {};
+      const items = [
+        ["Business Model", sections.business_model],
+        ["Why Now", sections.why_now],
+        ["Industry Context", sections.industry_context],
+        ["Financial Math", sections.financial_math],
+        ["Final Talk Track", sections.final_talk_track]
+      ].filter(([, value]) => !isBlank(value));
+
+      document.getElementById("coreSections").innerHTML = items.map(([title, value]) => `
+        <section class="panel">
+          <div class="panel-header"><h2>${escapeHtml(title)}</h2></div>
+          ${sectionBody(value, { layout: "rows" })}
+        </section>
+      `).join("");
+    }
+
+    function renderHistoricalGrowth() {
+      const section = report.sections?.historical_growth || report.historical_growth || report.financial_snapshot?.historical_growth;
+      const container = document.getElementById("historicalGrowthSection");
+      if (isBlank(section)) {
+        container.hidden = true;
+        return;
+      }
+      container.hidden = false;
+      renderKeyValues("historicalGrowth", section, { prose: true });
+    }
+
+    function renderKeyValues(id, value, options = {}) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (isBlank(value)) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = sectionBody(value, options);
+    }
+
+    function sectionBody(value, options = {}) {
+      if (typeof value === "string") return `<p>${escapeHtml(value)}</p>`;
+      if (Array.isArray(value)) {
+        return isContentBlockArray(value) ? renderContentBlocks(value) : renderBullets(value);
+      }
+      const entries = Object.entries(value || {}).filter(([, val]) => hasValue(val));
+      if (!entries.length) return "";
+      if (options.layout === "rows") {
+        return `<div class="analysis-list">${entries.map(([key, val]) => `
+          <div class="analysis-item">
+            <h3>${escapeHtml(labelize(key))}</h3>
+            ${valueHtml(val)}
+          </div>
+        `).join("")}</div>`;
+      }
+      if (options.prose !== false) {
+        return `<div class="prose-grid">${entries.map(([key, val]) => `
+          <div class="mini-card">
+            <h3>${escapeHtml(labelize(key))}</h3>
+            ${valueHtml(val)}
+          </div>
+        `).join("")}</div>`;
+      }
+      return `<div class="kv-list">${entries.map(([key, val]) => `
+        <div class="metric">
+          <strong>${escapeHtml(labelize(key))}</strong>
+          <span>${escapeHtml(options.compactValues ? shortMetricValue(formatValue(val)) : formatValue(val))}</span>
+        </div>
+      `).join("")}</div>`;
+    }
+
+    function renderNarrative(map) {
+      const el = document.getElementById("narrativeMap");
+      if (!map) return;
+      el.innerHTML = `
+        <div class="narrative-dominant">
+          <div class="mini-card"><h3>Dominant Narrative</h3><p>${escapeHtml(map.dominant || "")}</p></div>
+          <div class="mini-card"><h3>Consensus</h3><p>${escapeHtml(map.consensus || "")}</p></div>
+        </div>
+        <div class="prose-grid">
+          <div class="mini-card"><h3>Bull Case</h3><p>${escapeHtml(map.bull || "")}</p></div>
+          <div class="mini-card"><h3>Bear Case</h3><p>${escapeHtml(map.bear || "")}</p></div>
+          <div class="mini-card"><h3>Counter-Narrative</h3><p>${escapeHtml(map.counter_narrative || "")}</p></div>
+          <div class="mini-card"><h3>Agreements</h3>${renderBullets(map.agreements || [])}</div>
+        </div>
+        <div class="mini-card" style="margin-top: 14px;"><h3>Cruxes</h3>${renderBullets(map.cruxes || [])}</div>
+      `;
+    }
+
+    function isContentBlockArray(value) {
+      return value.some((item) => item && typeof item === "object" && typeof item.type === "string");
+    }
+
+    function renderContentBlocks(blocks) {
+      return `<div class="content-blocks">${blocks.filter((block) => !isBlank(block)).map(renderContentBlock).join("")}</div>`;
+    }
+
+    function renderContentBlock(block) {
+      if (typeof block === "string") return `<p>${escapeHtml(block)}</p>`;
+      const type = block.type || "section";
+      if (type === "paragraph") return `<p>${escapeHtml(block.body || "")}</p>`;
+      if (type === "table") return renderTableBlock(block);
+      if (type === "metric_grid") return renderMetricGridBlock(block);
+
+      return `
+        <article class="content-block ${escapeAttr(type)}">
+          ${block.title ? `<h3>${escapeHtml(block.title)}</h3>` : ""}
+          ${block.body ? `<p>${escapeHtml(block.body)}</p>` : ""}
+          ${block.metrics?.length ? renderMetricGrid(block.metrics) : ""}
+          ${block.items?.length ? renderBullets(block.items) : ""}
+          ${block.assumptions?.length ? `<h3 style="margin-top: 12px;">Assumptions</h3>${renderBullets(block.assumptions)}` : ""}
+          ${block.columns?.length && block.rows?.length ? table(block.columns, block.rows) : ""}
+          ${block.source_note ? `<p class="source-note">${escapeHtml(block.source_note)}</p>` : ""}
+        </article>
+      `;
+    }
+
+    function renderTableBlock(block) {
+      return `
+        <article class="content-block table-block">
+          ${block.title ? `<h3>${escapeHtml(block.title)}</h3>` : ""}
+          ${block.body ? `<p>${escapeHtml(block.body)}</p>` : ""}
+          ${table(block.columns || [], block.rows || [])}
+          ${block.source_note ? `<p class="source-note">${escapeHtml(block.source_note)}</p>` : ""}
+        </article>
+      `;
+    }
+
+    function renderMetricGridBlock(block) {
+      return `
+        <article class="content-block metric-grid-block">
+          ${block.title ? `<h3>${escapeHtml(block.title)}</h3>` : ""}
+          ${block.body ? `<p>${escapeHtml(block.body)}</p>` : ""}
+          ${renderMetricGrid(block.metrics || [])}
+          ${block.source_note ? `<p class="source-note">${escapeHtml(block.source_note)}</p>` : ""}
+        </article>
+      `;
+    }
+
+    function renderMetricGrid(metrics) {
+      return `
+        <div class="metric-mini-grid">
+          ${metrics.filter((metric) => hasValue(metric?.value) || hasValue(metric?.note)).map((metric) => `
+            <div class="metric-mini">
+              <span class="metric-mini-value">${escapeHtml(metric.value || "n/a")}</span>
+              <span class="metric-mini-label">${escapeHtml(metric.label || "")}</span>
+              ${metric.note ? `<span class="metric-mini-note">${escapeHtml(metric.note)}</span>` : ""}
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderScenarioCharts(data) {
+      renderTerminalBandChart(data);
+      renderScenarioPathChart(data);
+    }
+
+    function scenarioTerminalRows(data) {
+      return (data.scenarios || []).map((scenario) => {
+        const periods = scenario.periods || [];
+        const terminal = periods[periods.length - 1] || {};
+        const band = terminal.blended_price || terminal.ps_implied_price || terminal.pe_implied_price || {};
+        return {
+          name: scenario.name || "Unnamed scenario",
+          stance: scenario.stance || "",
+          probability: numeric(scenario.probability),
+          description: scenario.description || "",
+          label: terminal.label || "Terminal",
+          low: numeric(band.low),
+          median: numeric(band.median),
+          high: numeric(band.high),
+          revenue: numeric(terminal.revenue),
+          netMargin: numeric(terminal.net_margin),
+          eps: numeric(terminal.eps)
+        };
+      }).filter((row) => Number.isFinite(row.median));
+    }
+
+    function renderTerminalBandChart(data) {
+      const svg = d3.select("#terminalBandChart");
+      svg.selectAll("*").remove();
+      const rows = scenarioTerminalRows(data);
+      const currentPrice = numeric(data.current_price);
+      if (!rows.length) {
+        svg.append("text").attr("x", 20).attr("y", 40).attr("class", "chart-label").text("No numeric scenario data.");
+        return;
+      }
+
+      const width = 720;
+      const height = Math.max(330, rows.length * 56 + 90);
+      const margin = { top: 26, right: 42, bottom: 48, left: 210 };
+      svg.attr("viewBox", `0 0 ${width} ${height}`);
+
+      const xMax = d3.max(rows, (d) => d.high) || 1;
+      const x = d3.scaleLinear()
+        .domain([0, Math.max(xMax, currentPrice || 0) * 1.08])
+        .nice()
+        .range([margin.left, width - margin.right]);
+      const y = d3.scaleBand()
+        .domain(rows.map((d) => d.name))
+        .range([margin.top, height - margin.bottom])
+        .padding(0.34);
+      const color = scenarioColorScale(rows);
+
+      svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(0,${height - margin.bottom})`)
+        .call(d3.axisBottom(x).ticks(6).tickFormat((d) => money(d)));
+
+      svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(${margin.left},0)`)
+        .call(d3.axisLeft(y).tickSize(0))
+        .call((g) => g.select(".domain").remove());
+
+      svg.append("text")
+        .attr("x", width - margin.right)
+        .attr("y", height - 8)
+        .attr("text-anchor", "end")
+        .attr("class", "chart-label")
+        .text("Implied share price (USD)");
+
+      if (Number.isFinite(currentPrice)) {
+        svg.append("line")
+          .attr("x1", x(currentPrice))
+          .attr("x2", x(currentPrice))
+          .attr("y1", margin.top - 8)
+          .attr("y2", height - margin.bottom)
+          .attr("stroke", "var(--muted-2)")
+          .attr("stroke-dasharray", "4 4");
+        svg.append("text")
+          .attr("x", x(currentPrice) + 6)
+          .attr("y", margin.top - 12)
+          .attr("class", "chart-label")
+          .text(`Current ${money(currentPrice)}`);
+      }
+
+      const row = svg.selectAll(".terminal-row")
+        .data(rows)
+        .join("g")
+        .attr("class", "terminal-row")
+        .attr("transform", (d) => `translate(0,${y(d.name) + y.bandwidth() / 2})`);
+
+      row.append("line")
+        .attr("x1", (d) => x(d.low))
+        .attr("x2", (d) => x(d.high))
+        .attr("y1", 0)
+        .attr("y2", 0)
+        .attr("stroke", (d) => color(d.name))
+        .attr("stroke-width", 8)
+        .attr("stroke-linecap", "round")
+        .attr("opacity", 0.34);
+
+      row.append("circle")
+        .attr("cx", (d) => x(d.median))
+        .attr("cy", 0)
+        .attr("r", 6)
+        .attr("fill", (d) => color(d.name))
+        .attr("stroke", "#ffffff")
+        .attr("stroke-width", 2);
+
+      row.append("text")
+        .attr("x", (d) => x(d.high) + 8)
+        .attr("y", 4)
+        .attr("class", "chart-label")
+        .text((d) => money(d.median));
+
+      row.append("rect")
+        .attr("x", margin.left)
+        .attr("y", -18)
+        .attr("width", width - margin.left - margin.right)
+        .attr("height", 36)
+        .attr("fill", "transparent")
+        .on("mousemove", (event, d) => showTooltip(event, terminalTooltip(d)))
+        .on("mouseleave", hideTooltip);
+    }
+
+    function renderMonteCarloSummary(summary) {
+      const el = document.getElementById("monteCarloSummary");
+      if (!el) return;
+      if (!summary || isBlank(summary)) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = renderMetricGrid([
+        { label: "Mean", value: money(numeric(summary.mean)) },
+        { label: "Median", value: money(numeric(summary.median)) },
+        { label: "P10 / P90", value: `${money(numeric(summary.p10))} / ${money(numeric(summary.p90))}` }
+      ]);
+    }
+
+    function renderScenarioPathChart(data) {
+      const svg = d3.select("#scenarioPathChart");
+      svg.selectAll("*").remove();
+      const currentPrice = numeric(data.current_price);
+      const scenarios = data.scenarios || [];
+      const monteCarlo = data.monte_carlo || {};
+      const summary = monteCarlo.summary || {};
+      const histogram = (monteCarlo.histogram || []).filter((bin) => (
+        Number.isFinite(numeric(bin.low)) &&
+        Number.isFinite(numeric(bin.high)) &&
+        Number.isFinite(numeric(bin.midpoint)) &&
+        Number.isFinite(numeric(bin.probability))
+      ));
+      const meta = document.getElementById("monteCarloMeta");
+      if (meta) {
+        meta.textContent = monteCarlo.iterations ? `${d3.format(",")(monteCarlo.iterations)} draws; hover paths or distribution bars` : "Hover paths or distribution bars";
+      }
+      renderMonteCarloSummary(summary);
+      const rows = scenarios.flatMap((scenario) => {
+        const points = (scenario.periods || []).map((period, index) => ({
+          scenario: scenario.name || "Unnamed scenario",
+          stance: scenario.stance || "",
+          index: Number.isFinite(currentPrice) ? index + 1 : index,
+          label: period.label || `Period ${index + 1}`,
+          low: numeric(period.blended_price?.low ?? period.ps_implied_price?.low ?? period.pe_implied_price?.low),
+          median: numeric(period.blended_price?.median ?? period.ps_implied_price?.median ?? period.pe_implied_price?.median),
+          high: numeric(period.blended_price?.high ?? period.ps_implied_price?.high ?? period.pe_implied_price?.high),
+          revenue: numeric(period.revenue),
+          revenueGrowth: numeric(period.revenue_growth),
+          netMargin: numeric(period.net_margin),
+          eps: numeric(period.eps)
+        }));
+        if (!Number.isFinite(currentPrice)) return points;
+        return [{
+          scenario: scenario.name || "Unnamed scenario",
+          stance: scenario.stance || "",
+          index: 0,
+          label: "Current",
+          low: currentPrice,
+          median: currentPrice,
+          high: currentPrice,
+          isCurrent: true
+        }, ...points];
+      }).filter((row) => Number.isFinite(row.median));
+
+      if (!rows.length) {
+        svg.append("text").attr("x", 20).attr("y", 40).attr("class", "chart-label").text("No numeric scenario data.");
+        return;
+      }
+
+      const width = 1120;
+      const height = 390;
+      const margin = { top: 34, right: 92, bottom: 54, left: 72 };
+      const pathRight = 720;
+      const distributionGap = 86;
+      const distributionLeft = pathRight + distributionGap;
+      const distributionRight = width - margin.right;
+      svg.attr("viewBox", `0 0 ${width} ${height}`);
+
+      const maxIndex = d3.max(rows, (d) => d.index) || 1;
+      const pathYMax = d3.max(rows, (d) => d.high || d.median) || 1;
+      const distributionYMax = d3.max(histogram, (d) => numeric(d.high)) || 1;
+      const summaryYMax = d3.max(["p10", "median", "p90"].map((key) => numeric(summary[key])).filter(Number.isFinite)) || 1;
+      const yMax = Math.max(pathYMax, distributionYMax, summaryYMax, currentPrice || 0);
+      const x = d3.scaleLinear().domain([0, maxIndex]).range([margin.left, pathRight]);
+      const y = d3.scaleLinear().domain([0, yMax * 1.08]).nice().range([height - margin.bottom, margin.top]);
+      const probabilityX = d3.scaleLinear()
+        .domain([0, (d3.max(histogram, (d) => numeric(d.probability)) || 1) * 1.08])
+        .nice()
+        .range([distributionLeft, distributionRight]);
+      const color = scenarioColorScale(scenarios.map((scenario) => ({ name: scenario.name })));
+      const labels = new Map(rows.map((row) => [row.index, row.label]));
+
+      svg.append("g")
+        .attr("class", "grid")
+        .attr("transform", `translate(${margin.left},0)`)
+        .call(d3.axisLeft(y).ticks(6).tickSize(-(distributionRight - margin.left)).tickFormat(""))
+        .call((g) => g.selectAll("line").attr("class", "grid-line"))
+        .call((g) => g.select(".domain").remove());
+
+      svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(0,${height - margin.bottom})`)
+        .call(d3.axisBottom(x).tickValues(d3.range(0, maxIndex + 1)).tickFormat((d) => labels.get(d) || d));
+
+      svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(${margin.left},0)`)
+        .call(d3.axisLeft(y).ticks(6).tickFormat((d) => money(d)));
+
+      svg.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(0,${height - margin.bottom})`)
+        .call(d3.axisBottom(probabilityX).ticks(4).tickFormat((d) => d3.format(".0%")(d)));
+
+      svg.append("text")
+        .attr("x", margin.left)
+        .attr("y", margin.top - 14)
+        .attr("class", "chart-label")
+        .text("Scenario median path");
+
+      svg.append("text")
+        .attr("x", distributionLeft)
+        .attr("y", margin.top - 14)
+        .attr("class", "chart-label")
+        .text("Monte Carlo terminal distribution");
+
+      svg.append("text")
+        .attr("x", distributionRight)
+        .attr("y", height - 12)
+        .attr("text-anchor", "end")
+        .attr("class", "chart-label")
+        .text("Sample probability");
+
+      if (Number.isFinite(currentPrice)) {
+        svg.append("line")
+          .attr("x1", margin.left)
+          .attr("x2", distributionRight)
+          .attr("y1", y(currentPrice))
+          .attr("y2", y(currentPrice))
+          .attr("stroke", "var(--muted-2)")
+          .attr("stroke-dasharray", "4 4");
+      }
+
+      const grouped = d3.group(rows, (d) => d.scenario);
+      const line = d3.line().x((d) => x(d.index)).y((d) => y(d.median)).curve(d3.curveMonotoneX);
+      const area = d3.area()
+        .x((d) => x(d.index))
+        .y0((d) => y(d.low ?? d.median))
+        .y1((d) => y(d.high ?? d.median))
+        .curve(d3.curveMonotoneX);
+
+      for (const [name, values] of grouped) {
+        svg.append("path")
+          .datum(values)
+          .attr("fill", color(name))
+          .attr("opacity", 0.1)
+          .attr("d", area);
+        svg.append("path")
+          .datum(values)
+          .attr("fill", "none")
+          .attr("stroke", color(name))
+          .attr("stroke-width", 2.25)
+          .attr("d", line);
+      }
+
+      svg.selectAll(".scenario-point")
+        .data(rows)
+        .join("circle")
+        .attr("class", "scenario-point")
+        .attr("cx", (d) => x(d.index))
+        .attr("cy", (d) => y(d.median))
+        .attr("r", (d) => d.isCurrent ? 4 : 5)
+        .attr("fill", (d) => d.isCurrent ? "var(--ink)" : color(d.scenario))
+        .attr("stroke", "#ffffff")
+        .attr("stroke-width", 1.8)
+        .on("mousemove", (event, d) => showTooltip(event, pathTooltip(d)))
+        .on("mouseleave", hideTooltip);
+
+      const referenceMarkers = [
+        { key: "p10", label: "P10", value: numeric(summary.p10), stroke: "var(--accent)", opacity: 0.25 },
+        { key: "p25", label: "P25", value: numeric(summary.p25), stroke: "var(--accent)", opacity: 0.32 },
+        { key: "median", label: "P50", value: numeric(summary.median), stroke: "var(--accent)", opacity: 0.55 },
+        { key: "p75", label: "P75", value: numeric(summary.p75), stroke: "var(--accent)", opacity: 0.32 },
+        { key: "p90", label: "P90", value: numeric(summary.p90), stroke: "var(--accent)", opacity: 0.25 },
+        { key: "current", label: "Current", value: currentPrice, stroke: "var(--muted-2)", opacity: 1 }
+      ].filter((marker) => Number.isFinite(marker.value));
+
+      const markerLabels = referenceMarkers
+        .map((marker) => ({ ...marker, y: y(marker.value), labelY: y(marker.value) }))
+        .sort((a, b) => a.y - b.y);
+      for (let index = 1; index < markerLabels.length; index += 1) {
+        markerLabels[index].labelY = Math.max(markerLabels[index].labelY, markerLabels[index - 1].labelY + 13);
+      }
+
+      for (const marker of referenceMarkers) {
+        svg.append("line")
+          .attr("x1", distributionLeft)
+          .attr("x2", distributionRight)
+          .attr("y1", y(marker.value))
+          .attr("y2", y(marker.value))
+          .attr("stroke", marker.stroke)
+          .attr("stroke-dasharray", marker.key === "current" ? "4 4" : null)
+          .attr("opacity", marker.opacity);
+      }
+
+      for (const marker of markerLabels) {
+        svg.append("text")
+          .attr("x", distributionRight + 8)
+          .attr("y", marker.labelY + 4)
+          .attr("class", "chart-label")
+          .text(`${marker.label} ${money(marker.value)}`);
+      }
+
+      svg.selectAll(".histogram-bin")
+        .data(histogram)
+        .join("rect")
+        .attr("class", "histogram-bin")
+        .attr("x", distributionLeft)
+        .attr("y", (d) => y(numeric(d.high)))
+        .attr("width", (d) => Math.max(1, probabilityX(numeric(d.probability)) - distributionLeft))
+        .attr("height", (d) => Math.max(1, y(numeric(d.low)) - y(numeric(d.high)) - 1))
+        .attr("fill", "var(--accent)")
+        .attr("opacity", 0.34)
+        .on("mousemove", (event, d) => showTooltip(event, distributionTooltip(d)))
+        .on("mouseleave", hideTooltip);
+    }
+
+    function renderScenarioTable(data) {
+      const rows = scenarioTerminalRows(data).map((row) => [
+        row.name,
+        `<span class="pill ${escapeAttr(row.stance)}">${escapeHtml(row.stance || "scenario")}</span>`,
+        probability(row.probability),
+        row.label,
+        money(row.low),
+        money(row.median),
+        money(row.high),
+        compactMoney(row.revenue),
+        percent(row.netMargin)
+      ]);
+      document.getElementById("scenarioTable").innerHTML = table(
+        ["Scenario", "Stance", "Probability", "Terminal", "Low", "Median", "High", "Revenue", "Net Margin"],
+        rows,
+        { htmlColumns: [1], numericColumns: [2, 4, 5, 6, 7, 8] }
+      );
+    }
+
+    function renderScenarioCards(data) {
+      const scenarios = data.scenarios || [];
+      const el = document.getElementById("scenarioCards");
+      if (!scenarios.length) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = scenarios.map((scenario, index) => {
+        const periodRows = (scenario.periods || []).map((period) => {
+          const band = period.blended_price || period.ps_implied_price || period.pe_implied_price || {};
+          return [
+            period.label || "",
+            compactMoney(period.revenue),
+            percent(period.revenue_growth),
+            percent(period.net_margin),
+            moneyDecimal(period.eps),
+            percent(period.eps_growth),
+            multipleBand(period.ps_multiple),
+            multipleBand(period.pe_multiple),
+            blendLabel(period.blend_weights),
+            money(band.median)
+          ];
+        });
+        return `
+          <details ${index === 0 ? "open" : ""}>
+            <summary>${escapeHtml(scenario.name || "Scenario")} ${scenario.stance ? `<span class="pill ${escapeAttr(scenario.stance)}">${escapeHtml(scenario.stance)}</span>` : ""}</summary>
+            <div class="details-body">
+              ${Number.isFinite(numeric(scenario.probability)) ? `<p class="scenario-meta">Conditional probability: ${probability(numeric(scenario.probability))}</p>` : ""}
+              <p>${escapeHtml(scenario.description || "")}</p>
+              ${scenario.assumption_summary ? `<p class="muted" style="margin-top: 8px;">${escapeHtml(scenario.assumption_summary)}</p>` : ""}
+              ${renderCruxAssumptions(scenario.crux_assumptions || [])}
+              ${table(
+                ["Period", "Revenue", "Revenue Growth", "Net Margin", "EPS", "EPS Growth", "P/S", "P/E", "Blend", "Median"],
+                periodRows,
+                { numericColumns: [1, 2, 3, 4, 5, 9] }
+              )}
+              ${scenario.sensitivities?.length ? `<h3 style="margin-top: 14px;">Key Sensitivities</h3>${renderBullets(scenario.sensitivities)}` : ""}
+            </div>
+          </details>
+        `;
+      }).join("");
+    }
+
+    function renderCruxAssumptions(items) {
+      if (!items.length) return "";
+      return `
+        <h3 style="margin-top: 14px;">Crux Assumptions</h3>
+        <ul>
+          ${items.map((item) => {
+            if (typeof item === "string") return `<li>${escapeHtml(item)}</li>`;
+            const impact = item.impact ? ` <span class="muted">Impact: ${escapeHtml(item.impact)}</span>` : "";
+            return `<li><strong>${escapeHtml(item.crux || "Crux")}:</strong> ${escapeHtml(item.assumption || "")}${impact}</li>`;
+          }).join("")}
+        </ul>
+      `;
+    }
+
+    function renderWatchItems(items) {
+      const el = document.getElementById("watchItems");
+      el.innerHTML = `<div class="watch-grid">${items.map((item) => `
+        <article class="watch-card">
+          <h3>${escapeHtml(item.signal || "")}</h3>
+          <p class="muted">${escapeHtml(item.why_it_matters || "")}</p>
+          ${item.scenario_affected ? `<p class="scenario-meta">${escapeHtml(item.scenario_affected)}</p>` : ""}
+          <div class="signal-columns">
+            <div class="signal-box"><strong>Bull Signal</strong>${escapeHtml(item.bull_signal || "")}</div>
+            <div class="signal-box"><strong>Bear Signal</strong>${escapeHtml(item.bear_signal || "")}</div>
+          </div>
+        </article>
+      `).join("")}</div>`;
+    }
+
+    function renderAnalogues(items) {
+      document.getElementById("analogues").innerHTML = `<div class="analogue-grid">${items.map((item) => `
+        <article class="analogue-card">
+          <h3>${escapeHtml(item.analogue || "")}</h3>
+          ${item.narrative_type ? `<p><span class="pill">${escapeHtml(item.narrative_type)}</span></p>` : ""}
+          <p style="margin-top: 8px;"><strong>Why similar:</strong> ${escapeHtml(item.why_similar || "")}</p>
+          <p style="margin-top: 8px;"><strong>Lesson:</strong> ${escapeHtml(item.lesson || "")}</p>
+          <p style="margin-top: 8px;"><strong>Why misleading:</strong> ${escapeHtml(item.why_misleading || "")}</p>
+        </article>
+      `).join("")}</div>`;
+    }
+
+    function renderClaims(items) {
+      document.getElementById("claims").innerHTML = table(
+        ["Claim", "Source", "Date", "Type", "Side", "Confidence", "Metric"],
+        items.map((item) => [
+          item.claim,
+          item.source,
+          item.date,
+          item.type,
+          `<span class="pill ${escapeAttr(item.side)}">${escapeHtml(item.side || "")}</span>`,
+          item.confidence,
+          item.related_metric
+        ]),
+        { htmlColumns: [4] }
+      );
+    }
+
+    function renderSources(items) {
+      document.getElementById("sources").innerHTML = table(
+        ["Source", "Type", "Date", "Why It Matters", "Claims Supported"],
+        items.map((item) => [
+          item.url ? `<a href="${escapeAttr(item.url)}">${escapeHtml(item.source)}</a>` : escapeHtml(item.source),
+          item.type,
+          item.date,
+          item.why_it_matters,
+          (item.claims_supported || []).join("; ")
+        ]),
+        { htmlColumns: [0] }
+      );
+    }
+
+    function table(headers, rows, options = {}) {
+      const htmlColumns = new Set(options.htmlColumns || []);
+      const numericColumns = new Set(options.numericColumns || []);
+      return `
+        <div class="table-wrap">
+          <table>
+            <thead><tr>${headers.map((header, index) => `<th class="${numericColumns.has(index) ? "numeric" : ""}">${escapeHtml(header)}</th>`).join("")}</tr></thead>
+            <tbody>
+              ${rows.map((row) => `
+                <tr>${row.map((cell, index) => `<td class="${numericColumns.has(index) ? "numeric" : ""}">${htmlColumns.has(index) ? cell : escapeHtml(cell)}</td>`).join("")}</tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderBullets(items) {
+      if (!items?.length) return "";
+      return `<ul>${items.map((item) => `<li>${escapeHtml(formatValue(item))}</li>`).join("")}</ul>`;
+    }
+
+    function valueHtml(value) {
+      if (Array.isArray(value)) return isContentBlockArray(value) ? renderContentBlocks(value) : renderBullets(value);
+      if (value && typeof value === "object") return sectionBody(value);
+      return `<p>${escapeHtml(value ?? "")}</p>`;
+    }
+
+    function labelize(value) {
+      return String(value || "").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function formatValue(value) {
+      if (Array.isArray(value)) return value.map(formatValue).join(", ");
+      if (value && typeof value === "object") return Object.entries(value).map(([key, val]) => `${labelize(key)}: ${formatValue(val)}`).join("; ");
+      return value ?? "";
+    }
+
+    function shortMetricValue(value) {
+      const text = String(value ?? "");
+      const moneyAt = text.match(/^(\$[\d,.]+[BTM]?)\s+at\s+/i);
+      if (moneyAt) return moneyAt[1];
+      if (text.length > 28 && text.includes(";")) return text.split(";")[0];
+      return text;
+    }
+
+    function terminalTooltip(d) {
+      return `
+        <strong>${escapeHtml(d.name)}</strong>
+        ${Number.isFinite(d.probability) ? `<div>Scenario probability: ${probability(d.probability)}</div>` : ""}
+        <div>${escapeHtml(d.label)} band: ${money(d.low)} / ${money(d.median)} / ${money(d.high)}</div>
+        <div>Revenue: ${compactMoney(d.revenue)} | Net margin: ${percent(d.netMargin)}</div>
+        <div>EPS: ${moneyDecimal(d.eps)}</div>
+      `;
+    }
+
+    function distributionTooltip(d) {
+      return `
+        <strong>Monte Carlo bin</strong>
+        <div>Price range: ${money(numeric(d.low))} - ${money(numeric(d.high))}</div>
+        <div>Samples: ${d3.format(",")(d.count || 0)}</div>
+        <div>Probability: ${probability(numeric(d.probability))}</div>
+      `;
+    }
+
+    function pathTooltip(d) {
+      return `
+        <strong>${escapeHtml(d.scenario)}</strong>
+        <div>${escapeHtml(d.label)} median: ${money(d.median)}</div>
+        <div>Band: ${money(d.low)} / ${money(d.high)}</div>
+        ${Number.isFinite(d.revenue) ? `<div>Revenue: ${compactMoney(d.revenue)} (${percent(d.revenueGrowth)})</div>` : ""}
+        ${Number.isFinite(d.netMargin) ? `<div>Net margin: ${percent(d.netMargin)}</div>` : ""}
+        ${Number.isFinite(d.eps) ? `<div>EPS: ${moneyDecimal(d.eps)}</div>` : ""}
+      `;
+    }
+
+    function showTooltip(event, html) {
+      tooltip
+        .style("left", `${event.clientX}px`)
+        .style("top", `${event.clientY}px`)
+        .style("opacity", 1)
+        .html(html);
+    }
+
+    function hideTooltip() {
+      tooltip.style("opacity", 0);
+    }
+
+    function scenarioColorScale(rows) {
+      return d3.scaleOrdinal(d3.schemeTableau10).domain(rows.map((row) => row.name).filter(Boolean));
+    }
+
+    function numeric(value) {
+      return Number.isFinite(value) ? Number(value) : null;
+    }
+
+    function hasValue(value) {
+      if (value === undefined || value === null || value === "") return false;
+      if (Array.isArray(value)) return value.length > 0;
+      if (typeof value === "object") return Object.keys(value).length > 0;
+      return true;
+    }
+
+    function isBlank(value) {
+      if (!hasValue(value)) return true;
+      if (Array.isArray(value)) return value.every(isBlank);
+      if (isContentBlock(value)) {
+        return [
+          value.body,
+          value.metrics,
+          value.items,
+          value.assumptions,
+          value.rows
+        ].every(isBlank);
+      }
+      if (typeof value === "object") return Object.values(value).every(isBlank);
+      return false;
+    }
+
+    function isContentBlock(value) {
+      return value && typeof value === "object" && typeof value.type === "string" && (
+        "body" in value ||
+        "metrics" in value ||
+        "items" in value ||
+        "assumptions" in value ||
+        "rows" in value ||
+        "source_note" in value
+      );
+    }
+
+    function money(value) {
+      return Number.isFinite(value) ? `$${d3.format(",.0f")(value)}` : "";
+    }
+
+    function moneyDecimal(value) {
+      return Number.isFinite(value) ? `$${d3.format(",.2f")(value)}` : "";
+    }
+
+    function compactMoney(value) {
+      if (!Number.isFinite(value)) return "";
+      const abs = Math.abs(value);
+      if (abs >= 1e12) return `$${d3.format(",.1f")(value / 1e12)}T`;
+      if (abs >= 1e9) return `$${d3.format(",.1f")(value / 1e9)}B`;
+      if (abs >= 1e6) return `$${d3.format(",.1f")(value / 1e6)}M`;
+      return money(value);
+    }
+
+    function percent(value) {
+      return Number.isFinite(value) ? `${d3.format("+,.1f")(value * 100)}%` : "";
+    }
+
+    function probability(value) {
+      return Number.isFinite(value) ? `${d3.format(",.1f")(value * 100)}%` : "";
+    }
+
+    function multipleBand(band) {
+      if (!band) return "";
+      const values = [band.low, band.median, band.high].map((value) => Number.isFinite(value) ? `${d3.format(",.1f")(value)}x` : "");
+      return values.filter(Boolean).join(" / ");
+    }
+
+    function blendLabel(weights) {
+      if (!weights) return "";
+      const ps = Number.isFinite(weights.ps) ? `P/S ${d3.format(".0%")(weights.ps)}` : "";
+      const pe = Number.isFinite(weights.pe) ? `P/E ${d3.format(".0%")(weights.pe)}` : "";
+      return [ps, pe].filter(Boolean).join(" + ");
+    }
+
+    function formatDate(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value || "";
+      return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    }
+
+    function escapeAttr(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    render();
+  </script>
+</body>
+</html>
