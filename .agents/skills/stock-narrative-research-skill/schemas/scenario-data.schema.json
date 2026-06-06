@@ -30,7 +30,9 @@
         "revenue": { "type": "number" },
         "diluted_shares": { "type": "number" },
         "net_margin": { "type": ["number", "null"] },
-        "eps": { "type": ["number", "null"] }
+        "eps": { "type": ["number", "null"] },
+        "period": { "type": "string" },
+        "source_note": { "type": ["string", "null"] }
       }
     },
     "scenarios": {

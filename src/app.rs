@@ -60,6 +60,8 @@ impl Hooks for App {
 
     #[allow(unused_variables)]
     fn register_tasks(tasks: &mut Tasks) {
+        tasks.register(tasks::init_workspace::InitWorkspace);
+        tasks.register(tasks::generate_report::GenerateReport);
         // tasks-inject (do not remove)
     }
     async fn truncate(ctx: &AppContext) -> Result<()> {

@@ -18,3 +18,7 @@ target/
 
 *.sqlite
 *.sqlite-*
+
+# Generated stock narrative research report runs
+reports/stock-narrative-research/
+.agents/skills/stock-narrative-research-skill/outputs/
