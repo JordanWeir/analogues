@@ -1,24 +1,39 @@
-# Pipeline Phase Proposal
+# Blackboard Research Plan
 
 ## Purpose
 
-This proposal turns the research flow into a durable phase-by-phase contract for the Analogues narrative-scenario product.
+This proposal turns the research flow into a durable blackboard contract for the Analogues narrative-scenario product.
 
 The target flow is not just "gather data, ask agents, draft report." The product value comes from converting messy company-specific facts and market narratives into source-backed cruxes, then into scenario-conditioned financial paths and watchable signals.
 
-Each phase should be precise about:
+V1 should start with the blackboard approach. The durable center of the system is the run workspace: SQLite tables, source custody, entries, signals, obligations, worker runs, calculations, scenario assumptions, and rendered artifacts. Workers operate against this shared board and return structured outputs that can be reviewed, related, superseded, or promoted.
+
+Each worker lane should be precise about:
 
 - What it consumes.
 - What work it performs.
 - What durable tables or artifacts it writes.
-- What quality gates must pass before downstream phases trust it.
+- What quality gates must pass before downstream workers trust it.
 - How it contributes to the final user value.
 
-This document is intended to stay useful as implementation details evolve. The exact table names may change, but each phase should continue to have clear responsibilities and handoffs.
+This document is intended to stay useful as implementation details evolve. The exact table names may change, but each worker lane should continue to have clear responsibilities, board writes, and readiness gates.
 
-## Shared Ledgers
+## Blackboard Operating Model
 
-The pipeline should keep a few shared ledgers stable across phases.
+The board should make research state inspectable and resumable. Workers should not produce final prose as their main artifact. They should produce entries, signals, obligations, calculations, and artifact-ready records that later workers can consume.
+
+The first implementation should stay bounded:
+
+- Small initial worker set.
+- Deterministic bootstrap tasks for data ingest and schema setup.
+- SQLite-first calculations and query persistence.
+- Explicit max iterations, max worker runs, and token/cost budget.
+- Quality gates before entries become trusted downstream inputs.
+- Convergence based on report readiness, scenario readiness, and open obligation status.
+
+## Shared Board Ledgers
+
+The blackboard should keep a few shared ledgers stable across worker lanes.
 
 ### Data Ledger
 
@@ -44,13 +59,13 @@ Examples:
 - `claims`
 - source references on scenario assumptions, watch items, analogues, and content blocks
 
-### Insight Ledger
+### Entry Ledger
 
 Reviewed intermediate conclusions that are stronger than raw facts but not yet final report prose.
 
-This should be implemented as a first-class `insights` table, or as a blackboard-compatible `entries` table if we decide to use that naming. The important contract is that insights must be durable, source-linked where possible, and typed. Final report prose should consume these records rather than becoming the only place where intermediate judgment lives.
+This should be implemented as a first-class blackboard `entries` table. The important contract is that entries must be durable, source-linked where possible, typed, and reviewable. Final report prose should consume these records rather than becoming the only place where intermediate judgment lives.
 
-Useful insight types:
+Useful entry types:
 
 - `observation`: A raw or lightly interpreted fact.
 - `analysis`: A narrative interpretation or business implication.
@@ -58,6 +73,32 @@ Useful insight types:
 - `gap`: A missing data point or unresolved question.
 - `contradiction`: Evidence that cuts against another claim or narrative.
 - `crux`: A falsifiable assumption that materially changes the scenario path.
+
+### Signal Ledger
+
+Open work requests, contradictions, gaps, and follow-up questions that drive worker dispatch.
+
+Examples:
+
+- `research_question`
+- `source_gap`
+- `data_gap`
+- `contradiction`
+- `calculation_request`
+- `scenario_revision_request`
+- `refresh_invalidation`
+
+### Obligation Ledger
+
+Final-output commitments generated from reviewed board state.
+
+Examples:
+
+- Explain the key crux for each scenario.
+- Cite the source behind material factual claims.
+- Include confirming and breaking signals for each scenario.
+- Disclose delayed or stale SEC Company Facts.
+- Explain why each historical analogue is useful and where it can mislead.
 
 ### Scenario Ledger
 
@@ -90,11 +131,11 @@ Examples:
 - `artifacts`
 - `generated/report.html`
 
-## Phase 1: Initialize Workspace And Ingest Facts
+## Worker Lane 1: Initialize Workspace And Ingest Facts
 
 ### Goal
 
-Create a durable per-run workspace with enough deterministic data to support later agent research without repeatedly rediscovering baseline facts.
+Create a durable per-run workspace with enough deterministic data to support later worker research without repeatedly rediscovering baseline facts.
 
 ### Inputs
 
@@ -135,9 +176,9 @@ Create a durable per-run workspace with enough deterministic data to support lat
 
 ### Downstream Value
 
-This phase makes the run reproducible. It gives later phases a canonical database to inspect and prevents agent research from becoming a transient chat transcript.
+This lane makes the run reproducible. It gives later workers a canonical database to inspect and prevents agent research from becoming a transient chat transcript.
 
-## Phase 2: Build Canonical And Exploratory Fact Catalogs
+## Worker Lane 2: Build Canonical And Exploratory Fact Catalogs
 
 ### Goal
 
@@ -145,7 +186,7 @@ Separate standard fundamentals from company-specific SEC concepts that may conta
 
 ### Inputs
 
-- Raw SEC facts from Phase 1.
+- Raw SEC facts from Worker Lane 1.
 - Product-level canonical metric definitions: the product's required standard measures independent of any one company, such as revenue, gross profit, operating income, net income, EPS, diluted shares, cash, debt, operating cash flow, free cash flow, current price, and market capitalization.
 - Full company concept inventory from SEC Facts, including concept names, labels, descriptions, units, periods, filing metadata, and observation counts.
 - Canonical concept selection priors, such as known common `us-gaap` aliases. These should guide selection but not be treated as sufficient by themselves.
@@ -155,7 +196,7 @@ Separate standard fundamentals from company-specific SEC concepts that may conta
 
 - Link canonical metrics to company-specific SEC concepts using the full concept inventory. Alias heuristics can seed candidates, but an LLM-assisted review should be allowed to inspect the full inventory and decide whether the metric is directly available, should be calculated from multiple concepts, or is unavailable.
 - Compute or select core fundamentals such as revenue, net income, EPS, shares, cash, debt, and margins.
-- Build a derived concept catalog with concept/unit-level metadata. This is deterministic and can run immediately after ingest, but it belongs conceptually in this phase because it transforms raw facts into a queryable analysis surface.
+- Build a derived concept catalog with concept/unit-level metadata. This is deterministic and can run immediately after ingest, but it belongs conceptually in this lane because it transforms raw facts into a queryable analysis surface.
 - Classify period shape deterministically: instant, quarter, year-to-date, annual, or irregular.
 - Classify series usability: long history, medium history, sparse, event/point, stale, and plot-ready where applicable. This should not prevent agents from using non-plottable data; it tells downstream workers how to interpret and present the series.
 - Tag concepts with reusable narrative categories such as backlog, conversion, capex, lease, purchase obligation, debt, interest, working capital, capital return, dilution, margin, and tax. This should be implemented as a cost-conscious batch operation, not hundreds of one-off tool calls: deterministic keyword/description rules first, then optional LLM batch review for ambiguous or high-potential concepts.
@@ -185,9 +226,9 @@ Separate standard fundamentals from company-specific SEC concepts that may conta
 
 ### Downstream Value
 
-This phase is where SEC Facts start becoming a product advantage. Standard market data can show headline revenue and EPS; this catalog can expose the company-specific mechanics that make a narrative more precise.
+This lane is where SEC Facts start becoming a product advantage. Standard market data can show headline revenue and EPS; this catalog can expose the company-specific mechanics that make a narrative more precise.
 
-## Phase 3: Build Source Pack And Narrative Map
+## Worker Lane 3: Build Source Pack And Narrative Map
 
 ### Goal
 
@@ -200,7 +241,7 @@ Create a source-backed map of what the market currently believes, what managemen
 - Earnings calls and presentations when available.
 - Financial media and analyst commentary.
 - Company website and product pages.
-- Canonical and exploratory fact catalogs from Phase 2.
+- Canonical and exploratory fact catalogs from Worker Lane 2.
 
 ### Work
 
@@ -230,9 +271,9 @@ Create a source-backed map of what the market currently believes, what managemen
 
 ### Downstream Value
 
-This phase gives the system the "why now" context. It explains what investors are likely reacting to and gives later phases a structured debate to test against company facts.
+This lane gives the system the "why now" context. It explains what investors are likely reacting to and gives later workers a structured debate to test against company facts.
 
-## Phase 4: Triage Concepts Into Crux Candidates
+## Worker Lane 4: Triage Concepts Into Crux Candidates
 
 ### Goal
 
@@ -240,9 +281,9 @@ Connect the fact catalog to the narrative map and identify the few mechanics tha
 
 ### Inputs
 
-- Narrative map and claims from Phase 3.
-- Canonical fundamentals from Phase 2.
-- Exploratory SEC concept catalog from Phase 2.
+- Narrative map and claims from Worker Lane 3.
+- Canonical fundamentals from Worker Lane 2.
+- Exploratory SEC concept catalog from Worker Lane 2.
 - SEC Facts insight patterns.
 
 ### Work
@@ -271,22 +312,22 @@ Connect the fact catalog to the narrative map and identify the few mechanics tha
 
 ### Downstream Value
 
-This phase turns raw data abundance into research judgment. It is the bridge from "there are hundreds of SEC concepts" to "these five mechanics are the ones that matter."
+This lane turns raw data abundance into research judgment. It is the bridge from "there are hundreds of SEC concepts" to "these five mechanics are the ones that matter."
 
-## Phase 5: Run Financial Mechanics Experiments
+## Worker Lane 5: Run Financial Mechanics Experiments
 
 ### Goal
 
-Use deterministic SQLite calculations and lightweight models to test how crux mechanics affect revenue, margins, cash flow, EPS, multiples, or balance-sheet risk, without assuming an external math engine is required.
+Use deterministic SQLite calculations and lightweight models to test how crux mechanics affect revenue, margins, cash flow, EPS, multiples, or balance-sheet risk.
 
 ### Inputs
 
-- Crux candidates from Phase 4.
+- Crux candidates from Worker Lane 4.
 - Supporting metric selections.
 - Canonical fundamentals.
 - Historical time series.
 - Source-backed claims.
-- Research questions opened by earlier phases.
+- Research questions opened by earlier worker lanes.
 
 ### Work
 
@@ -313,13 +354,13 @@ Use deterministic SQLite calculations and lightweight models to test how crux me
 - Results distinguish arithmetic from interpretation.
 - Promoted results are linked to source facts or claims.
 - Rejected experiments explain why they were not used.
-- Forward projections keep assumptions explicit and auditable inside the workspace rather than hiding logic in opaque runtime code.
+- Forward projections keep assumptions explicit and auditable inside the workspace.
 
 ### Downstream Value
 
-This phase is where the report becomes more than prose. It gives scenarios concrete financial mechanics and helps the final output feel non-obvious without becoming numerology. Recent QA suggests a SQLite-first approach is sufficient for a meaningful amount of both historical analysis and lightweight forward projection, so the core product can defer introducing a separate math engine until real scenario complexity clearly demands it.
+This lane is where the report becomes more than prose. It gives scenarios concrete financial mechanics and helps the final output feel non-obvious without becoming numerology. Recent QA suggests a SQLite-first approach is sufficient for a meaningful amount of both historical analysis and lightweight forward projection, so the core product can defer introducing a separate math engine until real scenario complexity clearly demands it.
 
-## Phase 6: Construct Scenarios And Projection Inputs
+## Worker Lane 6: Construct Scenarios And Projection Inputs
 
 ### Goal
 
@@ -370,9 +411,9 @@ Create company-specific scenario paths that translate narratives and crux assump
 
 ### Downstream Value
 
-This phase creates the product's centerpiece: scenario-conditioned paths that a user can inspect, disagree with, and monitor over time.
+This lane creates the product's centerpiece: scenario-conditioned paths that a user can inspect, disagree with, and monitor over time.
 
-## Phase 7: Calculate Distribution And Render Artifacts
+## Worker Lane 7: Calculate Distribution And Render Artifacts
 
 ### Goal
 
@@ -390,7 +431,7 @@ Run deterministic scenario math, generate the Monte Carlo distribution, validate
 ### Work
 
 - Validate required report inputs.
-- Calculate scenario period outputs, preferably with deterministic SQLite calculations over persisted assumptions and periods.
+- Calculate scenario period outputs.
 - Calculate derived fields such as revenue per share, implied prices, blended price bands, EPS growth, and margin outputs.
 - Run Monte Carlo simulation from normalized scenario probabilities and terminal price bands.
 - Persist histogram, summary statistics, and scenario probability diagnostics.
@@ -418,9 +459,9 @@ Run deterministic scenario math, generate the Monte Carlo distribution, validate
 
 ### Downstream Value
 
-This phase turns structured research into the visual artifact users will remember: scenario paths, probability distribution, supporting math, and citations.
+This lane turns structured research into the visual artifact users will remember: scenario paths, probability distribution, supporting math, and citations.
 
-## Phase 8: Synthesize Report And Refresh Hooks
+## Worker Lane 8: Synthesize Report And Refresh Hooks
 
 ### Goal
 
@@ -467,11 +508,21 @@ Assemble a coherent final report from reviewed obligations, not from raw context
 
 ### Downstream Value
 
-This phase makes the report feel coherent and useful. It turns the research database into a user-facing explanation of what matters, what could change, and how different futures could affect the stock story.
+This lane makes the report feel coherent and useful. It turns the research database into a user-facing explanation of what matters, what could change, and how different futures could affect the stock story.
 
-## Blackboard Mapping
+## Blackboard Runtime Contract
 
-If the system adopts the blackboard/swarm architecture, the phase contracts above map cleanly to blackboard concepts.
+The worker lane contracts above are the domain-specific lanes for the v1 blackboard. The orchestrator should inspect board state, dispatch workers against open signals, review outputs, update entries and obligations, and stop when readiness or budget rules are met.
+
+The minimum v1 blackboard schema should include:
+
+- `entries`: durable units of knowledge, analysis, calculation, contradiction, gap, crux, or analogue reasoning.
+- `entry_relations`: supports, contradicts, supersedes, derived-from, depends-on, and stale-because links.
+- `signals`: open work requests, data gaps, contradictions, calculation requests, scenario revision requests, and refresh invalidations.
+- `obligations`: final-output commitments that must be satisfied, waived, or carried as limitations.
+- `worker_runs`: worker identity, prompt/context summary, model, usage, cost, status, and created entries/signals.
+- `quality_gate_results`: validation outcomes before entries are trusted downstream.
+- `board_snapshots`: optional saved board state for debugging, replay, and cost analysis.
 
 ### Entries
 
@@ -525,11 +576,24 @@ Analogues examples:
 - Claims require source custody and confidence.
 - Final synthesis must satisfy open obligations or explicitly waive them.
 
+### Convergence
+
+The board should stop because it is ready enough, not because every possible research question is exhausted.
+
+V1 convergence rules should include:
+
+- Required report obligations are satisfied, waived, or explicitly carried into limitations.
+- Scenario readiness gates pass: probabilities, crux links, period assumptions, and watch signals are present.
+- Report readiness gates pass: material factual claims have citations, scenario prose matches scenario math, and limitations are visible.
+- No high-priority blocking signals remain open.
+- Max iterations, max worker runs, and token/cost budget are respected.
+- Low-priority unresolved questions are preserved as limitations or future refresh signals.
+
 ## Design Decisions And Deferred Questions
 
-### First-Class Insights Table
+### First-Class Entries Table
 
-Decision: add a dedicated `insights` table. If we later adopt the blackboard architecture, this table can either become `entries` or map cleanly into a blackboard entries table.
+Decision: add a dedicated blackboard `entries` table in v1.
 
 It should likely include:
 
@@ -541,12 +605,12 @@ It should likely include:
 - Epistemic classification.
 - Confidence.
 - Status: active, disputed, superseded, quarantined.
-- Relations to other insights, such as supports, contradicts, supersedes, or derived-from.
-- Worker or phase that created it.
+- Relations to other entries, such as supports, contradicts, supersedes, depends-on, stale-because, or derived-from.
+- Worker lane that created it.
 - Created by.
 - Created at.
 
-This table is important even for a linear pipeline. It gives agents and deterministic tasks a shared place to record intermediate judgment without forcing everything into final report sections.
+This table is the core product memory. It gives agents and deterministic tasks a shared place to record intermediate judgment without forcing everything into final report sections.
 
 ### Concept Catalog Materialization
 
@@ -618,22 +682,22 @@ Likely refreshable after new filings, earnings, major news, or material price mo
 Likely invalidation rules:
 
 - If a raw fact changes, derived observations and concept catalog metadata for that concept become stale.
-- If a claim is superseded by a newer source, dependent insights should be marked stale or superseded.
+- If a claim is superseded by a newer source, dependent entries should be marked stale or superseded.
 - If a crux changes, dependent scenarios, probabilities, watch items, and Monte Carlo outputs should be regenerated.
 - If only current price changes, scenario assumptions may remain valid while implied price-relative framing and distribution presentation refresh.
 
 ## Proposed Living Document Format
 
-The main pipeline document should eventually keep a compact version of this structure:
+The main blackboard plan should eventually keep a compact version of this structure:
 
-1. Phase name.
+1. Worker lane name.
 2. Responsibility in one sentence.
 3. Inputs.
 4. Writes.
 5. Quality gates.
 6. Downstream consumers.
 
-Detailed implementation notes can live in separate phase-specific docs, but the main flow document should always let a reader answer:
+Detailed implementation notes can live in separate worker-lane docs, but the main flow document should always let a reader answer:
 
 - Where does this data first enter the system?
 - Where is it validated?

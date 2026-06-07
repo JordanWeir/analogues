@@ -21,7 +21,22 @@ Irys has open sourced a "Stateful Swarms" repo, https://github.com/dl1683/irys-s
 
 They are a more open ended research agent architecture, and have shown extremely positive results on Harvey's open sourced legal benchmarks, hitting around 18% full-task success rate vs. ~8% for Opus in Claude, and at dramatically reduced cost.
 
-I've taken a look at their code base (cloned in ~/apps/irys-stateful-swarms), and extracted out a possible interface we could build out if we want to use a similar overall stateful swarm strategy. (docs/references/blackboard-concept-design.md)
+I've taken a look at their code base (cloned in ~/apps/irys-stateful-swarms), and extracted a possible interface for the v1 blackboard strategy. (docs/references/blackboard-concept-design.md)
+
+### V1 Architecture Decision - Blackboard Research
+
+Analogues will start with a blackboard-style research architecture for v1.
+
+The durable center of the product is the per-run workspace: SQLite state, source custody, facts, entries, signals, obligations, scenario assumptions, calculations, and rendered artifacts. Workers run against that shared board rather than passing one large chat transcript through a fixed sequence of prompts.
+
+This is a larger first architecture than a simple linear pipeline, but it fits the actual research problem better:
+- Important cruxes can appear late.
+- Financial experiments can create new research questions.
+- Source research can contradict scenario assumptions.
+- Refreshes should invalidate only the affected parts of a report when possible.
+- Cost, provenance, and quality gates need to be inspectable at the worker and entry level.
+
+We should still keep the v1 blackboard bounded and product-shaped. The first implementation should use a small worker set, explicit budget limits, deterministic bootstrap tasks, SQLite-first calculations, and clear convergence rules. If the blackboard runtime proves heavier than needed, the worker lanes can still be run in a simpler order because the durable workspace remains the source of truth.
 
 
 ## Target Output
@@ -45,36 +60,33 @@ Key Sections
 
 ## Research Flow Overview
 
-Overall stages are:
+The v1 research flow is board-led rather than a single fixed pipeline.
 
-Simple Stages:
-1. Extract Deterministic Data
-2. Link Canonical Concepts from Facts API to Core Financial Metrics
-3. Web Search for insights and general 'vibe' based on citeable sources
-4. Web Search for their past Annual Reports, and convert to readable form
-5. Identify early "Interesting Concepts" from the Facts API
-6. Produce Business Summary Artifacts
-7. Produce Scenario Ideas
-8. For Each Scenario...
-    i. Identify additional "Interesting Concepts" from the Facts API
-    ii. Review historical earnings growth / revenue growth / other time series from facts API
-    iii. Decide on a set of fundamental time series for this specific analysis
-    iv. Identify key scenario assumptions
-    v. Project all time series forward with the scenario assumptions in mind
-    vi. Calculate derived columns as needed
-    vii. Save out Crux Assumptions + Key Sensitivities
-    viii. Draft other scenario content
-9. Assign Scenario Conditional Probabilities, Generate Monte Carlo Histogram
-10. Draft Sections
-    - Current Narratives
-    - Executive Summary
-    - Business Model
-    - Industry Context
-    - Financial Math
-    - Talk Track / Conclusions
-    - Signals to Watch for
-    - Historical Analogues
-    - Citations
+Overall loop:
+
+1. Initialize the run workspace.
+2. Ingest deterministic data and seed the board with baseline facts, default obligations, and required report artifacts.
+3. Build canonical and exploratory fact catalogs.
+4. Gather sources and create source-backed claims.
+5. Open signals for unresolved questions, contradictions, data gaps, and promising financial mechanics.
+6. Dispatch focused workers against the highest-value open signals.
+7. Review worker outputs through quality gates before promoting them into trusted entries.
+8. Compile scenarios from reviewed entries, cruxes, calculations, claims, and historical analogues.
+9. Calculate scenario-conditioned paths and the Monte Carlo distribution.
+10. Synthesize final sections from reviewed entries and satisfied or waived obligations.
+11. Persist refresh hooks so future filings, earnings, news, or price moves can invalidate only the affected board state.
+
+Core worker lanes:
+- Deterministic data ingest and workspace setup
+- Canonical metric mapping and exploratory SEC concept cataloging
+- Source gathering and claim extraction
+- Narrative mapping
+- Crux and contradiction discovery
+- Financial mechanics experiments
+- Historical analogue research
+- Scenario construction
+- Calculation, Monte Carlo, and artifact rendering
+- Final synthesis, limitations, citations, and refresh hooks
 
 ## Data Strategy
 
@@ -84,7 +96,7 @@ These are unstructured because businesses have discretion in terms of what data 
 
 This is a headache for most stock market products; they need to normalize this data into clean revenue / EPS / long term debt / etc.
 
-This is an opportunity for us, since there will often be extremely useful but non-standard time series here.  Things like revenue by businses segment may be present here, allowing much stronger narrative analysis and projections of what's really going on, and how things might play out.
+This is an opportunity for us, since there will often be extremely useful but non-standard time series here.  Things like revenue by business segment may be present here, allowing much stronger narrative analysis and projections of what's really going on, and how things might play out.
 
 Some notes about this:
 - To display core fields like Revenue, we need to persist a DB field linking the common "Revenue" concept to whatever they've called it in their facts/concepts API, different per company
@@ -98,6 +110,9 @@ Some notes about this:
 - In practice, each time period in our scenarios is either: Historical | Projected | Mixed (eg: some data available, some not)
 - Recent QA work suggests we can do a meaningful amount of both historical financial mechanics and lightweight forward scenario projection directly in SQLite, without needing an external math engine for the first useful product version.
 - This should become much more reliable for weaker models if we provide a small exemplar library, such as 5 sample "historical investigation" queries and 5 sample "forward projection" queries that demonstrate the intended calculation patterns.
+- The blackboard should persist source custody, entry provenance, worker runs, quality gate results, and relationships between facts, claims, calculations, cruxes, scenario assumptions, and report obligations.
+- Data gaps and contradictions should be first-class board signals, not just prose notes.
+- Refresh invalidation should follow dependency relationships where possible: changed raw facts should mark derived entries stale, superseded claims should stale dependent entries, and changed cruxes should trigger scenario and Monte Carlo recalculation.
 
 ## Distribution Strategy
 
@@ -128,6 +143,8 @@ Things to decide:
 We're leaving these undecided for now, conditional on understanding how much generating reports will cost.
 
 Right now, generating reports seems to be in the $1.00 - $1.50 range, and so even a monthly report on 500 stocks is a bit expensive before we have users.
+
+The blackboard architecture should make these decisions easier to defer without painting us into a corner. We can start with full report generation, then move toward partial refreshes as the board records which entries, scenarios, artifacts, and obligations depend on which facts and sources.
 
 ## Product Hooks
 
