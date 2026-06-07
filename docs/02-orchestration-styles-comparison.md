@@ -100,6 +100,8 @@ This is a natural first product architecture because it converts the discovered 
 - Straightforward to checkpoint and resume.
 - Enables weaker/cheaper models for scoped tasks.
 - Allows deterministic validation after each major handoff.
+- Fits a SQLite-first calculation strategy well: deterministic workers can run both historical investigations and lightweight forward projections directly against the workspace.
+- Can cheaply support weaker models if we provide a small exemplar library, such as 5 sample "historical investigation" queries and 5 sample "forward projection" queries they can adapt.
 
 ### Weaknesses
 
@@ -148,6 +150,7 @@ This better matches the shape of real research. A financial experiment can disco
 - Produces better auditability if entries, signals, obligations, and worker runs are persisted.
 - Can converge based on quality gates rather than fixed phase completion.
 - Better fit for refresh workflows where new information invalidates only part of the report.
+- Still benefits from the same SQLite-first calculation surface; workers can open targeted signals like "run the capex funding projection query" or "rerun the backlog conversion investigation" without needing a separate math runtime.
 
 ### Weaknesses
 

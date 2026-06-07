@@ -161,6 +161,8 @@ Separate standard fundamentals from company-specific SEC concepts that may conta
 - Tag concepts with reusable narrative categories such as backlog, conversion, capex, lease, purchase obligation, debt, interest, working capital, capital return, dilution, margin, and tax. This should be implemented as a cost-conscious batch operation, not hundreds of one-off tool calls: deterministic keyword/description rules first, then optional LLM batch review for ambiguous or high-potential concepts.
 - Normalize selected flow concepts when needed so quarterly, year-to-date, and annual values are not mixed misleadingly.
 
+// @TODO: Run QA Quality checks after using the heuristic method to see how often we seem to be missing things.
+
 ### Writes
 
 - Canonical metric mappings.
@@ -275,7 +277,7 @@ This phase turns raw data abundance into research judgment. It is the bridge fro
 
 ### Goal
 
-Use deterministic scripts and lightweight models to test how crux mechanics affect revenue, margins, cash flow, EPS, multiples, or balance-sheet risk.
+Use deterministic SQLite calculations and lightweight models to test how crux mechanics affect revenue, margins, cash flow, EPS, multiples, or balance-sheet risk, without assuming an external math engine is required.
 
 ### Inputs
 
@@ -288,16 +290,18 @@ Use deterministic scripts and lightweight models to test how crux mechanics affe
 
 ### Work
 
-- Write focused calculation scripts for specific questions.
+- Write focused SQLite calculations for specific questions, using views, CTEs, and recursive CTEs where useful.
 - Test alternative normalizations or derived views.
 - Compare historical trends against narrative claims.
 - Build simple economic bridges, such as backlog conversion, capex intensity, debt-to-interest pressure, share count effects, margin sensitivity, or revenue-per-share paths.
+- Attempt lightweight forward-looking projections directly in SQLite when the assumptions are explicit and low-dimensional.
+- Maintain a small reusable query library for model scaffolding, with at least 5 sample "historical investigation" queries and 5 sample "forward projection" queries that weaker models can adapt instead of starting from scratch.
 - Record experiment outputs and dispose of each result as promoted, rejected, background, or unresolved.
 
 ### Writes
 
 - Calculation-backed insight entries.
-- Script outputs or reproducible calculation payloads.
+- Reproducible SQLite query outputs or calculation payloads.
 - Financial math content blocks.
 - Scenario input recommendations.
 - Additional data gaps or contradiction entries.
@@ -309,10 +313,11 @@ Use deterministic scripts and lightweight models to test how crux mechanics affe
 - Results distinguish arithmetic from interpretation.
 - Promoted results are linked to source facts or claims.
 - Rejected experiments explain why they were not used.
+- Forward projections keep assumptions explicit and auditable inside the workspace rather than hiding logic in opaque runtime code.
 
 ### Downstream Value
 
-This phase is where the report becomes more than prose. It gives scenarios concrete financial mechanics and helps the final output feel non-obvious without becoming numerology.
+This phase is where the report becomes more than prose. It gives scenarios concrete financial mechanics and helps the final output feel non-obvious without becoming numerology. Recent QA suggests a SQLite-first approach is sufficient for a meaningful amount of both historical analysis and lightweight forward projection, so the core product can defer introducing a separate math engine until real scenario complexity clearly demands it.
 
 ## Phase 6: Construct Scenarios And Projection Inputs
 
@@ -338,6 +343,7 @@ Create company-specific scenario paths that translate narratives and crux assump
 - Assign scenario probabilities.
 - Define which cruxes are settled in each scenario and how.
 - Populate period-level assumptions for revenue, margins, EPS, shares, P/S, P/E, and blend weights.
+- Prefer scenario structures that can be executed directly from SQLite assumptions tables and deterministic query templates when the math is still low-dimensional.
 - Add key sensitivities.
 - Add confirming and breaking signals tied to watch items.
 - Use historical analogues to inform scenario shape, probability, or multiple assumptions, while noting where analogies can mislead.
@@ -384,7 +390,7 @@ Run deterministic scenario math, generate the Monte Carlo distribution, validate
 ### Work
 
 - Validate required report inputs.
-- Calculate scenario period outputs.
+- Calculate scenario period outputs, preferably with deterministic SQLite calculations over persisted assumptions and periods.
 - Calculate derived fields such as revenue per share, implied prices, blended price bands, EPS growth, and margin outputs.
 - Run Monte Carlo simulation from normalized scenario probabilities and terminal price bands.
 - Persist histogram, summary statistics, and scenario probability diagnostics.
@@ -558,14 +564,14 @@ The value of materialization is agent usability. Downstream workers can ask for 
 
 Plot readiness should be treated as presentation metadata, not as a filter on analytical importance. A sparse concept may be useless as a line chart but valuable as an event clue.
 
-### Script Experiment Persistence
+### Query And Calculation Persistence
 
-Decision: add script experiment tables to the SQLite workspace. RHAI or other financial mechanics scripts should be edited and persisted in SQLite, then executed by a separate tool or task that reads the script, runs it against approved workspace data, and writes the result back.
+Decision: add calculation experiment tables to the SQLite workspace, but bias the first implementation toward SQLite-native queries and assumptions rather than an embedded scripting runtime. The core financial mechanics and lightweight forward projections should be expressed as durable SQL templates, prepared views, or persisted calculation records that can be executed against approved workspace data and written back into the run database.
 
 The minimum useful record is:
 
 - Question.
-- Script or formula.
+- Query, formula, or calculation template.
 - Inputs.
 - Output.
 - Interpretation.
@@ -574,12 +580,15 @@ The minimum useful record is:
 
 Suggested table family:
 
-- `analysis_scripts`: script body, language, purpose, status, created_by, created_at, updated_at.
-- `analysis_script_inputs`: linked metrics, concepts, insights, sources, or scenario IDs used by the script.
-- `analysis_script_runs`: run timestamp, execution status, stdout/stderr, error message, cost or runtime metadata.
-- `analysis_script_outputs`: structured result rows, JSON payloads, promoted insight ID, and disposition.
+- `analysis_queries`: SQL body or named calculation template, purpose, status, created_by, created_at, updated_at.
+- `analysis_query_inputs`: linked metrics, concepts, insights, sources, or scenario IDs used by the calculation.
+- `analysis_query_runs`: run timestamp, execution status, error message, cost or runtime metadata.
+- `analysis_query_outputs`: structured result rows, JSON payloads, promoted insight ID, and disposition.
+- `calculation_query_library`: reusable exemplar queries tagged as `historical_investigation` or `forward_projection`, with at least 5 strong samples in each category for model inspiration.
 
-The script body should be durable because the calculation itself is part of the research evidence. The final report should be able to cite not only the output, but also the calculation path that produced it.
+The calculation body should be durable because the calculation itself is part of the research evidence. The final report should be able to cite not only the output, but also the calculation path that produced it.
+
+Deferred decision: only add an embedded math or expression engine if real projection needs exceed what auditable SQLite can comfortably express. Current QA suggests SQLite is already good enough for bridges, sensitivities, and simple bull/base/bear roll-forwards, which lowers the urgency of introducing runtime surface area with worse security properties.
 
 ### Refresh Semantics
 

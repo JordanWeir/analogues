@@ -96,6 +96,8 @@ Some notes about this:
     - Financial Media Analysis
 - When projecting, especially projecting concepts that might be unavailable due to late filing, we should be particularly careful to annotate Projected vs. Historical
 - In practice, each time period in our scenarios is either: Historical | Projected | Mixed (eg: some data available, some not)
+- Recent QA work suggests we can do a meaningful amount of both historical financial mechanics and lightweight forward scenario projection directly in SQLite, without needing an external math engine for the first useful product version.
+- This should become much more reliable for weaker models if we provide a small exemplar library, such as 5 sample "historical investigation" queries and 5 sample "forward projection" queries that demonstrate the intended calculation patterns.
 
 ## Distribution Strategy
 
