@@ -1,19 +1,17 @@
-use chrono::{NaiveDate, Utc};
+use crate::services::{
+    concept_catalog::ConceptCatalog, 
+    market_quote_provider::YahooChartMarketDataAdapter,
+    sec_facts_provider::SecFactsProvider, 
+    workspace_store::{DEFAULT_REPORT_ROOT, SCHEMA_VERSION, WorkspaceStore, validate_date, normalize_ticker},
+};
+use chrono::{Utc};
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
-use serde_json::Value;
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
+    path::{PathBuf},
     time::Duration,
 };
 
-const DEFAULT_REPORT_ROOT: &str = "reports/stock-narrative-research";
-const RUN_DB_FILENAME: &str = "run.sqlite";
-const SCHEMA_VERSION: i64 = 2;
-const SEC_USER_AGENT: &str = "stock-agent-2/0.1 research@example.local";
-const SEC_TICKERS_URL: &str = "https://www.sec.gov/files/company_tickers.json";
 const BULK_INSERT_CHUNK_SIZE: usize = 250;
 const REQUIRED_SECTIONS: &[&str] = &[
     "orientation",
@@ -200,92 +198,34 @@ impl InitWorkspaceRequest {
 }
 
 pub async fn initialize_workspace(request: &InitWorkspaceRequest) -> Result<WorkspacePaths> {
-    fs::create_dir_all(&request.base_dir).map_err(|err| {
-        Error::string(&format!(
-            "failed to create report root {}: {err}",
-            request.base_dir.display()
-        ))
-    })?;
+    let normalized_request = request.normalized()?;
+    let store = WorkspaceStore;
+    let handle = store.create_workspace(&normalized_request).await?;
+    let paths = handle.paths.clone();
 
-    let paths = next_workspace_paths(request)?;
-    fs::create_dir(&paths.workspace_dir).map_err(|err| {
-        Error::string(&format!(
-            "failed to create workspace {}: {err}",
-            paths.workspace_dir.display()
-        ))
-    })?;
-    fs::create_dir(&paths.generated_dir).map_err(|err| {
-        Error::string(&format!(
-            "failed to create generated directory {}: {err}",
-            paths.generated_dir.display()
-        ))
-    })?;
+    let ingestion_result =
+        fetch_and_seed_financials(handle.connection(), &normalized_request).await;
+    let close_result = handle.close().await;
 
-    initialize_run_database(request, &paths).await?;
+    ingestion_result?;
+    close_result?;
+
     Ok(paths)
 }
 
-fn next_workspace_paths(request: &InitWorkspaceRequest) -> Result<WorkspacePaths> {
-    for index in 1..10_000 {
-        let run_slug = format!("{}-{}-{}", request.ticker, request.date, index);
-        let workspace_dir = request.base_dir.join(&run_slug);
-        if !workspace_dir.exists() {
-            let sqlite_path = workspace_dir.join(RUN_DB_FILENAME);
-            let generated_dir = workspace_dir.join("generated");
-            return Ok(WorkspacePaths {
-                run_slug,
-                workspace_dir,
-                sqlite_path,
-                generated_dir,
-            });
-        }
+impl InitWorkspaceRequest {
+    fn normalized(&self) -> Result<Self> {
+        validate_date(&self.date)?;
+        Ok(Self {
+            ticker: normalize_ticker(&self.ticker)?,
+            date: self.date.clone(),
+            base_dir: self.base_dir.clone(),
+            fetch_financials: self.fetch_financials,
+        })
     }
-
-    Err(Error::string(&format!(
-        "could not allocate a workspace for {} on {}",
-        request.ticker, request.date
-    )))
 }
 
-async fn initialize_run_database(
-    request: &InitWorkspaceRequest,
-    paths: &WorkspacePaths,
-) -> Result<()> {
-    let db = Database::connect(sqlite_uri(&paths.sqlite_path))
-        .await
-        .map_err(|err| Error::string(&format!("failed to open run SQLite database: {err}")))?;
-
-    let initialization_result = async {
-        execute_schema(&db).await?;
-        seed_database(&db, request, paths).await?;
-        fetch_and_seed_financials(&db, request).await
-    }
-    .await;
-    let close_result = db
-        .close()
-        .await
-        .map_err(|err| Error::string(&format!("failed to close run SQLite database: {err}")));
-
-    initialization_result?;
-    close_result?;
-
-    Ok(())
-}
-
-async fn execute_schema(db: &sea_orm::DatabaseConnection) -> Result<()> {
-    for statement in SCHEMA_STATEMENTS {
-        db.execute(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            (*statement).to_string(),
-        ))
-        .await
-        .map_err(|err| Error::string(&format!("failed to apply run schema: {err}")))?;
-    }
-
-    Ok(())
-}
-
-async fn seed_database(
+pub(crate) async fn seed_database(
     db: &sea_orm::DatabaseConnection,
     request: &InitWorkspaceRequest,
     paths: &WorkspacePaths,
@@ -324,7 +264,7 @@ async fn seed_database(
     .await?;
 
     execute_sql(db, "INSERT INTO monte_carlo_config (id) VALUES (1)").await?;
-    seed_canonical_metric_definitions(db, &now).await?;
+    ConceptCatalog::seed_canonical_definitions(db, &now).await?;
 
     for (index, section_key) in REQUIRED_SECTIONS.iter().enumerate() {
         execute_sql(
@@ -394,16 +334,18 @@ pub async fn fetch_financial_snapshot(ticker: &str) -> Result<FinancialSnapshot>
         .user_agent("Mozilla/5.0")
         .build()
         .map_err(|err| Error::string(&format!("failed to build HTTP client: {err}")))?;
+    let market_data = YahooChartMarketDataAdapter::new(client.clone());
+    let sec_provider = SecFactsProvider::new(client);
     let mut snapshot = FinancialSnapshot::new(ticker);
 
-    match fetch_yahoo_chart_snapshot(&client, ticker).await {
+    match market_data.fetch_snapshot(ticker).await {
         Ok(update) => snapshot.merge(update, false),
         Err(err) => snapshot
             .source_notes
             .push(format!("Yahoo chart fallback failed: {err}")),
     }
 
-    match fetch_sec_companyfacts_snapshot(&client, ticker).await {
+    match fetch_sec_companyfacts_snapshot(&sec_provider, ticker).await {
         Ok(update) => snapshot.merge(update, true),
         Err(err) => snapshot
             .source_notes
@@ -416,7 +358,7 @@ pub async fn fetch_financial_snapshot(ticker: &str) -> Result<FinancialSnapshot>
 }
 
 impl FinancialSnapshot {
-    fn new(ticker: &str) -> Self {
+    pub(crate) fn new(ticker: &str) -> Self {
         Self {
             ticker: ticker.to_string(),
             fetched_at: Utc::now().to_rfc3339(),
@@ -539,118 +481,47 @@ impl FinancialSnapshot {
     }
 }
 
-async fn fetch_yahoo_chart_snapshot(
-    client: &reqwest::Client,
-    ticker: &str,
-) -> Result<FinancialSnapshot> {
-    let url =
-        format!("https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d");
-    let payload = fetch_json(client, &url, None).await?;
-    let meta = payload
-        .pointer("/chart/result/0/meta")
-        .ok_or_else(|| Error::string("Yahoo chart response did not include quote metadata"))?;
-
-    let mut snapshot = FinancialSnapshot::new(ticker);
-    snapshot.currency = string_at(meta, "currency");
-    snapshot.company_name = string_at(meta, "shortName").or_else(|| string_at(meta, "longName"));
-    snapshot.current_price =
-        number_at(meta, "regularMarketPrice").or_else(|| number_at(meta, "previousClose"));
-    if let Some(price) = snapshot.current_price {
-        snapshot.observations.push(FundamentalObservation {
-            canonical_key: Some("current_price".to_string()),
-            metric_key: "current_price".to_string(),
-            metric_label: "Current price".to_string(),
-            statement_type: "market".to_string(),
-            period_type: "instant".to_string(),
-            period_start: None,
-            period_end: None,
-            as_of_date: Some(snapshot.fetched_at.clone()),
-            filed_at: None,
-            fiscal_year: None,
-            fiscal_period: None,
-            value: price,
-            unit: snapshot.currency.clone(),
-            source_type: "Yahoo chart endpoint".to_string(),
-            source_note: Some("Yahoo chart endpoint quote metadata.".to_string()),
-            concept_name: None,
-            form: None,
-            accession: None,
-            quality: Some("market_quote".to_string()),
-            is_derived: false,
-        });
-    }
-    snapshot
-        .data_sources
-        .push("Yahoo chart endpoint".to_string());
-    snapshot.source_notes.push(
-        "Fetched limited price metadata from Yahoo chart endpoint. Fundamental fields require SEC Company Facts or manual input."
-            .to_string(),
-    );
-    Ok(snapshot)
-}
-
 async fn fetch_sec_companyfacts_snapshot(
-    client: &reqwest::Client,
+    provider: &SecFactsProvider,
     ticker: &str,
 ) -> Result<FinancialSnapshot> {
-    let company = lookup_sec_company(client, ticker).await?;
-    let cik = company
-        .get("cik_str")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| Error::string("SEC ticker record did not include cik_str"))?;
-    let company_name = company
-        .get("title")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let url = format!("https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010}.json");
-    let payload = fetch_json(client, &url, Some(SEC_USER_AGENT)).await?;
-    let facts_root = payload
-        .get("facts")
-        .ok_or_else(|| Error::string("SEC Company Facts response did not include facts"))?;
-
+    let company = provider.lookup_company(ticker).await?;
+    let payload = provider.fetch_company_facts(&company).await?;
     let mut snapshot = FinancialSnapshot::new(ticker);
-    let raw_sec_facts = sec_raw_facts(facts_root, &snapshot.fetched_at);
-    let canonical_mappings = seed_canonical_mappings(&raw_sec_facts);
-    let observations = canonical_sec_observations(&raw_sec_facts, &canonical_mappings);
-    let bundle = select_latest_income_bundle(&raw_sec_facts, &canonical_mappings);
-    let shares_fact = latest_value_fact(
+    snapshot.fetched_at = payload.fetched_at.clone();
+    let raw_sec_facts = provider.extract_raw_facts(&payload)?;
+    let canonical_mappings = ConceptCatalog::seed_canonical_mappings(&raw_sec_facts);
+    let observations = ConceptCatalog::build_observations(&raw_sec_facts, &canonical_mappings);
+    let bundle = ConceptCatalog::select_latest_baseline_bundle(&raw_sec_facts, &canonical_mappings);
+    let shares_fact = ConceptCatalog::latest_value_fact(
         &raw_sec_facts,
         &canonical_mappings,
         "shares_outstanding",
         "shares",
         bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
     );
-    let eps_fact = latest_value_fact(
+    let eps_fact = ConceptCatalog::latest_value_fact(
         &raw_sec_facts,
         &canonical_mappings,
         "eps",
         "USD/shares",
         bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
     );
-    let cash_fact = latest_value_fact(&raw_sec_facts, &canonical_mappings, "cash", "USD", None);
-    let debt = total_latest_values(
+    let cash_fact =
+        ConceptCatalog::latest_value_fact(&raw_sec_facts, &canonical_mappings, "cash", "USD", None);
+    let debt = ConceptCatalog::total_latest_values(
         &raw_sec_facts,
         &canonical_mappings,
         &["debt_current", "debt_noncurrent"],
         "USD",
     );
 
-    snapshot.company_name = company_name;
+    snapshot.company_name = company.company_title;
     snapshot.raw_sec_facts = raw_sec_facts;
     snapshot.canonical_mappings = canonical_mappings;
     snapshot.observations = observations;
     if let Some(bundle) = bundle {
-        append_bundle_observations(&mut snapshot, &bundle);
-        snapshot.revenue_ttm = bundle.revenue.as_ref().map(|metric| metric.value);
-        snapshot.net_income_ttm = bundle.net_income.as_ref().map(|metric| metric.value);
-        snapshot.gross_profit_ttm = bundle.gross_profit.as_ref().map(|metric| metric.value);
-        snapshot.operating_income_ttm = bundle.operating_income.as_ref().map(|metric| metric.value);
-        snapshot.gross_margin = ratio(snapshot.gross_profit_ttm, snapshot.revenue_ttm);
-        snapshot.operating_margin = ratio(snapshot.operating_income_ttm, snapshot.revenue_ttm);
-        snapshot.net_margin = ratio(snapshot.net_income_ttm, snapshot.revenue_ttm);
-        snapshot.fundamental_period_end = Some(bundle.period_end.clone());
-        snapshot.source_notes.extend(bundle.source_notes);
-        snapshot.quality_flags.extend(bundle.quality_flags);
+        ConceptCatalog::apply_income_bundle(&mut snapshot, &bundle);
     } else {
         snapshot.push_quality_flag("sec_income_statement_no_coherent_ttm_or_annual_bundle");
     }
@@ -681,56 +552,15 @@ async fn fetch_sec_companyfacts_snapshot(
             "shares_outstanding_uses_latest_available_instant_not_income_period",
         );
     }
-    snapshot.fundamental_source = Some("SEC Company Facts".to_string());
-    snapshot.data_sources.push("SEC Company Facts".to_string());
+    snapshot.fundamental_source = Some(provider.provider_name().to_string());
+    snapshot
+        .data_sources
+        .push(provider.provider_name().to_string());
     snapshot.source_notes.push(
         "Fetched fundamentals from SEC Company Facts. Baseline values are selected from aligned income statement periods; stale or mismatched concepts are excluded from derived margins."
             .to_string(),
     );
     Ok(snapshot)
-}
-
-async fn lookup_sec_company(client: &reqwest::Client, ticker: &str) -> Result<Value> {
-    let payload = fetch_json(client, SEC_TICKERS_URL, Some(SEC_USER_AGENT)).await?;
-    let ticker_upper = ticker.to_uppercase();
-    payload
-        .as_object()
-        .and_then(|companies| {
-            companies.values().find(|company| {
-                company
-                    .get("ticker")
-                    .and_then(Value::as_str)
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&ticker_upper))
-            })
-        })
-        .cloned()
-        .ok_or_else(|| Error::string(&format!("Ticker {ticker} was not found in SEC tickers")))
-}
-
-async fn fetch_json(
-    client: &reqwest::Client,
-    url: &str,
-    user_agent: Option<&str>,
-) -> Result<Value> {
-    let mut request = client.get(url);
-    if let Some(user_agent) = user_agent {
-        request = request.header(reqwest::header::USER_AGENT, user_agent);
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|err| Error::string(&format!("request failed for {url}: {err}")))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(Error::string(&format!(
-            "request failed for {url}: {status}"
-        )));
-    }
-    response
-        .json::<Value>()
-        .await
-        .map_err(|err| Error::string(&format!("invalid JSON response from {url}: {err}")))
 }
 
 async fn persist_financial_snapshot(
@@ -774,41 +604,6 @@ async fn persist_financial_snapshot(
             "failed to commit financial snapshot transaction: {err}"
         ))
     })?;
-
-    Ok(())
-}
-
-async fn seed_canonical_metric_definitions(
-    db: &sea_orm::DatabaseConnection,
-    created_at: &str,
-) -> Result<()> {
-    for spec in CANONICAL_METRIC_SPECS {
-        execute_sql(
-            db,
-            &format!(
-                "INSERT INTO canonical_metric_definitions (
-                    canonical_key, metric_key, metric_label, statement_type, unit_hint,
-                    display_order, created_at
-                ) VALUES (
-                    '{}', '{}', '{}', '{}', '{}', {}, '{}'
-                )
-                ON CONFLICT(canonical_key) DO UPDATE SET
-                    metric_key = excluded.metric_key,
-                    metric_label = excluded.metric_label,
-                    statement_type = excluded.statement_type,
-                    unit_hint = excluded.unit_hint,
-                    display_order = excluded.display_order",
-                sql_quote(spec.canonical_key),
-                sql_quote(spec.metric_key),
-                sql_quote(spec.metric_label),
-                sql_quote(spec.statement_type),
-                sql_quote(spec.unit_hint),
-                spec.display_order,
-                sql_quote(created_at),
-            ),
-        )
-        .await?;
-    }
 
     Ok(())
 }
@@ -1225,785 +1020,6 @@ impl FinancialSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
-struct SecFact {
-    concept: String,
-    form: Option<String>,
-    start: Option<String>,
-    end: Option<String>,
-    filed: Option<String>,
-    value: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CanonicalMetricSpec {
-    canonical_key: &'static str,
-    metric_key: &'static str,
-    metric_label: &'static str,
-    statement_type: &'static str,
-    unit_hint: &'static str,
-    seed_concepts: &'static [&'static str],
-    display_order: i64,
-}
-
-#[derive(Debug, Clone)]
-struct TtmMetric {
-    metric_key: &'static str,
-    value: f64,
-    period_start: Option<String>,
-    period_end: String,
-    source_note: String,
-    quality_flags: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct IncomeBundle {
-    period_end: String,
-    revenue: Option<TtmMetric>,
-    net_income: Option<TtmMetric>,
-    gross_profit: Option<TtmMetric>,
-    operating_income: Option<TtmMetric>,
-    source_notes: Vec<String>,
-    quality_flags: Vec<String>,
-}
-
-const REVENUE_CONCEPTS: &[&str] = &[
-    "RevenueFromContractWithCustomerExcludingAssessedTax",
-    "Revenues",
-    "SalesRevenueNet",
-];
-const NET_INCOME_CONCEPTS: &[&str] = &["NetIncomeLoss"];
-const GROSS_PROFIT_CONCEPTS: &[&str] = &["GrossProfit"];
-const OPERATING_INCOME_CONCEPTS: &[&str] = &["OperatingIncomeLoss"];
-const DILUTED_SHARES_CONCEPTS: &[&str] = &[
-    "WeightedAverageNumberOfDilutedSharesOutstanding",
-    "CommonStockSharesOutstanding",
-];
-const EPS_CONCEPTS: &[&str] = &["EarningsPerShareDiluted"];
-const CASH_CONCEPTS: &[&str] = &[
-    "CashAndCashEquivalentsAtCarryingValue",
-    "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
-];
-const DEBT_CURRENT_CONCEPTS: &[&str] = &[
-    "DebtCurrent",
-    "LongTermDebtAndFinanceLeaseObligationsCurrent",
-];
-const DEBT_NONCURRENT_CONCEPTS: &[&str] = &[
-    "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
-    "LongTermDebtAndCapitalLeaseObligations",
-];
-const CANONICAL_METRIC_SPECS: &[CanonicalMetricSpec] = &[
-    CanonicalMetricSpec {
-        canonical_key: "revenue",
-        metric_key: "revenue",
-        metric_label: "Revenue",
-        statement_type: "income_statement",
-        unit_hint: "USD",
-        seed_concepts: REVENUE_CONCEPTS,
-        display_order: 10,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "net_income",
-        metric_key: "net_income",
-        metric_label: "Net income",
-        statement_type: "income_statement",
-        unit_hint: "USD",
-        seed_concepts: NET_INCOME_CONCEPTS,
-        display_order: 20,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "gross_profit",
-        metric_key: "gross_profit",
-        metric_label: "Gross profit",
-        statement_type: "income_statement",
-        unit_hint: "USD",
-        seed_concepts: GROSS_PROFIT_CONCEPTS,
-        display_order: 30,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "operating_income",
-        metric_key: "operating_income",
-        metric_label: "Operating income",
-        statement_type: "income_statement",
-        unit_hint: "USD",
-        seed_concepts: OPERATING_INCOME_CONCEPTS,
-        display_order: 40,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "shares_outstanding",
-        metric_key: "diluted_shares",
-        metric_label: "Diluted shares",
-        statement_type: "income_statement",
-        unit_hint: "shares",
-        seed_concepts: DILUTED_SHARES_CONCEPTS,
-        display_order: 50,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "eps",
-        metric_key: "eps",
-        metric_label: "Diluted EPS",
-        statement_type: "income_statement",
-        unit_hint: "USD/shares",
-        seed_concepts: EPS_CONCEPTS,
-        display_order: 60,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "cash",
-        metric_key: "cash",
-        metric_label: "Cash and equivalents",
-        statement_type: "balance_sheet",
-        unit_hint: "USD",
-        seed_concepts: CASH_CONCEPTS,
-        display_order: 70,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "debt_current",
-        metric_key: "debt_current",
-        metric_label: "Current debt",
-        statement_type: "balance_sheet",
-        unit_hint: "USD",
-        seed_concepts: DEBT_CURRENT_CONCEPTS,
-        display_order: 80,
-    },
-    CanonicalMetricSpec {
-        canonical_key: "debt_noncurrent",
-        metric_key: "debt_noncurrent",
-        metric_label: "Noncurrent debt",
-        statement_type: "balance_sheet",
-        unit_hint: "USD",
-        seed_concepts: DEBT_NONCURRENT_CONCEPTS,
-        display_order: 90,
-    },
-];
-
-fn canonical_sec_observations(
-    raw_facts: &[SecRawFact],
-    mappings: &[CanonicalMapping],
-) -> Vec<FundamentalObservation> {
-    mappings
-        .iter()
-        .filter(|mapping| mapping.is_active)
-        .flat_map(|mapping| {
-            raw_facts
-                .iter()
-                .filter(move |fact| mapping_matches_fact(mapping, fact))
-                .map(move |fact| sec_observation(mapping, fact))
-        })
-        .collect()
-}
-
-fn sec_observation(mapping: &CanonicalMapping, fact: &SecRawFact) -> FundamentalObservation {
-    FundamentalObservation {
-        canonical_key: Some(mapping.canonical_key.to_string()),
-        metric_key: mapping.metric_key.to_string(),
-        metric_label: mapping.metric_label.to_string(),
-        statement_type: mapping.statement_type.to_string(),
-        period_type: fact_period_type(fact).to_string(),
-        period_start: fact.start.clone(),
-        period_end: fact.end.clone(),
-        as_of_date: fact.end.clone(),
-        filed_at: fact.filed.clone(),
-        fiscal_year: fact.fiscal_year,
-        fiscal_period: fact.fiscal_period.clone(),
-        value: fact.value,
-        unit: Some(fact.unit.clone()),
-        source_type: "SEC Company Facts".to_string(),
-        source_note: Some(format!(
-            "{} from canonical SEC concept {}:{} filed {}.",
-            mapping.metric_label,
-            fact.taxonomy,
-            fact.concept_name,
-            fact.filed
-                .clone()
-                .unwrap_or_else(|| "unknown date".to_string())
-        )),
-        concept_name: Some(fact.concept_name.clone()),
-        form: fact.form.clone(),
-        accession: fact.accession.clone(),
-        quality: None,
-        is_derived: false,
-    }
-}
-
-fn select_latest_income_bundle(
-    raw_facts: &[SecRawFact],
-    mappings: &[CanonicalMapping],
-) -> Option<IncomeBundle> {
-    let revenue = ttm_series_for_metric("revenue_ttm", raw_facts, mappings, "revenue", "USD");
-    let net_income =
-        ttm_series_for_metric("net_income_ttm", raw_facts, mappings, "net_income", "USD");
-    let gross_profit = ttm_series_for_metric(
-        "gross_profit_ttm",
-        raw_facts,
-        mappings,
-        "gross_profit",
-        "USD",
-    );
-    let operating_income = ttm_series_for_metric(
-        "operating_income_ttm",
-        raw_facts,
-        mappings,
-        "operating_income",
-        "USD",
-    );
-
-    let mut period_ends: Vec<String> = revenue
-        .iter()
-        .map(|metric| metric.period_end.clone())
-        .collect();
-    period_ends.sort();
-    period_ends.dedup();
-    period_ends.reverse();
-
-    for period_end in period_ends {
-        let revenue_metric = metric_for_period(&revenue, &period_end);
-        let net_income_metric = metric_for_period(&net_income, &period_end);
-        if revenue_metric.is_none() || net_income_metric.is_none() {
-            continue;
-        }
-        let gross_profit_metric = metric_for_period(&gross_profit, &period_end);
-        let operating_income_metric = metric_for_period(&operating_income, &period_end);
-        let mut source_notes = Vec::new();
-        let mut quality_flags = Vec::new();
-        for metric in [
-            revenue_metric.as_ref(),
-            net_income_metric.as_ref(),
-            gross_profit_metric.as_ref(),
-            operating_income_metric.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            extend_unique(&mut source_notes, vec![metric.source_note.clone()]);
-            extend_unique(&mut quality_flags, metric.quality_flags.clone());
-        }
-        for (metric_key, candidates) in [
-            ("gross_profit_ttm", &gross_profit),
-            ("operating_income_ttm", &operating_income),
-        ] {
-            if !candidates.is_empty() && metric_for_period(candidates, &period_end).is_none() {
-                quality_flags.push(format!(
-                    "{metric_key}_excluded_because_no_fact_matched_baseline_period_{period_end}"
-                ));
-            }
-        }
-        return Some(IncomeBundle {
-            period_end,
-            revenue: revenue_metric,
-            net_income: net_income_metric,
-            gross_profit: gross_profit_metric,
-            operating_income: operating_income_metric,
-            source_notes,
-            quality_flags,
-        });
-    }
-
-    None
-}
-
-fn metric_for_period(metrics: &[TtmMetric], period_end: &str) -> Option<TtmMetric> {
-    metrics
-        .iter()
-        .find(|metric| metric.period_end == period_end)
-        .cloned()
-}
-
-fn append_bundle_observations(snapshot: &mut FinancialSnapshot, bundle: &IncomeBundle) {
-    for metric in [
-        bundle.revenue.as_ref(),
-        bundle.net_income.as_ref(),
-        bundle.gross_profit.as_ref(),
-        bundle.operating_income.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let label = ttm_label(metric.metric_key);
-        snapshot.observations.push(FundamentalObservation {
-            canonical_key: Some(ttm_canonical_key(metric.metric_key).to_string()),
-            metric_key: metric.metric_key.to_string(),
-            metric_label: label.to_string(),
-            statement_type: "income_statement".to_string(),
-            period_type: "ttm".to_string(),
-            period_start: metric.period_start.clone(),
-            period_end: Some(metric.period_end.clone()),
-            as_of_date: Some(metric.period_end.clone()),
-            filed_at: None,
-            fiscal_year: None,
-            fiscal_period: None,
-            value: metric.value,
-            unit: snapshot.currency.clone(),
-            source_type: "SEC Company Facts".to_string(),
-            source_note: Some(metric.source_note.clone()),
-            concept_name: None,
-            form: None,
-            accession: None,
-            quality: Some(if metric.quality_flags.is_empty() {
-                "aligned".to_string()
-            } else {
-                metric.quality_flags.join(",")
-            }),
-            is_derived: true,
-        });
-    }
-
-    for (metric_key, label, numerator) in [
-        ("gross_margin", "Gross margin", bundle.gross_profit.as_ref()),
-        (
-            "operating_margin",
-            "Operating margin",
-            bundle.operating_income.as_ref(),
-        ),
-        ("net_margin", "Net margin", bundle.net_income.as_ref()),
-    ] {
-        let Some(revenue) = &bundle.revenue else {
-            continue;
-        };
-        let Some(numerator) = numerator else {
-            continue;
-        };
-        let Some(value) = ratio(Some(numerator.value), Some(revenue.value)) else {
-            continue;
-        };
-        snapshot.observations.push(FundamentalObservation {
-            canonical_key: Some(metric_key.to_string()),
-            metric_key: metric_key.to_string(),
-            metric_label: label.to_string(),
-            statement_type: "income_statement".to_string(),
-            period_type: "ttm".to_string(),
-            period_start: revenue.period_start.clone(),
-            period_end: Some(bundle.period_end.clone()),
-            as_of_date: Some(bundle.period_end.clone()),
-            filed_at: None,
-            fiscal_year: None,
-            fiscal_period: None,
-            value,
-            unit: Some("ratio".to_string()),
-            source_type: "derived".to_string(),
-            source_note: Some(format!(
-                "{label} derived only from observations aligned to {}.",
-                bundle.period_end
-            )),
-            concept_name: None,
-            form: None,
-            accession: None,
-            quality: Some("aligned".to_string()),
-            is_derived: true,
-        });
-    }
-}
-
-fn ttm_label(metric_key: &str) -> &'static str {
-    match metric_key {
-        "revenue_ttm" => "Revenue TTM",
-        "net_income_ttm" => "Net income TTM",
-        "gross_profit_ttm" => "Gross profit TTM",
-        "operating_income_ttm" => "Operating income TTM",
-        _ => "TTM metric",
-    }
-}
-
-fn ttm_canonical_key(metric_key: &str) -> &'static str {
-    match metric_key {
-        "revenue_ttm" => "revenue",
-        "net_income_ttm" => "net_income",
-        "gross_profit_ttm" => "gross_profit",
-        "operating_income_ttm" => "operating_income",
-        _ => "derived_metric",
-    }
-}
-
-fn ttm_series_for_metric(
-    metric_key: &'static str,
-    raw_facts: &[SecRawFact],
-    mappings: &[CanonicalMapping],
-    canonical_key: &str,
-    unit_hint: &str,
-) -> Vec<TtmMetric> {
-    let facts = facts_for_canonical(raw_facts, mappings, canonical_key, unit_hint);
-    let mut metrics = ttm_windows(metric_key, &facts);
-    if metrics.is_empty() {
-        if let Some(annual) = latest_duration_fact(&facts, &["10-K", "10-K/A"], 250, 380, None) {
-            if let Some(period_end) = annual.end.clone() {
-                metrics.push(TtmMetric {
-                    metric_key,
-                    value: annual.value,
-                    period_start: annual.start.clone(),
-                    period_end: period_end.clone(),
-                    source_note: format!(
-                        "{} used latest annual value through {period_end} because a contiguous TTM bridge was unavailable.",
-                        annual.concept
-                    ),
-                    quality_flags: vec![format!("{metric_key}_annual_fallback_used")],
-                });
-            }
-        }
-    }
-    metrics.sort_by(|left, right| right.period_end.cmp(&left.period_end));
-    metrics
-}
-
-fn ttm_windows(metric_key: &'static str, facts: &[SecFact]) -> Vec<TtmMetric> {
-    let quarters = latest_quarter_facts(facts);
-    let mut windows = Vec::new();
-    for window in quarters.windows(4) {
-        if !is_contiguous_ttm_window(window) {
-            continue;
-        }
-        let Some(latest) = window.first() else {
-            continue;
-        };
-        let Some(earliest) = window.last() else {
-            continue;
-        };
-        let Some(period_end) = latest.end.clone() else {
-            continue;
-        };
-        let value = window.iter().map(|fact| fact.value).sum();
-        windows.push(TtmMetric {
-            metric_key,
-            value,
-            period_start: earliest.start.clone(),
-            period_end: period_end.clone(),
-            source_note: format!(
-                "{} TTM summed from four contiguous quarterly facts through {period_end}.",
-                latest.concept
-            ),
-            quality_flags: Vec::new(),
-        });
-    }
-    windows
-}
-
-fn is_contiguous_ttm_window(facts: &[SecFact]) -> bool {
-    if facts.len() != 4 {
-        return false;
-    }
-    let Some(start) = facts.last().and_then(|fact| fact.start.as_deref()) else {
-        return false;
-    };
-    let Some(end) = facts.first().and_then(|fact| fact.end.as_deref()) else {
-        return false;
-    };
-    let Some(span_days) = days_between(start, end) else {
-        return false;
-    };
-    (300..=390).contains(&span_days)
-}
-
-fn days_between(start: &str, end: &str) -> Option<i64> {
-    let start = NaiveDate::parse_from_str(start, "%Y-%m-%d").ok()?;
-    let end = NaiveDate::parse_from_str(end, "%Y-%m-%d").ok()?;
-    Some((end - start).num_days())
-}
-
-fn sec_raw_facts(facts_root: &Value, fetched_at: &str) -> Vec<SecRawFact> {
-    facts_root
-        .as_object()
-        .into_iter()
-        .flat_map(|taxonomies| {
-            taxonomies.iter().flat_map(move |(taxonomy, concepts)| {
-                concepts.as_object().into_iter().flat_map(move |concepts| {
-                    concepts
-                        .iter()
-                        .flat_map(move |(concept_name, concept_payload)| {
-                            let label = string_at(concept_payload, "label");
-                            let description = string_at(concept_payload, "description");
-                            concept_payload
-                                .get("units")
-                                .and_then(Value::as_object)
-                                .into_iter()
-                                .flat_map(move |units| {
-                                    let label = label.clone();
-                                    let description = description.clone();
-                                    units.iter().flat_map(move |(unit, values)| {
-                                        let label = label.clone();
-                                        let description = description.clone();
-                                        values.as_array().into_iter().flatten().filter_map(
-                                            move |value| {
-                                                sec_raw_fact(
-                                                    taxonomy,
-                                                    concept_name,
-                                                    label.clone(),
-                                                    description.clone(),
-                                                    unit,
-                                                    value,
-                                                    fetched_at,
-                                                )
-                                            },
-                                        )
-                                    })
-                                })
-                        })
-                })
-            })
-        })
-        .collect()
-}
-
-fn sec_raw_fact(
-    taxonomy: &str,
-    concept_name: &str,
-    label: Option<String>,
-    description: Option<String>,
-    unit: &str,
-    value: &Value,
-    fetched_at: &str,
-) -> Option<SecRawFact> {
-    Some(SecRawFact {
-        taxonomy: taxonomy.to_string(),
-        concept_name: concept_name.to_string(),
-        label,
-        description,
-        unit: unit.to_string(),
-        form: string_at(value, "form"),
-        start: string_at(value, "start"),
-        end: string_at(value, "end"),
-        filed: string_at(value, "filed"),
-        fiscal_year: value.get("fy").and_then(Value::as_i64),
-        fiscal_period: string_at(value, "fp"),
-        accession: string_at(value, "accn"),
-        frame: string_at(value, "frame"),
-        value: number_at(value, "val")?,
-        raw_json: serde_json::to_string(value).ok()?,
-        fetched_at: fetched_at.to_string(),
-    })
-}
-
-impl From<&SecRawFact> for SecFact {
-    fn from(fact: &SecRawFact) -> Self {
-        Self {
-            concept: fact.concept_name.clone(),
-            form: fact.form.clone(),
-            start: fact.start.clone(),
-            end: fact.end.clone(),
-            filed: fact.filed.clone(),
-            value: fact.value,
-        }
-    }
-}
-
-fn seed_canonical_mappings(raw_facts: &[SecRawFact]) -> Vec<CanonicalMapping> {
-    let mut mappings = Vec::new();
-    for spec in CANONICAL_METRIC_SPECS {
-        for concept_name in spec.seed_concepts {
-            for unit in raw_facts
-                .iter()
-                .filter(|fact| {
-                    fact.taxonomy == "us-gaap"
-                        && fact.concept_name == *concept_name
-                        && unit_matches(&fact.unit, spec.unit_hint)
-                })
-                .map(|fact| fact.unit.clone())
-            {
-                if mappings.iter().any(|mapping: &CanonicalMapping| {
-                    mapping.canonical_key == spec.canonical_key
-                        && mapping.taxonomy == "us-gaap"
-                        && mapping.concept_name == *concept_name
-                        && mapping.unit == unit
-                }) {
-                    continue;
-                }
-                mappings.push(CanonicalMapping {
-                    canonical_key: spec.canonical_key,
-                    metric_key: spec.metric_key,
-                    metric_label: spec.metric_label,
-                    statement_type: spec.statement_type,
-                    taxonomy: "us-gaap".to_string(),
-                    concept_name: (*concept_name).to_string(),
-                    unit,
-                    confidence: "medium",
-                    rationale: format!(
-                        "Seeded from known SEC concept candidate for canonical metric '{}'. Agent review should confirm or replace this mapping.",
-                        spec.canonical_key
-                    ),
-                    selected_by: "heuristic_seed",
-                    is_active: true,
-                });
-            }
-        }
-    }
-    mappings
-}
-
-fn facts_for_canonical(
-    raw_facts: &[SecRawFact],
-    mappings: &[CanonicalMapping],
-    canonical_key: &str,
-    unit_hint: &str,
-) -> Vec<SecFact> {
-    mappings
-        .iter()
-        .filter(|mapping| mapping.is_active && mapping.canonical_key == canonical_key)
-        .flat_map(|mapping| {
-            raw_facts
-                .iter()
-                .filter(move |fact| {
-                    mapping_matches_fact(mapping, fact) && unit_matches(&fact.unit, unit_hint)
-                })
-                .map(SecFact::from)
-        })
-        .collect()
-}
-
-fn mapping_matches_fact(mapping: &CanonicalMapping, fact: &SecRawFact) -> bool {
-    mapping.taxonomy == fact.taxonomy
-        && mapping.concept_name == fact.concept_name
-        && mapping.unit == fact.unit
-}
-
-fn latest_value(
-    raw_facts: &[SecRawFact],
-    mappings: &[CanonicalMapping],
-    canonical_key: &str,
-    unit_hint: &str,
-) -> Option<f64> {
-    latest_value_fact(raw_facts, mappings, canonical_key, unit_hint, None).map(|fact| fact.value)
-}
-
-fn latest_value_fact(
-    raw_facts: &[SecRawFact],
-    mappings: &[CanonicalMapping],
-    canonical_key: &str,
-    unit_hint: &str,
-    prefer_period_end: Option<&str>,
-) -> Option<SecFact> {
-    facts_for_canonical(raw_facts, mappings, canonical_key, unit_hint)
-        .into_iter()
-        .filter(|fact| {
-            prefer_period_end.is_none_or(|period_end| {
-                fact.end.as_deref() <= Some(period_end)
-                    || fact
-                        .start
-                        .as_deref()
-                        .is_some_and(|start| start <= period_end)
-            })
-        })
-        .max_by(|left, right| {
-            (
-                left.end.as_deref().unwrap_or(""),
-                left.filed.as_deref().unwrap_or(""),
-            )
-                .cmp(&(
-                    right.end.as_deref().unwrap_or(""),
-                    right.filed.as_deref().unwrap_or(""),
-                ))
-        })
-}
-
-fn total_latest_values(
-    raw_facts: &[SecRawFact],
-    mappings: &[CanonicalMapping],
-    canonical_keys: &[&str],
-    unit_hint: &str,
-) -> Option<f64> {
-    let values: Vec<f64> = canonical_keys
-        .iter()
-        .filter_map(|canonical_key| latest_value(raw_facts, mappings, canonical_key, unit_hint))
-        .collect();
-    (!values.is_empty()).then(|| values.iter().sum())
-}
-
-fn latest_duration_fact(
-    facts: &[SecFact],
-    forms: &[&str],
-    min_days: i64,
-    max_days: i64,
-    end_after: Option<&str>,
-) -> Option<SecFact> {
-    facts
-        .iter()
-        .filter(|fact| {
-            fact.form
-                .as_deref()
-                .is_some_and(|form| forms.contains(&form))
-                && duration_days(fact).is_some_and(|days| min_days <= days && days <= max_days)
-                && end_after.is_none_or(|end_after| fact.end.as_deref().unwrap_or("") > end_after)
-        })
-        .max_by(|left, right| {
-            (
-                left.end.as_deref().unwrap_or(""),
-                left.filed.as_deref().unwrap_or(""),
-            )
-                .cmp(&(
-                    right.end.as_deref().unwrap_or(""),
-                    right.filed.as_deref().unwrap_or(""),
-                ))
-        })
-        .cloned()
-}
-
-fn latest_quarter_facts(facts: &[SecFact]) -> Vec<SecFact> {
-    let mut by_end: BTreeMap<String, SecFact> = BTreeMap::new();
-    for fact in facts.iter().filter(|fact| {
-        fact.form
-            .as_deref()
-            .is_some_and(|form| matches!(form, "10-Q" | "10-K"))
-            && duration_days(fact).is_some_and(|days| (60..=120).contains(&days))
-    }) {
-        if let Some(end) = &fact.end {
-            by_end
-                .entry(end.clone())
-                .and_modify(|existing| {
-                    if fact.filed > existing.filed {
-                        *existing = fact.clone();
-                    }
-                })
-                .or_insert_with(|| fact.clone());
-        }
-    }
-
-    let mut facts: Vec<SecFact> = by_end.into_values().collect();
-    facts.sort_by(|left, right| {
-        (
-            right.end.as_deref().unwrap_or(""),
-            right.filed.as_deref().unwrap_or(""),
-        )
-            .cmp(&(
-                left.end.as_deref().unwrap_or(""),
-                left.filed.as_deref().unwrap_or(""),
-            ))
-    });
-    facts
-}
-
-fn unit_matches(unit: &str, unit_hint: &str) -> bool {
-    unit.to_lowercase().contains(&unit_hint.to_lowercase())
-}
-
-fn fact_period_type(fact: &SecRawFact) -> &'static str {
-    let sec_fact = SecFact::from(fact);
-    let Some(days) = duration_days(&sec_fact) else {
-        return "instant";
-    };
-
-    if (60..=120).contains(&days) {
-        "quarter"
-    } else if is_quarterly_filing(fact) || (121..=299).contains(&days) {
-        "ytd"
-    } else if (300..=390).contains(&days) {
-        "annual"
-    } else {
-        "instant"
-    }
-}
-
-fn is_quarterly_filing(fact: &SecRawFact) -> bool {
-    fact.form
-        .as_deref()
-        .is_some_and(|form| matches!(form, "10-Q" | "10-Q/A"))
-        && fact
-            .fiscal_period
-            .as_deref()
-            .is_some_and(|period| matches!(period, "Q2" | "Q3" | "Q4"))
-}
-
-fn duration_days(fact: &SecFact) -> Option<i64> {
-    let start = NaiveDate::parse_from_str(fact.start.as_deref()?, "%Y-%m-%d").ok()?;
-    let end = NaiveDate::parse_from_str(fact.end.as_deref()?, "%Y-%m-%d").ok()?;
-    Some((end - start).num_days())
-}
-
 async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
     db.execute(Statement::from_string(
         DatabaseBackend::Sqlite,
@@ -2015,35 +1031,7 @@ async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
     Ok(())
 }
 
-fn normalize_ticker(raw: &str) -> Result<String> {
-    let ticker = raw.trim().to_uppercase();
-    if ticker.is_empty() {
-        return Err(Error::string("ticker cannot be empty"));
-    }
 
-    let valid = ticker
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'));
-
-    if !valid {
-        return Err(Error::string(
-            "ticker can only contain ASCII letters, numbers, dots, and hyphens",
-        ));
-    }
-
-    Ok(ticker)
-}
-
-fn validate_date(date: &str) -> Result<()> {
-    NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map(|_| ())
-        .map_err(|_| Error::string("date must use YYYY-MM-DD format, for example date:2026-06-04"))
-}
-
-fn sqlite_uri(path: &Path) -> String {
-    let normalized_path = path.to_string_lossy().replace('\\', "/");
-    format!("sqlite://{normalized_path}?mode=rwc")
-}
 
 fn sql_quote(value: &str) -> String {
     value.replace('\'', "''")
@@ -2062,17 +1050,6 @@ fn sql_number(value: Option<f64>) -> String {
 
 fn sql_i64(value: Option<i64>) -> String {
     value.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-}
-
-fn string_at(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-fn number_at(value: &Value, key: &str) -> Option<f64> {
-    match value.get(key)? {
-        Value::Number(number) => number.as_f64(),
-        _ => None,
-    }
 }
 
 fn merge_string(target: &mut Option<String>, update: Option<String>, overwrite: bool) {
@@ -2106,7 +1083,7 @@ fn multiply(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     Some(left? * right?)
 }
 
-const SCHEMA_STATEMENTS: &[&str] = &[
+pub const SCHEMA_STATEMENTS: &[&str] = &[
     "PRAGMA foreign_keys = ON",
     "CREATE TABLE IF NOT EXISTS run_metadata (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -2491,7 +1468,11 @@ const SCHEMA_STATEMENTS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::services::{
+        concept_catalog::{ttm_windows, ConceptCatalog, SecFact},
+        sec_facts_provider::extract_raw_facts_from_root,
+    };
+    use serde_json::{json, Value};
 
     #[test]
     fn builds_ttm_from_four_contiguous_quarters() {
@@ -2542,10 +1523,10 @@ mod tests {
                 }
             }
         });
-        let raw_facts = sec_raw_facts(&facts_root, "2026-06-04T00:00:00Z");
-        let mappings = seed_canonical_mappings(&raw_facts);
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
 
-        let bundle = select_latest_income_bundle(&raw_facts, &mappings)
+        let bundle = ConceptCatalog::select_latest_baseline_bundle(&raw_facts, &mappings)
             .expect("coherent revenue/net income");
 
         assert_eq!(bundle.period_end, "2026-03-31");
@@ -2577,9 +1558,9 @@ mod tests {
             }
         });
 
-        let raw_facts = sec_raw_facts(&facts_root, "2026-06-04T00:00:00Z");
-        let mappings = seed_canonical_mappings(&raw_facts);
-        let observations = canonical_sec_observations(&raw_facts, &mappings);
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+        let observations = ConceptCatalog::build_observations(&raw_facts, &mappings);
 
         assert!(raw_facts
             .iter()
@@ -2612,9 +1593,9 @@ mod tests {
                 }
             }
         });
-        let raw_facts = sec_raw_facts(&facts_root, "2026-06-04T00:00:00Z");
-        let mappings = seed_canonical_mappings(&raw_facts);
-        let observations = canonical_sec_observations(&raw_facts, &mappings);
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+        let observations = ConceptCatalog::build_observations(&raw_facts, &mappings);
         let mut base = FinancialSnapshot::new("TEST");
         let mut update = FinancialSnapshot::new("TEST");
         update.raw_sec_facts = raw_facts.clone();
@@ -2640,11 +1621,11 @@ mod tests {
         let annual = raw_test_fact("10-K", Some("2024-06-01"), Some("2025-05-31"), "FY");
         let instant = raw_test_fact("10-Q", None, Some("2026-02-28"), "Q3");
 
-        assert_eq!(fact_period_type(&q2_ytd), "ytd");
-        assert_eq!(fact_period_type(&q3_ytd), "ytd");
-        assert_eq!(fact_period_type(&q3_quarter), "quarter");
-        assert_eq!(fact_period_type(&annual), "annual");
-        assert_eq!(fact_period_type(&instant), "instant");
+        assert_eq!(ConceptCatalog::classify_period(&q2_ytd), "ytd");
+        assert_eq!(ConceptCatalog::classify_period(&q3_ytd), "ytd");
+        assert_eq!(ConceptCatalog::classify_period(&q3_quarter), "quarter");
+        assert_eq!(ConceptCatalog::classify_period(&annual), "annual");
+        assert_eq!(ConceptCatalog::classify_period(&instant), "instant");
     }
 
     fn raw_test_fact(
