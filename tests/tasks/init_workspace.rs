@@ -108,6 +108,10 @@ async fn test_initializes_workspace_directories_and_database() {
         scalar_i64(
             &db,
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
+                'sec_raw_facts',
+                'canonical_metric_definitions',
+                'canonical_metric_mappings',
+                'supporting_metric_selections',
                 'fundamental_observations',
                 'data_quality_flags',
                 'scenario_crux_assumptions',
@@ -120,6 +124,21 @@ async fn test_initializes_workspace_directories_and_database() {
             )"
         )
         .await,
+        13
+    );
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name IN (
+                'raw_fact_metric_catalog',
+                'canonical_fundamental_observations'
+            )"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        scalar_i64(&db, "SELECT COUNT(*) FROM canonical_metric_definitions").await,
         9
     );
     assert_eq!(

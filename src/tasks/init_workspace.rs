@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, Utc};
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement, TransactionTrait};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -11,9 +11,10 @@ use std::{
 
 const DEFAULT_REPORT_ROOT: &str = "reports/stock-narrative-research";
 const RUN_DB_FILENAME: &str = "run.sqlite";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SEC_USER_AGENT: &str = "stock-agent-2/0.1 research@example.local";
 const SEC_TICKERS_URL: &str = "https://www.sec.gov/files/company_tickers.json";
+const BULK_INSERT_CHUNK_SIZE: usize = 250;
 const REQUIRED_SECTIONS: &[&str] = &[
     "orientation",
     "business_model",
@@ -44,6 +45,8 @@ pub struct FinancialSnapshot {
     pub source_notes: Vec<String>,
     pub quality_flags: Vec<String>,
     pub observations: Vec<FundamentalObservation>,
+    pub raw_sec_facts: Vec<SecRawFact>,
+    pub canonical_mappings: Vec<CanonicalMapping>,
     pub gaps: Vec<String>,
     pub currency: Option<String>,
     pub company_name: Option<String>,
@@ -68,6 +71,7 @@ pub struct FinancialSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct FundamentalObservation {
+    pub canonical_key: Option<String>,
     pub metric_key: String,
     pub metric_label: String,
     pub statement_type: String,
@@ -87,6 +91,41 @@ pub struct FundamentalObservation {
     pub accession: Option<String>,
     pub quality: Option<String>,
     pub is_derived: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SecRawFact {
+    pub taxonomy: String,
+    pub concept_name: String,
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub unit: String,
+    pub form: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub filed: Option<String>,
+    pub fiscal_year: Option<i64>,
+    pub fiscal_period: Option<String>,
+    pub accession: Option<String>,
+    pub frame: Option<String>,
+    pub value: f64,
+    pub raw_json: String,
+    pub fetched_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalMapping {
+    pub canonical_key: &'static str,
+    pub metric_key: &'static str,
+    pub metric_label: &'static str,
+    pub statement_type: &'static str,
+    pub taxonomy: String,
+    pub concept_name: String,
+    pub unit: String,
+    pub confidence: &'static str,
+    pub rationale: String,
+    pub selected_by: &'static str,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +324,7 @@ async fn seed_database(
     .await?;
 
     execute_sql(db, "INSERT INTO monte_carlo_config (id) VALUES (1)").await?;
+    seed_canonical_metric_definitions(db, &now).await?;
 
     for (index, section_key) in REQUIRED_SECTIONS.iter().enumerate() {
         execute_sql(
@@ -435,6 +475,8 @@ impl FinancialSnapshot {
         extend_unique(&mut self.data_sources, update.data_sources);
         extend_unique(&mut self.source_notes, update.source_notes);
         extend_unique(&mut self.quality_flags, update.quality_flags);
+        self.raw_sec_facts.extend(update.raw_sec_facts);
+        self.canonical_mappings.extend(update.canonical_mappings);
         self.observations.extend(update.observations);
     }
 
@@ -515,6 +557,7 @@ async fn fetch_yahoo_chart_snapshot(
         number_at(meta, "regularMarketPrice").or_else(|| number_at(meta, "previousClose"));
     if let Some(price) = snapshot.current_price {
         snapshot.observations.push(FundamentalObservation {
+            canonical_key: Some("current_price".to_string()),
             metric_key: "current_price".to_string(),
             metric_label: "Current price".to_string(),
             statement_type: "market".to_string(),
@@ -561,53 +604,40 @@ async fn fetch_sec_companyfacts_snapshot(
         .map(str::to_string);
     let url = format!("https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010}.json");
     let payload = fetch_json(client, &url, Some(SEC_USER_AGENT)).await?;
-    let us_gaap = payload
-        .pointer("/facts/us-gaap")
-        .ok_or_else(|| Error::string("SEC Company Facts response did not include us-gaap facts"))?;
+    let facts_root = payload
+        .get("facts")
+        .ok_or_else(|| Error::string("SEC Company Facts response did not include facts"))?;
 
-    let observations = sec_observations(us_gaap);
-    let bundle = select_latest_income_bundle(us_gaap);
+    let mut snapshot = FinancialSnapshot::new(ticker);
+    let raw_sec_facts = sec_raw_facts(facts_root, &snapshot.fetched_at);
+    let canonical_mappings = seed_canonical_mappings(&raw_sec_facts);
+    let observations = canonical_sec_observations(&raw_sec_facts, &canonical_mappings);
+    let bundle = select_latest_income_bundle(&raw_sec_facts, &canonical_mappings);
     let shares_fact = latest_value_fact(
-        us_gaap,
-        &[
-            "WeightedAverageNumberOfDilutedSharesOutstanding",
-            "CommonStockSharesOutstanding",
-        ],
+        &raw_sec_facts,
+        &canonical_mappings,
+        "shares_outstanding",
         "shares",
         bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
     );
     let eps_fact = latest_value_fact(
-        us_gaap,
-        &["EarningsPerShareDiluted"],
+        &raw_sec_facts,
+        &canonical_mappings,
+        "eps",
         "USD/shares",
         bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
     );
-    let cash_fact = latest_value_fact(
-        us_gaap,
-        &[
-            "CashAndCashEquivalentsAtCarryingValue",
-            "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
-        ],
-        "USD",
-        None,
-    );
+    let cash_fact = latest_value_fact(&raw_sec_facts, &canonical_mappings, "cash", "USD", None);
     let debt = total_latest_values(
-        us_gaap,
-        &[
-            &[
-                "DebtCurrent",
-                "LongTermDebtAndFinanceLeaseObligationsCurrent",
-            ][..],
-            &[
-                "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
-                "LongTermDebtAndCapitalLeaseObligations",
-            ][..],
-        ],
+        &raw_sec_facts,
+        &canonical_mappings,
+        &["debt_current", "debt_noncurrent"],
         "USD",
     );
 
-    let mut snapshot = FinancialSnapshot::new(ticker);
     snapshot.company_name = company_name;
+    snapshot.raw_sec_facts = raw_sec_facts;
+    snapshot.canonical_mappings = canonical_mappings;
     snapshot.observations = observations;
     if let Some(bundle) = bundle {
         append_bundle_observations(&mut snapshot, &bundle);
@@ -707,9 +737,14 @@ async fn persist_financial_snapshot(
     db: &sea_orm::DatabaseConnection,
     snapshot: &FinancialSnapshot,
 ) -> Result<()> {
+    let txn = db.begin().await.map_err(|err| {
+        Error::string(&format!(
+            "failed to begin financial snapshot transaction: {err}"
+        ))
+    })?;
     let source_note = snapshot.source_notes.join(" ");
     execute_sql(
-        db,
+        &txn,
         &format!(
             "UPDATE stock_info
              SET company_name = {}, currency = {}, source_note = {}, updated_at = '{}'
@@ -722,62 +757,201 @@ async fn persist_financial_snapshot(
     )
     .await?;
 
-    for observation in &snapshot.observations {
-        insert_observation(db, observation, &snapshot.fetched_at).await?;
+    insert_raw_sec_facts(&txn, &snapshot.raw_sec_facts).await?;
+    for mapping in &snapshot.canonical_mappings {
+        insert_canonical_mapping(&txn, mapping, &snapshot.fetched_at).await?;
     }
+    insert_observations(&txn, &snapshot.observations, &snapshot.fetched_at).await?;
     for flag in &snapshot.quality_flags {
-        insert_data_quality_flag(db, flag, &snapshot.fetched_at).await?;
+        insert_data_quality_flag(&txn, flag, &snapshot.fetched_at).await?;
     }
     for metric in snapshot.fundamental_metrics() {
-        insert_fundamental(db, &metric, &snapshot.fetched_at).await?;
+        insert_fundamental(&txn, &metric, &snapshot.fetched_at).await?;
+    }
+
+    txn.commit().await.map_err(|err| {
+        Error::string(&format!(
+            "failed to commit financial snapshot transaction: {err}"
+        ))
+    })?;
+
+    Ok(())
+}
+
+async fn seed_canonical_metric_definitions(
+    db: &sea_orm::DatabaseConnection,
+    created_at: &str,
+) -> Result<()> {
+    for spec in CANONICAL_METRIC_SPECS {
+        execute_sql(
+            db,
+            &format!(
+                "INSERT INTO canonical_metric_definitions (
+                    canonical_key, metric_key, metric_label, statement_type, unit_hint,
+                    display_order, created_at
+                ) VALUES (
+                    '{}', '{}', '{}', '{}', '{}', {}, '{}'
+                )
+                ON CONFLICT(canonical_key) DO UPDATE SET
+                    metric_key = excluded.metric_key,
+                    metric_label = excluded.metric_label,
+                    statement_type = excluded.statement_type,
+                    unit_hint = excluded.unit_hint,
+                    display_order = excluded.display_order",
+                sql_quote(spec.canonical_key),
+                sql_quote(spec.metric_key),
+                sql_quote(spec.metric_label),
+                sql_quote(spec.statement_type),
+                sql_quote(spec.unit_hint),
+                spec.display_order,
+                sql_quote(created_at),
+            ),
+        )
+        .await?;
     }
 
     Ok(())
 }
 
-async fn insert_observation(
-    db: &sea_orm::DatabaseConnection,
-    observation: &FundamentalObservation,
+async fn insert_raw_sec_facts(db: &impl ConnectionTrait, facts: &[SecRawFact]) -> Result<()> {
+    for chunk in facts.chunks(BULK_INSERT_CHUNK_SIZE) {
+        let values = chunk
+            .iter()
+            .map(raw_sec_fact_values)
+            .collect::<Vec<_>>()
+            .join(",\n");
+        execute_sql(
+            db,
+            &format!(
+                "INSERT INTO sec_raw_facts (
+                    taxonomy, concept_name, label, description, unit, form, period_start, period_end,
+                    filed_at, fiscal_year, fiscal_period, accession, frame, metric_value, raw_json,
+                    fetched_at
+                ) VALUES
+                {values}"
+            ),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn raw_sec_fact_values(fact: &SecRawFact) -> String {
+    format!(
+        "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', '{}')",
+        sql_quote(&fact.taxonomy),
+        sql_quote(&fact.concept_name),
+        sql_value(fact.label.as_deref()),
+        sql_value(fact.description.as_deref()),
+        sql_quote(&fact.unit),
+        sql_value(fact.form.as_deref()),
+        sql_value(fact.start.as_deref()),
+        sql_value(fact.end.as_deref()),
+        sql_value(fact.filed.as_deref()),
+        sql_i64(fact.fiscal_year),
+        sql_value(fact.fiscal_period.as_deref()),
+        sql_value(fact.accession.as_deref()),
+        sql_value(fact.frame.as_deref()),
+        fact.value,
+        sql_quote(&fact.raw_json),
+        sql_quote(&fact.fetched_at),
+    )
+}
+
+async fn insert_canonical_mapping(
+    db: &impl ConnectionTrait,
+    mapping: &CanonicalMapping,
     updated_at: &str,
 ) -> Result<()> {
     execute_sql(
         db,
         &format!(
-            "INSERT INTO fundamental_observations (
-                metric_key, metric_label, statement_type, period_type, period_start, period_end,
-                as_of_date, filed_at, fiscal_year, fiscal_period, metric_value, unit,
-                source_type, source_note, concept_name, form, accession, quality, is_derived,
-                updated_at
+            "INSERT INTO canonical_metric_mappings (
+                canonical_key, taxonomy, concept_name, unit, confidence, rationale, selected_by,
+                is_active, created_at, updated_at
             ) VALUES (
-                '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}, {}, {}, '{}', {}, {}, {}, {}, {}, {}, '{}'
-            )",
-            sql_quote(&observation.metric_key),
-            sql_quote(&observation.metric_label),
-            sql_quote(&observation.statement_type),
-            sql_quote(&observation.period_type),
-            sql_value(observation.period_start.as_deref()),
-            sql_value(observation.period_end.as_deref()),
-            sql_value(observation.as_of_date.as_deref()),
-            sql_value(observation.filed_at.as_deref()),
-            sql_i64(observation.fiscal_year),
-            sql_value(observation.fiscal_period.as_deref()),
-            observation.value,
-            sql_value(observation.unit.as_deref()),
-            sql_quote(&observation.source_type),
-            sql_value(observation.source_note.as_deref()),
-            sql_value(observation.concept_name.as_deref()),
-            sql_value(observation.form.as_deref()),
-            sql_value(observation.accession.as_deref()),
-            sql_value(observation.quality.as_deref()),
-            if observation.is_derived { 1 } else { 0 },
+                '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, '{}', '{}'
+            )
+            ON CONFLICT(canonical_key, taxonomy, concept_name, unit) DO UPDATE SET
+                confidence = excluded.confidence,
+                rationale = excluded.rationale,
+                selected_by = excluded.selected_by,
+                is_active = excluded.is_active,
+                updated_at = excluded.updated_at",
+            sql_quote(mapping.canonical_key),
+            sql_quote(&mapping.taxonomy),
+            sql_quote(&mapping.concept_name),
+            sql_quote(&mapping.unit),
+            sql_quote(mapping.confidence),
+            sql_quote(&mapping.rationale),
+            sql_quote(mapping.selected_by),
+            if mapping.is_active { 1 } else { 0 },
+            sql_quote(updated_at),
             sql_quote(updated_at),
         ),
     )
     .await
 }
 
+async fn insert_observations(
+    db: &impl ConnectionTrait,
+    observations: &[FundamentalObservation],
+    updated_at: &str,
+) -> Result<()> {
+    for chunk in observations.chunks(BULK_INSERT_CHUNK_SIZE) {
+        let values = chunk
+            .iter()
+            .map(|observation| observation_values(observation, updated_at))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        execute_sql(
+            db,
+            &format!(
+                "INSERT INTO fundamental_observations (
+                    canonical_key, metric_key, metric_label, statement_type, period_type, period_start, period_end,
+                    as_of_date, filed_at, fiscal_year, fiscal_period, metric_value, unit,
+                    source_type, source_note, concept_name, form, accession, quality, is_derived,
+                    updated_at
+                ) VALUES
+                {values}"
+            ),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn observation_values(observation: &FundamentalObservation, updated_at: &str) -> String {
+    format!(
+        "({}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}, {}, {}, '{}', {}, {}, {}, {}, {}, {}, '{}')",
+        sql_value(observation.canonical_key.as_deref()),
+        sql_quote(&observation.metric_key),
+        sql_quote(&observation.metric_label),
+        sql_quote(&observation.statement_type),
+        sql_quote(&observation.period_type),
+        sql_value(observation.period_start.as_deref()),
+        sql_value(observation.period_end.as_deref()),
+        sql_value(observation.as_of_date.as_deref()),
+        sql_value(observation.filed_at.as_deref()),
+        sql_i64(observation.fiscal_year),
+        sql_value(observation.fiscal_period.as_deref()),
+        observation.value,
+        sql_value(observation.unit.as_deref()),
+        sql_quote(&observation.source_type),
+        sql_value(observation.source_note.as_deref()),
+        sql_value(observation.concept_name.as_deref()),
+        sql_value(observation.form.as_deref()),
+        sql_value(observation.accession.as_deref()),
+        sql_value(observation.quality.as_deref()),
+        if observation.is_derived { 1 } else { 0 },
+        sql_quote(updated_at),
+    )
+}
+
 async fn insert_data_quality_flag(
-    db: &sea_orm::DatabaseConnection,
+    db: &impl ConnectionTrait,
     flag: &str,
     created_at: &str,
 ) -> Result<()> {
@@ -799,7 +973,7 @@ async fn insert_data_quality_flag(
 }
 
 async fn insert_fundamental(
-    db: &sea_orm::DatabaseConnection,
+    db: &impl ConnectionTrait,
     metric: &FinancialMetric<'_>,
     updated_at: &str,
 ) -> Result<()> {
@@ -1054,24 +1228,22 @@ impl FinancialSnapshot {
 #[derive(Debug, Clone)]
 struct SecFact {
     concept: String,
-    unit: String,
     form: Option<String>,
     start: Option<String>,
     end: Option<String>,
     filed: Option<String>,
-    fiscal_year: Option<i64>,
-    fiscal_period: Option<String>,
-    accession: Option<String>,
     value: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ConceptSpec {
+struct CanonicalMetricSpec {
+    canonical_key: &'static str,
     metric_key: &'static str,
     metric_label: &'static str,
     statement_type: &'static str,
-    concepts: &'static [&'static str],
     unit_hint: &'static str,
+    seed_concepts: &'static [&'static str],
+    display_order: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1120,89 +1292,112 @@ const DEBT_NONCURRENT_CONCEPTS: &[&str] = &[
     "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
     "LongTermDebtAndCapitalLeaseObligations",
 ];
-const SEC_CONCEPT_SPECS: &[ConceptSpec] = &[
-    ConceptSpec {
+const CANONICAL_METRIC_SPECS: &[CanonicalMetricSpec] = &[
+    CanonicalMetricSpec {
+        canonical_key: "revenue",
         metric_key: "revenue",
         metric_label: "Revenue",
         statement_type: "income_statement",
-        concepts: REVENUE_CONCEPTS,
         unit_hint: "USD",
+        seed_concepts: REVENUE_CONCEPTS,
+        display_order: 10,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "net_income",
         metric_key: "net_income",
         metric_label: "Net income",
         statement_type: "income_statement",
-        concepts: NET_INCOME_CONCEPTS,
         unit_hint: "USD",
+        seed_concepts: NET_INCOME_CONCEPTS,
+        display_order: 20,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "gross_profit",
         metric_key: "gross_profit",
         metric_label: "Gross profit",
         statement_type: "income_statement",
-        concepts: GROSS_PROFIT_CONCEPTS,
         unit_hint: "USD",
+        seed_concepts: GROSS_PROFIT_CONCEPTS,
+        display_order: 30,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "operating_income",
         metric_key: "operating_income",
         metric_label: "Operating income",
         statement_type: "income_statement",
-        concepts: OPERATING_INCOME_CONCEPTS,
         unit_hint: "USD",
+        seed_concepts: OPERATING_INCOME_CONCEPTS,
+        display_order: 40,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "shares_outstanding",
         metric_key: "diluted_shares",
         metric_label: "Diluted shares",
         statement_type: "income_statement",
-        concepts: DILUTED_SHARES_CONCEPTS,
         unit_hint: "shares",
+        seed_concepts: DILUTED_SHARES_CONCEPTS,
+        display_order: 50,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "eps",
         metric_key: "eps",
         metric_label: "Diluted EPS",
         statement_type: "income_statement",
-        concepts: EPS_CONCEPTS,
         unit_hint: "USD/shares",
+        seed_concepts: EPS_CONCEPTS,
+        display_order: 60,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "cash",
         metric_key: "cash",
         metric_label: "Cash and equivalents",
         statement_type: "balance_sheet",
-        concepts: CASH_CONCEPTS,
         unit_hint: "USD",
+        seed_concepts: CASH_CONCEPTS,
+        display_order: 70,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "debt_current",
         metric_key: "debt_current",
         metric_label: "Current debt",
         statement_type: "balance_sheet",
-        concepts: DEBT_CURRENT_CONCEPTS,
         unit_hint: "USD",
+        seed_concepts: DEBT_CURRENT_CONCEPTS,
+        display_order: 80,
     },
-    ConceptSpec {
+    CanonicalMetricSpec {
+        canonical_key: "debt_noncurrent",
         metric_key: "debt_noncurrent",
         metric_label: "Noncurrent debt",
         statement_type: "balance_sheet",
-        concepts: DEBT_NONCURRENT_CONCEPTS,
         unit_hint: "USD",
+        seed_concepts: DEBT_NONCURRENT_CONCEPTS,
+        display_order: 90,
     },
 ];
 
-fn sec_observations(us_gaap: &Value) -> Vec<FundamentalObservation> {
-    SEC_CONCEPT_SPECS
+fn canonical_sec_observations(
+    raw_facts: &[SecRawFact],
+    mappings: &[CanonicalMapping],
+) -> Vec<FundamentalObservation> {
+    mappings
         .iter()
-        .flat_map(|spec| {
-            statement_facts(us_gaap, spec.concepts)
-                .into_iter()
-                .filter(|fact| unit_matches(&fact.unit, spec.unit_hint))
-                .map(move |fact| sec_observation(spec, &fact))
+        .filter(|mapping| mapping.is_active)
+        .flat_map(|mapping| {
+            raw_facts
+                .iter()
+                .filter(move |fact| mapping_matches_fact(mapping, fact))
+                .map(move |fact| sec_observation(mapping, fact))
         })
         .collect()
 }
 
-fn sec_observation(spec: &ConceptSpec, fact: &SecFact) -> FundamentalObservation {
+fn sec_observation(mapping: &CanonicalMapping, fact: &SecRawFact) -> FundamentalObservation {
     FundamentalObservation {
-        metric_key: spec.metric_key.to_string(),
-        metric_label: spec.metric_label.to_string(),
-        statement_type: spec.statement_type.to_string(),
+        canonical_key: Some(mapping.canonical_key.to_string()),
+        metric_key: mapping.metric_key.to_string(),
+        metric_label: mapping.metric_label.to_string(),
+        statement_type: mapping.statement_type.to_string(),
         period_type: fact_period_type(fact).to_string(),
         period_start: fact.start.clone(),
         period_end: fact.end.clone(),
@@ -1214,14 +1409,15 @@ fn sec_observation(spec: &ConceptSpec, fact: &SecFact) -> FundamentalObservation
         unit: Some(fact.unit.clone()),
         source_type: "SEC Company Facts".to_string(),
         source_note: Some(format!(
-            "{} from SEC concept {} filed {}.",
-            spec.metric_label,
-            fact.concept,
+            "{} from canonical SEC concept {}:{} filed {}.",
+            mapping.metric_label,
+            fact.taxonomy,
+            fact.concept_name,
             fact.filed
                 .clone()
                 .unwrap_or_else(|| "unknown date".to_string())
         )),
-        concept_name: Some(fact.concept.clone()),
+        concept_name: Some(fact.concept_name.clone()),
         form: fact.form.clone(),
         accession: fact.accession.clone(),
         quality: None,
@@ -1229,15 +1425,25 @@ fn sec_observation(spec: &ConceptSpec, fact: &SecFact) -> FundamentalObservation
     }
 }
 
-fn select_latest_income_bundle(us_gaap: &Value) -> Option<IncomeBundle> {
-    let revenue = ttm_series_for_metric("revenue_ttm", us_gaap, REVENUE_CONCEPTS, "USD");
-    let net_income = ttm_series_for_metric("net_income_ttm", us_gaap, NET_INCOME_CONCEPTS, "USD");
-    let gross_profit =
-        ttm_series_for_metric("gross_profit_ttm", us_gaap, GROSS_PROFIT_CONCEPTS, "USD");
+fn select_latest_income_bundle(
+    raw_facts: &[SecRawFact],
+    mappings: &[CanonicalMapping],
+) -> Option<IncomeBundle> {
+    let revenue = ttm_series_for_metric("revenue_ttm", raw_facts, mappings, "revenue", "USD");
+    let net_income =
+        ttm_series_for_metric("net_income_ttm", raw_facts, mappings, "net_income", "USD");
+    let gross_profit = ttm_series_for_metric(
+        "gross_profit_ttm",
+        raw_facts,
+        mappings,
+        "gross_profit",
+        "USD",
+    );
     let operating_income = ttm_series_for_metric(
         "operating_income_ttm",
-        us_gaap,
-        OPERATING_INCOME_CONCEPTS,
+        raw_facts,
+        mappings,
+        "operating_income",
         "USD",
     );
 
@@ -1314,6 +1520,7 @@ fn append_bundle_observations(snapshot: &mut FinancialSnapshot, bundle: &IncomeB
     {
         let label = ttm_label(metric.metric_key);
         snapshot.observations.push(FundamentalObservation {
+            canonical_key: Some(ttm_canonical_key(metric.metric_key).to_string()),
             metric_key: metric.metric_key.to_string(),
             metric_label: label.to_string(),
             statement_type: "income_statement".to_string(),
@@ -1359,6 +1566,7 @@ fn append_bundle_observations(snapshot: &mut FinancialSnapshot, bundle: &IncomeB
             continue;
         };
         snapshot.observations.push(FundamentalObservation {
+            canonical_key: Some(metric_key.to_string()),
             metric_key: metric_key.to_string(),
             metric_label: label.to_string(),
             statement_type: "income_statement".to_string(),
@@ -1395,16 +1603,24 @@ fn ttm_label(metric_key: &str) -> &'static str {
     }
 }
 
+fn ttm_canonical_key(metric_key: &str) -> &'static str {
+    match metric_key {
+        "revenue_ttm" => "revenue",
+        "net_income_ttm" => "net_income",
+        "gross_profit_ttm" => "gross_profit",
+        "operating_income_ttm" => "operating_income",
+        _ => "derived_metric",
+    }
+}
+
 fn ttm_series_for_metric(
     metric_key: &'static str,
-    us_gaap: &Value,
-    concepts: &[&str],
+    raw_facts: &[SecRawFact],
+    mappings: &[CanonicalMapping],
+    canonical_key: &str,
     unit_hint: &str,
 ) -> Vec<TtmMetric> {
-    let facts = statement_facts(us_gaap, concepts)
-        .into_iter()
-        .filter(|fact| unit_matches(&fact.unit, unit_hint))
-        .collect::<Vec<_>>();
+    let facts = facts_for_canonical(raw_facts, mappings, canonical_key, unit_hint);
     let mut metrics = ttm_windows(metric_key, &facts);
     if metrics.is_empty() {
         if let Some(annual) = latest_duration_fact(&facts, &["10-K", "10-K/A"], 250, 380, None) {
@@ -1481,31 +1697,64 @@ fn days_between(start: &str, end: &str) -> Option<i64> {
     Some((end - start).num_days())
 }
 
-fn statement_facts(us_gaap: &Value, concepts: &[&str]) -> Vec<SecFact> {
-    concepts
-        .iter()
-        .filter_map(|concept| us_gaap.get(*concept).map(|payload| (*concept, payload)))
-        .flat_map(|(concept, payload)| {
-            payload
-                .get("units")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flat_map(move |units| {
-                    units.iter().flat_map(move |(unit, values)| {
-                        values
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(move |value| sec_fact(concept, unit, value))
-                    })
+fn sec_raw_facts(facts_root: &Value, fetched_at: &str) -> Vec<SecRawFact> {
+    facts_root
+        .as_object()
+        .into_iter()
+        .flat_map(|taxonomies| {
+            taxonomies.iter().flat_map(move |(taxonomy, concepts)| {
+                concepts.as_object().into_iter().flat_map(move |concepts| {
+                    concepts
+                        .iter()
+                        .flat_map(move |(concept_name, concept_payload)| {
+                            let label = string_at(concept_payload, "label");
+                            let description = string_at(concept_payload, "description");
+                            concept_payload
+                                .get("units")
+                                .and_then(Value::as_object)
+                                .into_iter()
+                                .flat_map(move |units| {
+                                    let label = label.clone();
+                                    let description = description.clone();
+                                    units.iter().flat_map(move |(unit, values)| {
+                                        let label = label.clone();
+                                        let description = description.clone();
+                                        values.as_array().into_iter().flatten().filter_map(
+                                            move |value| {
+                                                sec_raw_fact(
+                                                    taxonomy,
+                                                    concept_name,
+                                                    label.clone(),
+                                                    description.clone(),
+                                                    unit,
+                                                    value,
+                                                    fetched_at,
+                                                )
+                                            },
+                                        )
+                                    })
+                                })
+                        })
                 })
+            })
         })
         .collect()
 }
 
-fn sec_fact(concept: &str, unit: &str, value: &Value) -> Option<SecFact> {
-    Some(SecFact {
-        concept: concept.to_string(),
+fn sec_raw_fact(
+    taxonomy: &str,
+    concept_name: &str,
+    label: Option<String>,
+    description: Option<String>,
+    unit: &str,
+    value: &Value,
+    fetched_at: &str,
+) -> Option<SecRawFact> {
+    Some(SecRawFact {
+        taxonomy: taxonomy.to_string(),
+        concept_name: concept_name.to_string(),
+        label,
+        description,
         unit: unit.to_string(),
         form: string_at(value, "form"),
         start: string_at(value, "start"),
@@ -1514,41 +1763,113 @@ fn sec_fact(concept: &str, unit: &str, value: &Value) -> Option<SecFact> {
         fiscal_year: value.get("fy").and_then(Value::as_i64),
         fiscal_period: string_at(value, "fp"),
         accession: string_at(value, "accn"),
+        frame: string_at(value, "frame"),
         value: number_at(value, "val")?,
+        raw_json: serde_json::to_string(value).ok()?,
+        fetched_at: fetched_at.to_string(),
     })
 }
 
-fn latest_value(us_gaap: &Value, concepts: &[&str], unit_hint: &str) -> Option<f64> {
-    latest_value_fact(us_gaap, concepts, unit_hint, None).map(|fact| fact.value)
+impl From<&SecRawFact> for SecFact {
+    fn from(fact: &SecRawFact) -> Self {
+        Self {
+            concept: fact.concept_name.clone(),
+            form: fact.form.clone(),
+            start: fact.start.clone(),
+            end: fact.end.clone(),
+            filed: fact.filed.clone(),
+            value: fact.value,
+        }
+    }
+}
+
+fn seed_canonical_mappings(raw_facts: &[SecRawFact]) -> Vec<CanonicalMapping> {
+    let mut mappings = Vec::new();
+    for spec in CANONICAL_METRIC_SPECS {
+        for concept_name in spec.seed_concepts {
+            for unit in raw_facts
+                .iter()
+                .filter(|fact| {
+                    fact.taxonomy == "us-gaap"
+                        && fact.concept_name == *concept_name
+                        && unit_matches(&fact.unit, spec.unit_hint)
+                })
+                .map(|fact| fact.unit.clone())
+            {
+                if mappings.iter().any(|mapping: &CanonicalMapping| {
+                    mapping.canonical_key == spec.canonical_key
+                        && mapping.taxonomy == "us-gaap"
+                        && mapping.concept_name == *concept_name
+                        && mapping.unit == unit
+                }) {
+                    continue;
+                }
+                mappings.push(CanonicalMapping {
+                    canonical_key: spec.canonical_key,
+                    metric_key: spec.metric_key,
+                    metric_label: spec.metric_label,
+                    statement_type: spec.statement_type,
+                    taxonomy: "us-gaap".to_string(),
+                    concept_name: (*concept_name).to_string(),
+                    unit,
+                    confidence: "medium",
+                    rationale: format!(
+                        "Seeded from known SEC concept candidate for canonical metric '{}'. Agent review should confirm or replace this mapping.",
+                        spec.canonical_key
+                    ),
+                    selected_by: "heuristic_seed",
+                    is_active: true,
+                });
+            }
+        }
+    }
+    mappings
+}
+
+fn facts_for_canonical(
+    raw_facts: &[SecRawFact],
+    mappings: &[CanonicalMapping],
+    canonical_key: &str,
+    unit_hint: &str,
+) -> Vec<SecFact> {
+    mappings
+        .iter()
+        .filter(|mapping| mapping.is_active && mapping.canonical_key == canonical_key)
+        .flat_map(|mapping| {
+            raw_facts
+                .iter()
+                .filter(move |fact| {
+                    mapping_matches_fact(mapping, fact) && unit_matches(&fact.unit, unit_hint)
+                })
+                .map(SecFact::from)
+        })
+        .collect()
+}
+
+fn mapping_matches_fact(mapping: &CanonicalMapping, fact: &SecRawFact) -> bool {
+    mapping.taxonomy == fact.taxonomy
+        && mapping.concept_name == fact.concept_name
+        && mapping.unit == fact.unit
+}
+
+fn latest_value(
+    raw_facts: &[SecRawFact],
+    mappings: &[CanonicalMapping],
+    canonical_key: &str,
+    unit_hint: &str,
+) -> Option<f64> {
+    latest_value_fact(raw_facts, mappings, canonical_key, unit_hint, None).map(|fact| fact.value)
 }
 
 fn latest_value_fact(
-    us_gaap: &Value,
-    concepts: &[&str],
+    raw_facts: &[SecRawFact],
+    mappings: &[CanonicalMapping],
+    canonical_key: &str,
     unit_hint: &str,
     prefer_period_end: Option<&str>,
 ) -> Option<SecFact> {
-    concepts
-        .iter()
-        .filter_map(|concept| us_gaap.get(*concept).map(|payload| (*concept, payload)))
-        .flat_map(|(concept, payload)| {
-            payload
-                .get("units")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flat_map(move |units| {
-                    units
-                        .iter()
-                        .filter(move |(unit, _)| unit_matches(unit, unit_hint))
-                        .flat_map(move |(unit, values)| {
-                            values
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .filter_map(move |value| sec_fact(concept, unit, value))
-                        })
-                })
-        })
+    facts_for_canonical(raw_facts, mappings, canonical_key, unit_hint)
+        .into_iter()
         .filter(|fact| {
             prefer_period_end.is_none_or(|period_end| {
                 fact.end.as_deref() <= Some(period_end)
@@ -1571,13 +1892,14 @@ fn latest_value_fact(
 }
 
 fn total_latest_values(
-    us_gaap: &Value,
-    concept_groups: &[&[&str]],
+    raw_facts: &[SecRawFact],
+    mappings: &[CanonicalMapping],
+    canonical_keys: &[&str],
     unit_hint: &str,
 ) -> Option<f64> {
-    let values: Vec<f64> = concept_groups
+    let values: Vec<f64> = canonical_keys
         .iter()
-        .filter_map(|concepts| latest_value(us_gaap, concepts, unit_hint))
+        .filter_map(|canonical_key| latest_value(raw_facts, mappings, canonical_key, unit_hint))
         .collect();
     (!values.is_empty()).then(|| values.iter().sum())
 }
@@ -1649,14 +1971,31 @@ fn unit_matches(unit: &str, unit_hint: &str) -> bool {
     unit.to_lowercase().contains(&unit_hint.to_lowercase())
 }
 
-fn fact_period_type(fact: &SecFact) -> &'static str {
-    if duration_days(fact).is_some_and(|days| (60..=120).contains(&days)) {
+fn fact_period_type(fact: &SecRawFact) -> &'static str {
+    let sec_fact = SecFact::from(fact);
+    let Some(days) = duration_days(&sec_fact) else {
+        return "instant";
+    };
+
+    if (60..=120).contains(&days) {
         "quarter"
-    } else if duration_days(fact).is_some_and(|days| (250..=380).contains(&days)) {
+    } else if is_quarterly_filing(fact) || (121..=299).contains(&days) {
+        "ytd"
+    } else if (300..=390).contains(&days) {
         "annual"
     } else {
         "instant"
     }
+}
+
+fn is_quarterly_filing(fact: &SecRawFact) -> bool {
+    fact.form
+        .as_deref()
+        .is_some_and(|form| matches!(form, "10-Q" | "10-Q/A"))
+        && fact
+            .fiscal_period
+            .as_deref()
+            .is_some_and(|period| matches!(period, "Q2" | "Q3" | "Q4"))
 }
 
 fn duration_days(fact: &SecFact) -> Option<i64> {
@@ -1665,7 +2004,7 @@ fn duration_days(fact: &SecFact) -> Option<i64> {
     Some((end - start).num_days())
 }
 
-async fn execute_sql(db: &sea_orm::DatabaseConnection, sql: &str) -> Result<()> {
+async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
     db.execute(Statement::from_string(
         DatabaseBackend::Sqlite,
         sql.to_string(),
@@ -1792,6 +2131,84 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         source_note TEXT,
         updated_at TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS sec_raw_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        taxonomy TEXT NOT NULL,
+        concept_name TEXT NOT NULL,
+        label TEXT,
+        description TEXT,
+        unit TEXT NOT NULL,
+        form TEXT,
+        period_start TEXT,
+        period_end TEXT,
+        filed_at TEXT,
+        fiscal_year INTEGER,
+        fiscal_period TEXT,
+        accession TEXT,
+        frame TEXT,
+        metric_value REAL NOT NULL,
+        raw_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        CHECK (json_valid(raw_json))
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_sec_raw_facts_concept_period
+        ON sec_raw_facts(taxonomy, concept_name, unit, period_end, filed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_sec_raw_facts_frame
+        ON sec_raw_facts(frame)",
+    "CREATE TABLE IF NOT EXISTS canonical_metric_definitions (
+        canonical_key TEXT PRIMARY KEY,
+        metric_key TEXT NOT NULL,
+        metric_label TEXT NOT NULL,
+        statement_type TEXT NOT NULL,
+        unit_hint TEXT NOT NULL,
+        display_order INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS canonical_metric_mappings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        canonical_key TEXT NOT NULL,
+        taxonomy TEXT NOT NULL,
+        concept_name TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        rationale TEXT,
+        selected_by TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(canonical_key, taxonomy, concept_name, unit),
+        FOREIGN KEY(canonical_key) REFERENCES canonical_metric_definitions(canonical_key)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_canonical_metric_mappings_concept
+        ON canonical_metric_mappings(taxonomy, concept_name, unit, is_active)",
+    "CREATE TABLE IF NOT EXISTS supporting_metric_selections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        selection_scope TEXT NOT NULL,
+        scenario_id INTEGER,
+        taxonomy TEXT NOT NULL,
+        concept_name TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        label TEXT,
+        rationale TEXT NOT NULL,
+        selected_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(scenario_id) REFERENCES scenario_assumptions(id)
+    )",
+    "CREATE VIEW IF NOT EXISTS raw_fact_metric_catalog AS
+        SELECT
+            taxonomy,
+            concept_name,
+            label,
+            description,
+            unit,
+            COUNT(*) AS fact_count,
+            MIN(period_end) AS earliest_period_end,
+            MAX(period_end) AS latest_period_end,
+            MAX(filed_at) AS latest_filed_at,
+            MIN(metric_value) AS min_value,
+            MAX(metric_value) AS max_value
+        FROM sec_raw_facts
+        GROUP BY taxonomy, concept_name, label, description, unit",
     "CREATE TABLE IF NOT EXISTS fundamentals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         metric_key TEXT NOT NULL,
@@ -1807,6 +2224,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE TABLE IF NOT EXISTS fundamental_observations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        canonical_key TEXT,
         metric_key TEXT NOT NULL,
         metric_label TEXT NOT NULL,
         statement_type TEXT NOT NULL,
@@ -1832,6 +2250,12 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         ON fundamental_observations(metric_key, period_end, period_type)",
     "CREATE INDEX IF NOT EXISTS idx_fundamental_observations_as_of
         ON fundamental_observations(as_of_date)",
+    "CREATE INDEX IF NOT EXISTS idx_fundamental_observations_canonical
+        ON fundamental_observations(canonical_key, period_end)",
+    "CREATE VIEW IF NOT EXISTS canonical_fundamental_observations AS
+        SELECT *
+        FROM fundamental_observations
+        WHERE canonical_key IS NOT NULL",
     "CREATE TABLE IF NOT EXISTS data_quality_flags (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         flag_key TEXT NOT NULL,
@@ -2087,31 +2511,42 @@ mod tests {
 
     #[test]
     fn coherent_bundle_excludes_stale_mismatched_margin_inputs() {
-        let us_gaap = json!({
-            "RevenueFromContractWithCustomerExcludingAssessedTax": {
-                "units": { "USD": [
-                    sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 10.0),
-                    sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 20.0),
-                    sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 30.0),
-                    sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 40.0)
-                ]}
-            },
-            "NetIncomeLoss": {
-                "units": { "USD": [
-                    sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 1.0),
-                    sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 2.0),
-                    sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 3.0),
-                    sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 4.0)
-                ]}
-            },
-            "GrossProfit": {
-                "units": { "USD": [
-                    sec_fact_json("10-K", "2016-01-01", "2016-12-31", "2017-02-15", 50.0)
-                ]}
+        let facts_root = json!({
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "label": "Revenue",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 10.0),
+                        sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 20.0),
+                        sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 30.0),
+                        sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 40.0)
+                    ]}
+                },
+                "NetIncomeLoss": {
+                    "label": "Net income",
+                    "description": "Net income or loss.",
+                    "units": { "USD": [
+                        sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 1.0),
+                        sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 2.0),
+                        sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 3.0),
+                        sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 4.0)
+                    ]}
+                },
+                "GrossProfit": {
+                    "label": "Gross profit",
+                    "description": "Gross profit.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2016-01-01", "2016-12-31", "2017-02-15", 50.0)
+                    ]}
+                }
             }
         });
+        let raw_facts = sec_raw_facts(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = seed_canonical_mappings(&raw_facts);
 
-        let bundle = select_latest_income_bundle(&us_gaap).expect("coherent revenue/net income");
+        let bundle = select_latest_income_bundle(&raw_facts, &mappings)
+            .expect("coherent revenue/net income");
 
         assert_eq!(bundle.period_end, "2026-03-31");
         assert!(bundle.gross_profit.is_none());
@@ -2121,17 +2556,130 @@ mod tests {
             .any(|flag| flag.starts_with("gross_profit_ttm_excluded_because_no_fact_matched")));
     }
 
+    #[test]
+    fn captures_unmapped_sec_facts_without_canonicalizing_them() {
+        let facts_root = json!({
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "label": "Revenue",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0)
+                    ]}
+                },
+                "CloudRemainingPerformanceObligation": {
+                    "label": "Cloud RPO",
+                    "description": "Company-specific cloud backlog metric.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 42.0)
+                    ]}
+                }
+            }
+        });
+
+        let raw_facts = sec_raw_facts(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = seed_canonical_mappings(&raw_facts);
+        let observations = canonical_sec_observations(&raw_facts, &mappings);
+
+        assert!(raw_facts
+            .iter()
+            .any(|fact| fact.concept_name == "CloudRemainingPerformanceObligation"));
+        assert!(!mappings
+            .iter()
+            .any(|mapping| mapping.concept_name == "CloudRemainingPerformanceObligation"));
+        assert!(!observations.iter().any(|observation| {
+            observation.concept_name.as_deref() == Some("CloudRemainingPerformanceObligation")
+        }));
+    }
+
+    #[test]
+    fn merge_preserves_raw_sec_facts_and_canonical_mappings() {
+        let facts_root = json!({
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "label": "Revenue",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0)
+                    ]}
+                },
+                "CloudRemainingPerformanceObligation": {
+                    "label": "Cloud RPO",
+                    "description": "Company-specific cloud backlog metric.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 42.0)
+                    ]}
+                }
+            }
+        });
+        let raw_facts = sec_raw_facts(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = seed_canonical_mappings(&raw_facts);
+        let observations = canonical_sec_observations(&raw_facts, &mappings);
+        let mut base = FinancialSnapshot::new("TEST");
+        let mut update = FinancialSnapshot::new("TEST");
+        update.raw_sec_facts = raw_facts.clone();
+        update.canonical_mappings = mappings.clone();
+        update.observations = observations.clone();
+
+        base.merge(update, true);
+
+        assert_eq!(base.raw_sec_facts.len(), raw_facts.len());
+        assert_eq!(base.canonical_mappings.len(), mappings.len());
+        assert_eq!(base.observations.len(), observations.len());
+        assert!(base
+            .raw_sec_facts
+            .iter()
+            .any(|fact| fact.concept_name == "CloudRemainingPerformanceObligation"));
+    }
+
+    #[test]
+    fn classifies_ytd_sec_facts_without_treating_them_as_annual_or_instant() {
+        let q2_ytd = raw_test_fact("10-Q", Some("2025-06-01"), Some("2025-11-30"), "Q2");
+        let q3_ytd = raw_test_fact("10-Q", Some("2025-06-01"), Some("2026-02-28"), "Q3");
+        let q3_quarter = raw_test_fact("10-Q", Some("2025-12-01"), Some("2026-02-28"), "Q3");
+        let annual = raw_test_fact("10-K", Some("2024-06-01"), Some("2025-05-31"), "FY");
+        let instant = raw_test_fact("10-Q", None, Some("2026-02-28"), "Q3");
+
+        assert_eq!(fact_period_type(&q2_ytd), "ytd");
+        assert_eq!(fact_period_type(&q3_ytd), "ytd");
+        assert_eq!(fact_period_type(&q3_quarter), "quarter");
+        assert_eq!(fact_period_type(&annual), "annual");
+        assert_eq!(fact_period_type(&instant), "instant");
+    }
+
+    fn raw_test_fact(
+        form: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+        fiscal_period: &str,
+    ) -> SecRawFact {
+        SecRawFact {
+            taxonomy: "us-gaap".to_string(),
+            concept_name: "RevenueFromContractWithCustomerExcludingAssessedTax".to_string(),
+            label: Some("Revenue".to_string()),
+            description: Some("Revenue from contracts with customers.".to_string()),
+            unit: "USD".to_string(),
+            form: Some(form.to_string()),
+            start: start.map(str::to_string),
+            end: end.map(str::to_string),
+            filed: Some("2026-03-11".to_string()),
+            fiscal_year: Some(2026),
+            fiscal_period: Some(fiscal_period.to_string()),
+            accession: Some("test".to_string()),
+            frame: None,
+            value: 1.0,
+            raw_json: "{}".to_string(),
+            fetched_at: "2026-06-04T00:00:00Z".to_string(),
+        }
+    }
+
     fn sec_test_fact(concept: &str, start: &str, end: &str, value: f64) -> SecFact {
         SecFact {
             concept: concept.to_string(),
-            unit: "USD".to_string(),
             form: Some("10-Q".to_string()),
             start: Some(start.to_string()),
             end: Some(end.to_string()),
             filed: Some(end.to_string()),
-            fiscal_year: Some(2026),
-            fiscal_period: Some("Q1".to_string()),
-            accession: Some("test".to_string()),
             value,
         }
     }

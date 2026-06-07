@@ -892,7 +892,7 @@ async fn load_fundamental_observations(
         db,
         "SELECT metric_key, metric_label, period_type, period_start, period_end,
                 metric_value, unit, source_type, source_note, quality, is_derived
-         FROM fundamental_observations
+         FROM canonical_fundamental_observations
          WHERE period_end IS NOT NULL
          ORDER BY metric_key, period_end, period_type, is_derived",
     )
