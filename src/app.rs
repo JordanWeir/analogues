@@ -62,6 +62,7 @@ impl Hooks for App {
     fn register_tasks(tasks: &mut Tasks) {
         tasks.register(tasks::init_workspace::InitWorkspace);
         tasks.register(tasks::generate_report::GenerateReport);
+        tasks.register(tasks::rig_test::RigTest);
         // tasks-inject (do not remove)
     }
     async fn truncate(ctx: &AppContext) -> Result<()> {
