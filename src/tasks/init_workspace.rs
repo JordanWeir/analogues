@@ -1,16 +1,19 @@
 use crate::services::{
-    concept_catalog::ConceptCatalog, 
+    concept_catalog::{CanonicalMappingCandidate, ConceptCatalog},
+    concept_review::{ConceptReviewDecisionRecord, ConceptReviewService},
     market_quote_provider::YahooChartMarketDataAdapter,
-    sec_facts_provider::SecFactsProvider, 
-    workspace_store::{DEFAULT_REPORT_ROOT, SCHEMA_VERSION, WorkspaceStore, validate_date, normalize_ticker},
+    model_client::OpenRouterModelClient,
+    sec_facts_provider::SecFactsProvider,
+    workspace_store::{
+        normalize_ticker, validate_date, WorkspaceStore, DEFAULT_REPORT_ROOT, SCHEMA_VERSION,
+    },
 };
-use chrono::{Utc};
+use chrono::Utc;
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
-use std::{
-    path::{PathBuf},
-    time::Duration,
-};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use uuid::Uuid;
 
 const BULK_INSERT_CHUNK_SIZE: usize = 250;
 const REQUIRED_SECTIONS: &[&str] = &[
@@ -33,6 +36,13 @@ pub struct InitWorkspaceRequest {
     pub date: String,
     pub base_dir: PathBuf,
     pub fetch_financials: bool,
+    pub mapping_strategy: ConceptMappingStrategy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConceptMappingStrategy {
+    CandidateScoring,
+    LlmReviewed,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,7 +54,9 @@ pub struct FinancialSnapshot {
     pub quality_flags: Vec<String>,
     pub observations: Vec<FundamentalObservation>,
     pub raw_sec_facts: Vec<SecRawFact>,
+    pub concept_catalog_entries: Vec<ConceptCatalogEntry>,
     pub canonical_mappings: Vec<CanonicalMapping>,
+    pub concept_review_decisions: Vec<ConceptReviewDecisionRecord>,
     pub gaps: Vec<String>,
     pub currency: Option<String>,
     pub company_name: Option<String>,
@@ -67,7 +79,7 @@ pub struct FinancialSnapshot {
     pub fundamental_source: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FundamentalObservation {
     pub canonical_key: Option<String>,
     pub metric_key: String,
@@ -91,7 +103,7 @@ pub struct FundamentalObservation {
     pub is_derived: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecRawFact {
     pub taxonomy: String,
     pub concept_name: String,
@@ -111,19 +123,39 @@ pub struct SecRawFact {
     pub fetched_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanonicalMapping {
-    pub canonical_key: &'static str,
-    pub metric_key: &'static str,
-    pub metric_label: &'static str,
-    pub statement_type: &'static str,
+    pub canonical_key: String,
+    pub metric_key: String,
+    pub metric_label: String,
+    pub statement_type: String,
     pub taxonomy: String,
     pub concept_name: String,
     pub unit: String,
-    pub confidence: &'static str,
+    pub confidence: String,
     pub rationale: String,
-    pub selected_by: &'static str,
+    pub selected_by: String,
     pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConceptCatalogEntry {
+    pub taxonomy: String,
+    pub concept_name: String,
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub unit: String,
+    pub fact_count: i64,
+    pub earliest_period_end: Option<String>,
+    pub latest_period_end: Option<String>,
+    pub latest_filed_at: Option<String>,
+    pub min_value: Option<f64>,
+    pub max_value: Option<f64>,
+    pub period_shape_counts: BTreeMap<String, i64>,
+    pub dominant_period_shape: String,
+    pub series_usability: String,
+    pub plot_readiness: String,
+    pub narrative_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,13 +219,33 @@ impl InitWorkspaceRequest {
             .get("fetch_financials")
             .map(|value| !matches!(value.as_str(), "false" | "0" | "no" | "skip"))
             .unwrap_or(true);
+        let mapping_strategy = vars
+            .cli
+            .get("mapping_strategy")
+            .or_else(|| vars.cli.get("concept_mapping_strategy"))
+            .map_or(Ok(ConceptMappingStrategy::CandidateScoring), |value| {
+                ConceptMappingStrategy::from_var(value)
+            })?;
 
         Ok(Self {
             ticker: normalize_ticker(ticker)?,
             date,
             base_dir,
             fetch_financials,
+            mapping_strategy,
         })
+    }
+}
+
+impl ConceptMappingStrategy {
+    fn from_var(value: &str) -> Result<Self> {
+        match value {
+            "candidate" | "candidate_scoring" | "heuristic" => Ok(Self::CandidateScoring),
+            "llm" | "llm_reviewed" | "model" => Ok(Self::LlmReviewed),
+            _ => Err(Error::string(
+                "mapping_strategy must be candidate_scoring or llm_reviewed",
+            )),
+        }
     }
 }
 
@@ -221,6 +273,7 @@ impl InitWorkspaceRequest {
             date: self.date.clone(),
             base_dir: self.base_dir.clone(),
             fetch_financials: self.fetch_financials,
+            mapping_strategy: self.mapping_strategy,
         })
     }
 }
@@ -299,7 +352,7 @@ async fn fetch_and_seed_financials(
         return Ok(());
     }
 
-    match fetch_financial_snapshot(&request.ticker).await {
+    match fetch_financial_snapshot_with_strategy(&request.ticker, request.mapping_strategy).await {
         Ok(snapshot) => {
             persist_financial_snapshot(db, &snapshot).await?;
             let status = if snapshot.gaps.is_empty() {
@@ -329,6 +382,13 @@ async fn fetch_and_seed_financials(
 }
 
 pub async fn fetch_financial_snapshot(ticker: &str) -> Result<FinancialSnapshot> {
+    fetch_financial_snapshot_with_strategy(ticker, ConceptMappingStrategy::CandidateScoring).await
+}
+
+async fn fetch_financial_snapshot_with_strategy(
+    ticker: &str,
+    mapping_strategy: ConceptMappingStrategy,
+) -> Result<FinancialSnapshot> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .user_agent("Mozilla/5.0")
@@ -345,7 +405,7 @@ pub async fn fetch_financial_snapshot(ticker: &str) -> Result<FinancialSnapshot>
             .push(format!("Yahoo chart fallback failed: {err}")),
     }
 
-    match fetch_sec_companyfacts_snapshot(&sec_provider, ticker).await {
+    match fetch_sec_companyfacts_snapshot(&sec_provider, ticker, mapping_strategy).await {
         Ok(update) => snapshot.merge(update, true),
         Err(err) => snapshot
             .source_notes
@@ -418,7 +478,11 @@ impl FinancialSnapshot {
         extend_unique(&mut self.source_notes, update.source_notes);
         extend_unique(&mut self.quality_flags, update.quality_flags);
         self.raw_sec_facts.extend(update.raw_sec_facts);
+        self.concept_catalog_entries
+            .extend(update.concept_catalog_entries);
         self.canonical_mappings.extend(update.canonical_mappings);
+        self.concept_review_decisions
+            .extend(update.concept_review_decisions);
         self.observations.extend(update.observations);
     }
 
@@ -484,13 +548,23 @@ impl FinancialSnapshot {
 async fn fetch_sec_companyfacts_snapshot(
     provider: &SecFactsProvider,
     ticker: &str,
+    mapping_strategy: ConceptMappingStrategy,
 ) -> Result<FinancialSnapshot> {
     let company = provider.lookup_company(ticker).await?;
     let payload = provider.fetch_company_facts(&company).await?;
     let mut snapshot = FinancialSnapshot::new(ticker);
     snapshot.fetched_at = payload.fetched_at.clone();
     let raw_sec_facts = provider.extract_raw_facts(&payload)?;
-    let canonical_mappings = ConceptCatalog::seed_canonical_mappings(&raw_sec_facts);
+    let concept_catalog_entries = ConceptCatalog::materialize_catalog_entries(&raw_sec_facts);
+    let review_candidates = ConceptCatalog::canonical_mapping_candidates(&concept_catalog_entries);
+    let (canonical_mappings, concept_review_decisions, review_quality_flags) =
+        canonical_mappings_for_strategy(
+            mapping_strategy,
+            &raw_sec_facts,
+            &review_candidates,
+            &snapshot.fetched_at,
+        )
+        .await;
     let observations = ConceptCatalog::build_observations(&raw_sec_facts, &canonical_mappings);
     let bundle = ConceptCatalog::select_latest_baseline_bundle(&raw_sec_facts, &canonical_mappings);
     let shares_fact = ConceptCatalog::latest_value_fact(
@@ -518,8 +592,11 @@ async fn fetch_sec_companyfacts_snapshot(
 
     snapshot.company_name = company.company_title;
     snapshot.raw_sec_facts = raw_sec_facts;
+    snapshot.concept_catalog_entries = concept_catalog_entries;
     snapshot.canonical_mappings = canonical_mappings;
+    snapshot.concept_review_decisions = concept_review_decisions;
     snapshot.observations = observations;
+    snapshot.quality_flags.extend(review_quality_flags);
     if let Some(bundle) = bundle {
         ConceptCatalog::apply_income_bundle(&mut snapshot, &bundle);
     } else {
@@ -563,6 +640,66 @@ async fn fetch_sec_companyfacts_snapshot(
     Ok(snapshot)
 }
 
+async fn canonical_mappings_for_strategy(
+    mapping_strategy: ConceptMappingStrategy,
+    raw_sec_facts: &[SecRawFact],
+    candidates: &[CanonicalMappingCandidate],
+    fetched_at: &str,
+) -> (
+    Vec<CanonicalMapping>,
+    Vec<ConceptReviewDecisionRecord>,
+    Vec<String>,
+) {
+    match mapping_strategy {
+        ConceptMappingStrategy::CandidateScoring => (
+            ConceptCatalog::seed_canonical_mappings(raw_sec_facts),
+            Vec::new(),
+            Vec::new(),
+        ),
+        ConceptMappingStrategy::LlmReviewed => {
+            let service = ConceptReviewService::default();
+            let client = OpenRouterModelClient;
+            match service.review_candidates(&client, candidates).await {
+                Ok(output) => {
+                    let review_run_id = Uuid::new_v4().to_string();
+                    let selected_by = format!("llm_batch_review:{}", service.model);
+                    let decisions =
+                        service.decision_records(&output, &review_run_id, &selected_by, fetched_at);
+                    let promoted = service.promote_reviewed_mappings(&output, candidates);
+                    let mut quality_flags = promoted
+                        .warnings
+                        .into_iter()
+                        .map(|warning| {
+                            format!(
+                                "llm_concept_review_warning_{}",
+                                normalize_quality_flag(&warning)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mappings = if promoted.mappings.is_empty() {
+                        quality_flags.push(
+                            "llm_concept_review_returned_no_promoted_mappings_used_candidate_scoring"
+                                .to_string(),
+                        );
+                        ConceptCatalog::seed_canonical_mappings(raw_sec_facts)
+                    } else {
+                        promoted.mappings
+                    };
+                    (mappings, decisions, quality_flags)
+                }
+                Err(err) => (
+                    ConceptCatalog::seed_canonical_mappings(raw_sec_facts),
+                    Vec::new(),
+                    vec![format!(
+                        "llm_concept_review_failed_used_candidate_scoring_{}",
+                        normalize_quality_flag(&err.to_string())
+                    )],
+                ),
+            }
+        }
+    }
+}
+
 async fn persist_financial_snapshot(
     db: &sea_orm::DatabaseConnection,
     snapshot: &FinancialSnapshot,
@@ -588,6 +725,13 @@ async fn persist_financial_snapshot(
     .await?;
 
     insert_raw_sec_facts(&txn, &snapshot.raw_sec_facts).await?;
+    insert_concept_catalog_entries(
+        &txn,
+        &snapshot.concept_catalog_entries,
+        &snapshot.fetched_at,
+    )
+    .await?;
+    insert_concept_review_decisions(&txn, &snapshot.concept_review_decisions).await?;
     for mapping in &snapshot.canonical_mappings {
         insert_canonical_mapping(&txn, mapping, &snapshot.fetched_at).await?;
     }
@@ -654,6 +798,123 @@ fn raw_sec_fact_values(fact: &SecRawFact) -> String {
     )
 }
 
+async fn insert_concept_catalog_entries(
+    db: &impl ConnectionTrait,
+    entries: &[ConceptCatalogEntry],
+    updated_at: &str,
+) -> Result<()> {
+    for chunk in entries.chunks(BULK_INSERT_CHUNK_SIZE) {
+        let values = chunk
+            .iter()
+            .map(|entry| concept_catalog_entry_values(entry, updated_at))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        execute_sql(
+            db,
+            &format!(
+                "INSERT INTO concept_catalog_entries (
+                    taxonomy, concept_name, label, description, unit, fact_count,
+                    earliest_period_end, latest_period_end, latest_filed_at, min_value, max_value,
+                    period_shape_counts, dominant_period_shape, series_usability, plot_readiness,
+                    narrative_tags, updated_at
+                ) VALUES
+                {values}
+                ON CONFLICT(taxonomy, concept_name, unit) DO UPDATE SET
+                    label = excluded.label,
+                    description = excluded.description,
+                    fact_count = excluded.fact_count,
+                    earliest_period_end = excluded.earliest_period_end,
+                    latest_period_end = excluded.latest_period_end,
+                    latest_filed_at = excluded.latest_filed_at,
+                    min_value = excluded.min_value,
+                    max_value = excluded.max_value,
+                    period_shape_counts = excluded.period_shape_counts,
+                    dominant_period_shape = excluded.dominant_period_shape,
+                    series_usability = excluded.series_usability,
+                    plot_readiness = excluded.plot_readiness,
+                    narrative_tags = excluded.narrative_tags,
+                    updated_at = excluded.updated_at"
+            ),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn concept_catalog_entry_values(entry: &ConceptCatalogEntry, updated_at: &str) -> String {
+    let period_shape_counts =
+        serde_json::to_string(&entry.period_shape_counts).unwrap_or_else(|_| "{}".to_string());
+    let narrative_tags =
+        serde_json::to_string(&entry.narrative_tags).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, '{}', '{}', '{}', '{}', '{}', '{}')",
+        sql_quote(&entry.taxonomy),
+        sql_quote(&entry.concept_name),
+        sql_value(entry.label.as_deref()),
+        sql_value(entry.description.as_deref()),
+        sql_quote(&entry.unit),
+        entry.fact_count,
+        sql_value(entry.earliest_period_end.as_deref()),
+        sql_value(entry.latest_period_end.as_deref()),
+        sql_value(entry.latest_filed_at.as_deref()),
+        sql_number(entry.min_value),
+        sql_number(entry.max_value),
+        sql_quote(&period_shape_counts),
+        sql_quote(&entry.dominant_period_shape),
+        sql_quote(&entry.series_usability),
+        sql_quote(&entry.plot_readiness),
+        sql_quote(&narrative_tags),
+        sql_quote(updated_at),
+    )
+}
+
+async fn insert_concept_review_decisions(
+    db: &impl ConnectionTrait,
+    decisions: &[ConceptReviewDecisionRecord],
+) -> Result<()> {
+    for chunk in decisions.chunks(BULK_INSERT_CHUNK_SIZE) {
+        let values = chunk
+            .iter()
+            .map(concept_review_decision_values)
+            .collect::<Vec<_>>()
+            .join(",\n");
+        execute_sql(
+            db,
+            &format!(
+                "INSERT INTO concept_review_decisions (
+                    review_run_id, canonical_key, decision_type, taxonomy, concept_name, unit,
+                    confidence, rationale, selected_by, warnings_json, payload_json, created_at
+                ) VALUES
+                {values}"
+            ),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn concept_review_decision_values(decision: &ConceptReviewDecisionRecord) -> String {
+    let warnings_json =
+        serde_json::to_string(&decision.warnings).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "('{}', {}, '{}', {}, {}, {}, '{}', '{}', '{}', '{}', '{}', '{}')",
+        sql_quote(&decision.review_run_id),
+        sql_value(decision.canonical_key.as_deref()),
+        sql_quote(&decision.decision_type),
+        sql_value(decision.taxonomy.as_deref()),
+        sql_value(decision.concept_name.as_deref()),
+        sql_value(decision.unit.as_deref()),
+        sql_quote(&decision.confidence),
+        sql_quote(&decision.rationale),
+        sql_quote(&decision.selected_by),
+        sql_quote(&warnings_json),
+        sql_quote(&decision.payload_json),
+        sql_quote(&decision.created_at),
+    )
+}
+
 async fn insert_canonical_mapping(
     db: &impl ConnectionTrait,
     mapping: &CanonicalMapping,
@@ -674,13 +935,13 @@ async fn insert_canonical_mapping(
                 selected_by = excluded.selected_by,
                 is_active = excluded.is_active,
                 updated_at = excluded.updated_at",
-            sql_quote(mapping.canonical_key),
+            sql_quote(&mapping.canonical_key),
             sql_quote(&mapping.taxonomy),
             sql_quote(&mapping.concept_name),
             sql_quote(&mapping.unit),
-            sql_quote(mapping.confidence),
+            sql_quote(&mapping.confidence),
             sql_quote(&mapping.rationale),
-            sql_quote(mapping.selected_by),
+            sql_quote(&mapping.selected_by),
             if mapping.is_active { 1 } else { 0 },
             sql_quote(updated_at),
             sql_quote(updated_at),
@@ -1031,8 +1292,6 @@ async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
     Ok(())
 }
 
-
-
 fn sql_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
@@ -1050,6 +1309,23 @@ fn sql_number(value: Option<f64>) -> String {
 
 fn sql_i64(value: Option<i64>) -> String {
     value.map_or_else(|| "NULL".to_string(), |value| value.to_string())
+}
+
+fn normalize_quality_flag(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 fn merge_string(target: &mut Option<String>, update: Option<String>, overwrite: bool) {
@@ -1186,6 +1462,50 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
             MAX(metric_value) AS max_value
         FROM sec_raw_facts
         GROUP BY taxonomy, concept_name, label, description, unit",
+    "CREATE TABLE IF NOT EXISTS concept_catalog_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        taxonomy TEXT NOT NULL,
+        concept_name TEXT NOT NULL,
+        label TEXT,
+        description TEXT,
+        unit TEXT NOT NULL,
+        fact_count INTEGER NOT NULL,
+        earliest_period_end TEXT,
+        latest_period_end TEXT,
+        latest_filed_at TEXT,
+        min_value REAL,
+        max_value REAL,
+        period_shape_counts TEXT NOT NULL DEFAULT '{}',
+        dominant_period_shape TEXT NOT NULL,
+        series_usability TEXT NOT NULL,
+        plot_readiness TEXT NOT NULL,
+        narrative_tags TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL,
+        UNIQUE(taxonomy, concept_name, unit),
+        CHECK (json_valid(period_shape_counts)),
+        CHECK (json_valid(narrative_tags))
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_concept_catalog_entries_tags
+        ON concept_catalog_entries(series_usability, plot_readiness, latest_period_end)",
+    "CREATE TABLE IF NOT EXISTS concept_review_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        review_run_id TEXT NOT NULL,
+        canonical_key TEXT,
+        decision_type TEXT NOT NULL,
+        taxonomy TEXT,
+        concept_name TEXT,
+        unit TEXT,
+        confidence TEXT NOT NULL,
+        rationale TEXT NOT NULL,
+        selected_by TEXT NOT NULL,
+        warnings_json TEXT NOT NULL DEFAULT '[]',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        CHECK (json_valid(warnings_json)),
+        CHECK (json_valid(payload_json))
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_concept_review_decisions_key
+        ON concept_review_decisions(canonical_key, confidence, decision_type)",
     "CREATE TABLE IF NOT EXISTS fundamentals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         metric_key TEXT NOT NULL,
@@ -1571,6 +1891,65 @@ mod tests {
         assert!(!observations.iter().any(|observation| {
             observation.concept_name.as_deref() == Some("CloudRemainingPerformanceObligation")
         }));
+    }
+
+    #[test]
+    fn materializes_catalog_entries_with_narrative_tags() {
+        let facts_root = json!({
+            "us-gaap": {
+                "CloudRemainingPerformanceObligation": {
+                    "label": "Cloud RPO",
+                    "description": "Company-specific cloud backlog metric.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 42.0)
+                    ]}
+                }
+            }
+        });
+
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let entries = ConceptCatalog::materialize_catalog_entries(&raw_facts);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].dominant_period_shape, "annual");
+        assert_eq!(entries[0].series_usability, "event_point");
+        assert!(entries[0].narrative_tags.contains(&"backlog".to_string()));
+    }
+
+    #[test]
+    fn candidate_scoring_can_select_non_seed_revenue_concept() {
+        let facts_root = json!({
+            "us-gaap": {
+                "CustomerRevenue": {
+                    "label": "Revenue from customer contracts",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 10.0),
+                        sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 20.0),
+                        sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 30.0),
+                        sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 40.0)
+                    ]}
+                },
+                "NetIncomeLoss": {
+                    "label": "Net income",
+                    "description": "Net income or loss.",
+                    "units": { "USD": [
+                        sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 1.0),
+                        sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 2.0),
+                        sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 3.0),
+                        sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 4.0)
+                    ]}
+                }
+            }
+        });
+
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+
+        assert!(mappings.iter().any(|mapping| {
+            mapping.canonical_key == "revenue" && mapping.concept_name == "CustomerRevenue"
+        }));
+        assert!(ConceptCatalog::select_latest_baseline_bundle(&raw_facts, &mappings).is_some());
     }
 
     #[test]

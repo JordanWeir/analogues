@@ -15,7 +15,9 @@ Init Workspace Task Goals:
 */
 
 use analogues::app::App;
-use analogues::tasks::init_workspace::{initialize_workspace, InitWorkspaceRequest};
+use analogues::tasks::init_workspace::{
+    initialize_workspace, ConceptMappingStrategy, InitWorkspaceRequest,
+};
 use loco_rs::{task, testing::prelude::*};
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use std::{fs, path::PathBuf};
@@ -57,6 +59,7 @@ async fn test_initializes_workspace_directories_and_database() {
         date: "2026-06-04".to_string(),
         base_dir: base_dir.clone(),
         fetch_financials: false,
+        mapping_strategy: ConceptMappingStrategy::CandidateScoring,
     };
 
     let paths = initialize_workspace(&request).await.unwrap();
@@ -109,6 +112,8 @@ async fn test_initializes_workspace_directories_and_database() {
             &db,
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
                 'sec_raw_facts',
+                'concept_catalog_entries',
+                'concept_review_decisions',
                 'canonical_metric_definitions',
                 'canonical_metric_mappings',
                 'supporting_metric_selections',
@@ -124,7 +129,7 @@ async fn test_initializes_workspace_directories_and_database() {
             )"
         )
         .await,
-        13
+        15
     );
     assert_eq!(
         scalar_i64(
@@ -164,6 +169,7 @@ async fn test_allocates_next_index_without_overwriting() {
         date: "2026-06-04".to_string(),
         base_dir: base_dir.clone(),
         fetch_financials: false,
+        mapping_strategy: ConceptMappingStrategy::CandidateScoring,
     };
 
     let first = initialize_workspace(&request).await.unwrap();

@@ -1,6 +1,6 @@
 use analogues::tasks::{
     generate_report::{generate_report, GenerateReportRequest},
-    init_workspace::{initialize_workspace, InitWorkspaceRequest},
+    init_workspace::{initialize_workspace, ConceptMappingStrategy, InitWorkspaceRequest},
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use std::{fs, path::PathBuf};
@@ -17,6 +17,7 @@ async fn test_can_run_generate_report() {
         date: "2026-06-04".to_string(),
         base_dir: base_dir.clone(),
         fetch_financials: false,
+        mapping_strategy: ConceptMappingStrategy::CandidateScoring,
     };
     let paths = initialize_workspace(&init_request).await.unwrap();
     let db = open_run_db_rw(&paths.sqlite_path).await;
