@@ -1,51 +1,388 @@
-use analogues::app::App;
-#[allow(unused_imports)]
-use loco_rs::{cli::playground, prelude::*};
-use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::Prompt;
-use rig::providers::{anthropic, openrouter};
+//! LLM concept-mapping review playground — approximates `initWorkspace` with
+//! `mapping_strategy:llm` without writing a workspace.
+//!
+//! ```sh
+//! cargo run --example playground
+//! TICKER=ORCL cargo run --example playground
+//! SQLITE=reports/stock-narrative-research/ORCL-2026-06-07-9/run.sqlite cargo run --example playground
+//! SKIP_LLM=1 cargo run --example playground   # candidates + heuristic only
+//! ```
+//!
+//! Requires `OPENROUTER_API_KEY` unless `SKIP_LLM=1`.
+
+use analogues::{
+    services::{
+        concept_catalog::{CanonicalMappingCandidate, ConceptCatalog},
+        concept_review::{ConceptReviewOutput, ConceptReviewService, DEFAULT_REVIEW_PREAMBLE},
+        model_client::OpenRouterModelClient,
+        sec_facts_provider::SecFactsProvider,
+    },
+    tasks::init_workspace::{CanonicalMapping, SecRawFact},
+};
+use loco_rs::prelude::*;
+use reqwest::Client;
+use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+use std::{
+    collections::BTreeMap,
+    env,
+    path::Path,
+};
+
+// =============================================================================
+// Edit these while iterating on the prompt.
+// =============================================================================
+
+const DEFAULT_TICKER: &str = "ORCL";
+const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash";
+
+/// System preamble sent to the model.
+const REVIEW_PREAMBLE: &str = DEFAULT_REVIEW_PREAMBLE;
+
+/// Extra instructions appended after the auto-generated candidate JSON prompt.
+const PROMPT_SUFFIX: &str = r#"
+For balance-sheet debt metrics:
+- debt_noncurrent must be an outstanding noncurrent borrowings balance, not a maturity schedule or repayment amount.
+- Prefer concepts like Notes Payable Noncurrent or combined long-term borrowings over *Maturities* or *RepaymentsOfPrincipal*.
+- If no direct noncurrent debt balance exists, return decision_type "calculated_from_components" or "unavailable".
+"#;
+
+const MAX_CANDIDATES_SHOWN: usize = 8;
 
 #[tokio::main]
 async fn main() -> loco_rs::Result<()> {
-    let _ctx = playground::<App>().await?;
+    let _ctx = loco_rs::cli::playground::<analogues::app::App>().await?;
 
-    // let active_model: articles::ActiveModel = articles::ActiveModel {
-    //     title: Set(Some("how to build apps in 3 steps".to_string())),
-    //     content: Set(Some("use Loco: https://loco.rs".to_string())),
-    //     ..Default::default()
-    // };
-    // active_model.insert(&ctx.db).await.unwrap();
+    let ticker = env::var("TICKER").unwrap_or_else(|_| DEFAULT_TICKER.to_string());
+    let model = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let skip_llm = env_bool("SKIP_LLM");
 
-    // let res = articles::Entity::find().all(&ctx.db).await.unwrap();
-    // println!("{:?}", res);
-    // println!("welcome to playground. edit me at `examples/playground.rs`");
+    let raw_facts = if let Ok(sqlite) = env::var("SQLITE") {
+        println!("Loading sec_raw_facts from {sqlite}");
+        load_raw_facts_from_sqlite(Path::new(&sqlite)).await?
+    } else {
+        println!("Fetching SEC Company Facts for {ticker}");
+        fetch_raw_facts(&ticker).await?
+    };
 
-    let _anthropic_client =
-        anthropic::Client::from_env().expect("Can generate anthropic client from env");
-    let openrouter_client =
-        openrouter::Client::from_env().expect("Can generate openrouter client from env");
+    println!(
+        "Loaded {} raw facts across {} concepts",
+        raw_facts.len(),
+        unique_concepts(&raw_facts)
+    );
 
-    /*
-        Current ultra-cheap model intelligence hierarchy from Artificial Analysis: https://artificialanalysis.ai/#intelligence
-        - Deepseek v4 Flash, $112.86, 47
-        - MiMo-V2.5-Pro, $160.82, 54
-        - MiniMax-M3, $306.79, 55
-        - Haiku 4.5, $619.69, 37
-    */
+    let entries = ConceptCatalog::materialize_catalog_entries(&raw_facts);
+    let candidates = ConceptCatalog::canonical_mapping_candidates(&entries);
+    let heuristic = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+    let grouped = top_candidates_by_metric(&candidates, MAX_CANDIDATES_SHOWN);
 
-    // Create agent with a single context prompt
-    let comedian_agent = openrouter_client
-        .agent("deepseek/deepseek-v4-flash")
-        .preamble("You are a comedian here to entertain the user using humour and jokes.")
-        .build();
+    print_candidate_board(&grouped, &heuristic, &raw_facts);
 
-    // Prompt the agent and print the response
-    let response = comedian_agent
-        .prompt("Entertain me!")
+    if skip_llm {
+        println!("\nSKIP_LLM=1 set; not calling the model.");
+        return Ok(());
+    }
+
+    let service = ConceptReviewService {
+        model: model.clone(),
+        ..ConceptReviewService::default()
+    };
+    let client = OpenRouterModelClient;
+
+    println!("\n=== LLM review ({model}) ===");
+    println!("Preamble:\n{REVIEW_PREAMBLE}\n");
+    if !PROMPT_SUFFIX.trim().is_empty() {
+        println!("Prompt suffix:\n{PROMPT_SUFFIX}\n");
+    }
+
+    let prompt = service.build_prompt(&candidates)?;
+    println!("--- generated prompt ({} chars) ---\n{prompt}\n--- end prompt ---\n", prompt.len());
+
+    match service
+        .review_candidates_with_preamble(&client, &candidates, REVIEW_PREAMBLE, PROMPT_SUFFIX)
         .await
-        .expect("We get a result from the api");
-
-    println!("{response}");
+    {
+        Ok((output, response)) => {
+            println!(
+                "Model latency: {} ms\n",
+                response.latency_ms
+            );
+            print_review_results(&output, &service, &candidates, &heuristic, &raw_facts);
+        }
+        Err(err) => {
+            println!("LLM review failed: {err}");
+            println!("\nHeuristic fallback that initWorkspace would use:");
+            print_mapping_table(&heuristic, &raw_facts);
+        }
+    }
 
     Ok(())
+}
+
+async fn fetch_raw_facts(ticker: &str) -> Result<Vec<SecRawFact>> {
+    let client = Client::builder()
+        .user_agent("stock-agent-2/0.1 research@example.local")
+        .build()
+        .map_err(|err| Error::string(&format!("failed to build HTTP client: {err}")))?;
+    let provider = SecFactsProvider::new(client);
+    let company = provider.lookup_company(ticker).await?;
+    let payload = provider.fetch_company_facts(&company).await?;
+    provider.extract_raw_facts(&payload)
+}
+
+async fn load_raw_facts_from_sqlite(path: &Path) -> Result<Vec<SecRawFact>> {
+    let path = path
+        .canonicalize()
+        .map_err(|err| Error::string(&format!("invalid SQLITE path: {err}")))?;
+    let url = format!(
+        "sqlite://{}?mode=ro",
+        path.to_string_lossy().replace('\\', "/")
+    );
+    let db = Database::connect(&url)
+        .await
+        .map_err(|err| Error::string(&format!("failed to open sqlite database: {err}")))?;
+
+    let rows = db
+        .query_all(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT taxonomy, concept_name, label, description, unit, form, period_start, period_end,
+                    filed_at, fiscal_year, fiscal_period, accession, frame, metric_value, raw_json, fetched_at
+             FROM sec_raw_facts
+             ORDER BY taxonomy, concept_name, period_end"
+                .to_string(),
+        ))
+        .await
+        .map_err(|err| Error::string(&format!("failed to query sec_raw_facts: {err}")))?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(SecRawFact {
+                taxonomy: row.try_get("", "taxonomy")?,
+                concept_name: row.try_get("", "concept_name")?,
+                label: row.try_get("", "label").ok(),
+                description: row.try_get("", "description").ok(),
+                unit: row.try_get("", "unit")?,
+                form: row.try_get("", "form").ok(),
+                start: row.try_get("", "period_start").ok(),
+                end: row.try_get("", "period_end").ok(),
+                filed: row.try_get("", "filed_at").ok(),
+                fiscal_year: row.try_get("", "fiscal_year").ok(),
+                fiscal_period: row.try_get("", "fiscal_period").ok(),
+                accession: row.try_get("", "accession").ok(),
+                frame: row.try_get("", "frame").ok(),
+                value: row.try_get("", "metric_value")?,
+                raw_json: row.try_get("", "raw_json")?,
+                fetched_at: row.try_get("", "fetched_at")?,
+            })
+        })
+        .collect()
+}
+
+fn unique_concepts(facts: &[SecRawFact]) -> usize {
+    facts
+        .iter()
+        .map(|fact| (&fact.taxonomy, &fact.concept_name))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+fn top_candidates_by_metric<'a>(
+    candidates: &'a [CanonicalMappingCandidate],
+    limit: usize,
+) -> BTreeMap<&'a str, Vec<&'a CanonicalMappingCandidate>> {
+    let mut grouped: BTreeMap<&str, Vec<&CanonicalMappingCandidate>> = BTreeMap::new();
+    for candidate in candidates {
+        grouped
+            .entry(candidate.mapping.canonical_key.as_str())
+            .or_default()
+            .push(candidate);
+    }
+    for list in grouped.values_mut() {
+        list.sort_by(|left, right| (right.score, right.fact_count).cmp(&(left.score, left.fact_count)));
+        list.truncate(limit);
+    }
+    grouped
+}
+
+fn heuristic_for_metric<'a>(
+    heuristic: &'a [CanonicalMapping],
+    canonical_key: &str,
+) -> Option<&'a CanonicalMapping> {
+    heuristic
+        .iter()
+        .find(|mapping| mapping.canonical_key == canonical_key)
+}
+
+fn latest_fact_value(facts: &[SecRawFact], taxonomy: &str, concept_name: &str, unit: &str) -> Option<(String, f64)> {
+    facts
+        .iter()
+        .filter(|fact| {
+            fact.taxonomy == taxonomy && fact.concept_name == concept_name && fact.unit == unit
+        })
+        .max_by(|left, right| left.end.cmp(&right.end))
+        .and_then(|fact| fact.end.clone().map(|period| (period, fact.value)))
+}
+
+fn format_value(value: f64, unit: &str) -> String {
+    if unit.contains('/') || unit.contains("shares") {
+        format!("{value:.4} {unit}")
+    } else {
+        format!("${:.3}B", value / 1_000_000_000.0)
+    }
+}
+
+fn print_candidate_board(
+    grouped: &BTreeMap<&str, Vec<&CanonicalMappingCandidate>>,
+    heuristic: &[CanonicalMapping],
+    raw_facts: &[SecRawFact],
+) {
+    println!("\n=== Candidate board (heuristic vs top gated candidates) ===");
+    for (canonical_key, candidates) in grouped {
+        let label = candidates
+            .first()
+            .map(|candidate| candidate.mapping.metric_label.as_str())
+            .unwrap_or(canonical_key);
+        println!("\n[{canonical_key}] {label}");
+        if let Some(mapping) = heuristic_for_metric(heuristic, canonical_key) {
+            let latest = latest_fact_value(
+                raw_facts,
+                &mapping.taxonomy,
+                &mapping.concept_name,
+                &mapping.unit,
+            );
+            let latest_note = latest
+                .map(|(period, value)| format!(" latest@{}={}", period, format_value(value, &mapping.unit)))
+                .unwrap_or_default();
+            println!(
+                "  heuristic -> {} / {} (score via catalog, conf={}){latest_note}",
+                mapping.taxonomy, mapping.concept_name, mapping.confidence
+            );
+            println!("    rationale: {}", mapping.rationale);
+        } else {
+            println!("  heuristic -> <none selected>");
+        }
+
+        for (index, candidate) in candidates.iter().enumerate() {
+            let latest = latest_fact_value(
+                raw_facts,
+                &candidate.mapping.taxonomy,
+                &candidate.mapping.concept_name,
+                &candidate.mapping.unit,
+            );
+            let latest_note = latest
+                .map(|(period, value)| {
+                    format!(
+                        " latest@{}={}",
+                        period,
+                        format_value(value, &candidate.mapping.unit)
+                    )
+                })
+                .unwrap_or_default();
+            println!(
+                "  {:>2}. score={:<4} facts={:<4} conf={:<6} {} / {}{}",
+                index + 1,
+                candidate.score,
+                candidate.fact_count,
+                candidate.mapping.confidence,
+                candidate.mapping.taxonomy,
+                candidate.mapping.concept_name,
+                latest_note
+            );
+            println!("      {}", candidate.mapping.rationale);
+        }
+    }
+}
+
+fn print_review_results(
+    output: &ConceptReviewOutput,
+    service: &ConceptReviewService,
+    candidates: &[CanonicalMappingCandidate],
+    heuristic: &[CanonicalMapping],
+    raw_facts: &[SecRawFact],
+) {
+    println!("--- raw model JSON ---\n{}\n--- end raw JSON ---\n", serde_json::to_string_pretty(output).unwrap_or_else(|_| "{}".to_string()));
+
+    let promoted = service.promote_reviewed_mappings(output, candidates);
+    if !promoted.warnings.is_empty() {
+        println!("Promotion warnings:");
+        for warning in &promoted.warnings {
+            println!("  - {warning}");
+        }
+        println!();
+    }
+
+    println!("=== Decision summary ===");
+    for decision in &output.decisions {
+        let latest = decision
+            .taxonomy
+            .as_deref()
+            .zip(decision.concept_name.as_deref())
+            .zip(decision.unit.as_deref())
+            .and_then(|((taxonomy, concept), unit)| latest_fact_value(raw_facts, taxonomy, concept, unit));
+        let unit = decision.unit.as_deref().unwrap_or("USD");
+        let latest_note = latest
+            .map(|(period, value)| format!(" latest@{}={}", period, format_value(value, unit)))
+            .unwrap_or_default();
+        println!(
+            "\n[{}] decision={} conf={}{}",
+            decision.canonical_key, decision.decision_type, decision.confidence, latest_note
+        );
+        if let Some(concept) = &decision.concept_name {
+            println!("  concept: {} / {}", decision.taxonomy.as_deref().unwrap_or("?"), concept);
+        }
+        println!("  rationale: {}", decision.rationale);
+        if !decision.warnings.is_empty() {
+            println!("  warnings: {}", decision.warnings.join("; "));
+        }
+    }
+
+    println!("\n=== Promoted mappings (what initWorkspace would persist on success) ===");
+    if promoted.mappings.is_empty() {
+        println!("<none — would fall back to heuristic seed_canonical_mappings>");
+        print_mapping_table(heuristic, raw_facts);
+    } else {
+        print_mapping_table(&promoted.mappings, raw_facts);
+        println!("\n=== Heuristic diff ===");
+        for mapping in &promoted.mappings {
+            let baseline = heuristic_for_metric(heuristic, &mapping.canonical_key);
+            match baseline {
+                Some(base) if base.concept_name == mapping.concept_name => {
+                    println!("  {}: unchanged ({})", mapping.canonical_key, mapping.concept_name);
+                }
+                Some(base) => {
+                    println!(
+                        "  {}: {} -> {}",
+                        mapping.canonical_key, base.concept_name, mapping.concept_name
+                    );
+                }
+                None => println!(
+                    "  {}: <none> -> {}",
+                    mapping.canonical_key, mapping.concept_name
+                ),
+            }
+        }
+    }
+}
+
+fn print_mapping_table(mappings: &[CanonicalMapping], raw_facts: &[SecRawFact]) {
+    for mapping in mappings {
+        let latest = latest_fact_value(
+            raw_facts,
+            &mapping.taxonomy,
+            &mapping.concept_name,
+            &mapping.unit,
+        );
+        let latest_note = latest
+            .map(|(period, value)| format!(" @{}={}", period, format_value(value, &mapping.unit)))
+            .unwrap_or_default();
+        println!(
+            "  {} -> {} / {}{} [{}]",
+            mapping.canonical_key, mapping.taxonomy, mapping.concept_name, latest_note, mapping.confidence
+        );
+    }
+}
+
+fn env_bool(key: &str) -> bool {
+    env::var(key)
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
