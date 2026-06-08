@@ -1,7 +1,4 @@
-use crate::{
-    tasks::init_workspace::FinancialSnapshot,
-    workspace::{CanonicalMapping, FundamentalObservation, SecRawFact},
-};
+use crate::workspace::{CanonicalMapping, DerivedFundamentals, FundamentalObservation, SecRawFact};
 use chrono::NaiveDate;
 use std::collections::BTreeMap;
 
@@ -79,85 +76,100 @@ impl FundamentalDeriver {
         total_latest_values(raw_facts, mappings, canonical_keys, unit_hint)
     }
 
-    pub(crate) fn apply_income_bundle(snapshot: &mut FinancialSnapshot, bundle: &IncomeBundle) {
-        append_bundle_observations(snapshot, bundle);
-        snapshot.revenue_ttm = bundle.revenue.as_ref().map(|metric| metric.value);
-        snapshot.net_income_ttm = bundle.net_income.as_ref().map(|metric| metric.value);
-        snapshot.gross_profit_ttm = bundle.gross_profit.as_ref().map(|metric| metric.value);
-        snapshot.operating_income_ttm = bundle.operating_income.as_ref().map(|metric| metric.value);
-        snapshot.gross_margin = ratio(snapshot.gross_profit_ttm, snapshot.revenue_ttm);
-        snapshot.operating_margin = ratio(snapshot.operating_income_ttm, snapshot.revenue_ttm);
-        snapshot.net_margin = ratio(snapshot.net_income_ttm, snapshot.revenue_ttm);
-        snapshot.fundamental_period_end = Some(bundle.period_end.clone());
-        snapshot.source_notes.extend(bundle.source_notes.clone());
-        snapshot.quality_flags.extend(bundle.quality_flags.clone());
+    pub(crate) fn apply_income_bundle(
+        derived: &mut DerivedFundamentals,
+        bundle: &IncomeBundle,
+        currency: Option<&str>,
+    ) {
+        append_bundle_observations(&mut derived.observations, bundle, currency);
+        let starter = &mut derived.starter;
+        starter.revenue_ttm = bundle.revenue.as_ref().map(|metric| metric.value);
+        starter.net_income_ttm = bundle.net_income.as_ref().map(|metric| metric.value);
+        starter.gross_profit_ttm = bundle.gross_profit.as_ref().map(|metric| metric.value);
+        starter.operating_income_ttm = bundle.operating_income.as_ref().map(|metric| metric.value);
+        starter.gross_margin = ratio(starter.gross_profit_ttm, starter.revenue_ttm);
+        starter.operating_margin = ratio(starter.operating_income_ttm, starter.revenue_ttm);
+        starter.net_margin = ratio(starter.net_income_ttm, starter.revenue_ttm);
+        starter.fundamental_period_end = Some(bundle.period_end.clone());
+        derived.source_notes.extend(bundle.source_notes.clone());
+        derived.quality_flags.extend(bundle.quality_flags.clone());
     }
 
-    pub fn derive_starter_fundamentals(snapshot: &mut FinancialSnapshot) {
-        let mappings = snapshot.canonical_mappings.clone();
-        let raw_sec_facts = &snapshot.raw_sec_facts;
-        let observations = Self::build_observations(raw_sec_facts, &mappings);
-        let bundle = Self::select_latest_baseline_bundle(raw_sec_facts, &mappings);
+    pub fn derive_starter_fundamentals(
+        raw_facts: &[SecRawFact],
+        mappings: &[CanonicalMapping],
+        currency: Option<&str>,
+    ) -> DerivedFundamentals {
+        let mut derived = DerivedFundamentals::default();
+        derived.observations = Self::build_observations(raw_facts, mappings);
+        let bundle = Self::select_latest_baseline_bundle(raw_facts, mappings);
         let shares_fact = Self::latest_value_fact(
-            raw_sec_facts,
-            &mappings,
+            raw_facts,
+            mappings,
             "shares_outstanding",
             "shares",
             bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
         );
         let eps_fact = Self::latest_value_fact(
-            raw_sec_facts,
-            &mappings,
+            raw_facts,
+            mappings,
             "eps",
             "USD/shares",
             bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
         );
-        let cash_fact = Self::latest_value_fact(raw_sec_facts, &mappings, "cash", "USD", None);
+        let cash_fact = Self::latest_value_fact(raw_facts, mappings, "cash", "USD", None);
         let debt = Self::total_latest_values(
-            raw_sec_facts,
-            &mappings,
+            raw_facts,
+            mappings,
             &["debt_current", "debt_noncurrent"],
             "USD",
         );
 
-        snapshot.observations = observations;
         if let Some(bundle) = bundle {
-            Self::apply_income_bundle(snapshot, &bundle);
+            Self::apply_income_bundle(&mut derived, &bundle, currency);
         } else {
             push_quality_flag(
-                snapshot,
+                &mut derived.quality_flags,
                 "sec_income_statement_no_coherent_ttm_or_annual_bundle",
             );
         }
-        snapshot.shares_outstanding = shares_fact.as_ref().map(|fact| fact.value);
-        snapshot.cash = cash_fact.as_ref().map(|fact| fact.value);
-        snapshot.total_debt = debt;
-        snapshot.eps_ttm = eps_fact
+        derived.starter.shares_outstanding = shares_fact.as_ref().map(|fact| fact.value);
+        derived.starter.cash = cash_fact.as_ref().map(|fact| fact.value);
+        derived.starter.total_debt = debt;
+        derived.starter.eps_ttm = eps_fact
             .as_ref()
-            .and_then(|fact| (fact.end == snapshot.fundamental_period_end).then_some(fact.value))
+            .and_then(|fact| {
+                (fact.end == derived.starter.fundamental_period_end).then_some(fact.value)
+            })
             .or_else(|| {
                 let shares_end = shares_fact.as_ref().and_then(|fact| fact.end.clone());
-                (shares_end == snapshot.fundamental_period_end)
-                    .then(|| ratio(snapshot.net_income_ttm, snapshot.shares_outstanding))
+                (shares_end == derived.starter.fundamental_period_end)
+                    .then(|| {
+                        ratio(
+                            derived.starter.net_income_ttm,
+                            derived.starter.shares_outstanding,
+                        )
+                    })
                     .flatten()
             });
-        if snapshot.eps_ttm.is_none()
-            && snapshot.net_income_ttm.is_some()
-            && snapshot.shares_outstanding.is_some()
+        if derived.starter.eps_ttm.is_none()
+            && derived.starter.net_income_ttm.is_some()
+            && derived.starter.shares_outstanding.is_some()
         {
             push_quality_flag(
-                snapshot,
+                &mut derived.quality_flags,
                 "eps_ttm_not_derived_because_share_count_period_did_not_match_income_period",
             );
         }
         if shares_fact.as_ref().and_then(|fact| fact.end.as_deref())
-            != snapshot.fundamental_period_end.as_deref()
+            != derived.starter.fundamental_period_end.as_deref()
         {
             push_quality_flag(
-                snapshot,
+                &mut derived.quality_flags,
                 "shares_outstanding_uses_latest_available_instant_not_income_period",
             );
         }
+        derived
     }
 }
 
@@ -176,13 +188,9 @@ fn ratio(numerator: Option<f64>, denominator: Option<f64>) -> Option<f64> {
     }
 }
 
-fn push_quality_flag(snapshot: &mut FinancialSnapshot, flag: &str) {
-    if !snapshot
-        .quality_flags
-        .iter()
-        .any(|existing| existing == flag)
-    {
-        snapshot.quality_flags.push(flag.to_string());
+fn push_quality_flag(flags: &mut Vec<String>, flag: &str) {
+    if !flags.iter().any(|existing| existing == flag) {
+        flags.push(flag.to_string());
     }
 }
 
@@ -326,7 +334,11 @@ fn metric_for_period(metrics: &[TtmMetric], period_end: &str) -> Option<TtmMetri
         .cloned()
 }
 
-fn append_bundle_observations(snapshot: &mut FinancialSnapshot, bundle: &IncomeBundle) {
+fn append_bundle_observations(
+    observations: &mut Vec<FundamentalObservation>,
+    bundle: &IncomeBundle,
+    currency: Option<&str>,
+) {
     for metric in [
         bundle.revenue.as_ref(),
         bundle.net_income.as_ref(),
@@ -337,7 +349,7 @@ fn append_bundle_observations(snapshot: &mut FinancialSnapshot, bundle: &IncomeB
     .flatten()
     {
         let label = ttm_label(metric.metric_key);
-        snapshot.observations.push(FundamentalObservation {
+        observations.push(FundamentalObservation {
             canonical_key: Some(ttm_canonical_key(metric.metric_key).to_string()),
             metric_key: metric.metric_key.to_string(),
             metric_label: label.to_string(),
@@ -350,7 +362,7 @@ fn append_bundle_observations(snapshot: &mut FinancialSnapshot, bundle: &IncomeB
             fiscal_year: None,
             fiscal_period: None,
             value: metric.value,
-            unit: snapshot.currency.clone(),
+            unit: currency.map(str::to_string),
             source_type: "SEC Company Facts".to_string(),
             source_note: Some(metric.source_note.clone()),
             concept_name: None,
@@ -383,7 +395,7 @@ fn append_bundle_observations(snapshot: &mut FinancialSnapshot, bundle: &IncomeB
         let Some(value) = ratio(Some(numerator.value), Some(revenue.value)) else {
             continue;
         };
-        snapshot.observations.push(FundamentalObservation {
+        observations.push(FundamentalObservation {
             canonical_key: Some(metric_key.to_string()),
             metric_key: metric_key.to_string(),
             metric_label: label.to_string(),

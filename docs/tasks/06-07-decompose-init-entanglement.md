@@ -1,7 +1,7 @@
 # Decompose init_workspace Entanglement
 
-**Date:** 2026-06-07  
-**Status:** Draft plan  
+**Date:** 2026-06-07 (updated 2026-06-08)  
+**Status:** Steps 1–6 complete; Steps 7–11 in progress
 **Scope:** Separate raw SEC/market ingestion from canonical concept processing; make heuristic vs LLM mapping swappable without re-fetching data.
 
 ## Problem Statement
@@ -352,9 +352,39 @@ Use enum + match for two strategies today; introduce `dyn CanonicalMappingResolv
 - `ConceptCatalog` retains catalog materialization, mapping candidates, and registry seed only; `classify_period` delegates to the deriver.
 - `resolve_sec_canonical_layer` calls `FundamentalDeriver::derive_starter_fundamentals` after mapping resolution.
 
-### Step 6 — Split `FinancialSnapshot`
-- Migrate callers to phase-specific structs.
-- Remove god object once tests and tasks updated.
+### Step 6 — Split `FinancialSnapshot` ✅
+- Added phase structs in `workspace/types.rs`: `SecIngestionResult`, `MarketQuoteSnapshot`, `MarketHeadlines`, `StarterFundamentals`, `DerivedFundamentals`.
+- Replaced flat `FinancialSnapshot` with `FinancialRun` (task-layer composer: `ingest`, `market`, `resolution`, `derived`).
+- `fundamental_deriver` and `market_quote_provider` no longer import `tasks::init_workspace`.
+- Public fetch API renamed to `fetch_financial_run`.
+
+## Migration Plan, Part 2
+
+### Step 7 — Phase re-run on existing workspace
+- Open existing run.sqlite, load phases 1–2, run 3–4, persist without SEC re-fetch
+- Tasks: resolveCanonicalMappings, deriveStarterFundamentals
+- Wire WorkspaceFinancialStore::load_* into production
+- Add partial persist methods if needed
+- LLM re-run passes sqlite_path like fresh-init path
+- Tests: round-trip on mapping_strategy:none fixture
+
+### Step 8 — Break tasks ↔ services dependency cycle
+- Move SCHEMA_STATEMENTS, seed_database, InitWorkspaceRequest out of task module
+- Remove tasks::init_workspace imports from services
+
+### Step 9 — Slim the task layer
+- Move compute_derived_metrics, fundamental_metrics, tests out of init_workspace.rs
+- Optional: SecFactsIngestor extract
+- Target ~200 lines in task file
+
+### Step 10 — Optional module splits
+- canonical_metric_registry.rs, concept_catalog_builder.rs
+- Move ConceptReviewDecisionRecord to workspace/types if needed
+
+### Step 11 — Housekeeping
+- Doc/QA naming updates, workspace_sql.rs, persist mapping_strategy in run_metadata
+- Cross-ref 06-08-fundamental-derivation-policy-repair.md — land Step 7 before policy fixes so re-derive works
+
 
 ---
 

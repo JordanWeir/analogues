@@ -1,7 +1,6 @@
 use crate::services::{
     canonical_mapping::{resolve_canonical_mappings, CanonicalResolutionContext},
     concept_catalog::ConceptCatalog,
-    concept_review::ConceptReviewDecisionRecord,
     fundamental_deriver::FundamentalDeriver,
     market_quote_provider::YahooChartMarketDataAdapter,
     sec_facts_provider::SecFactsProvider,
@@ -20,7 +19,9 @@ use std::{path::Path, path::PathBuf, time::Duration};
 pub use crate::{
     services::canonical_mapping::ConceptMappingStrategy,
     workspace::{
-        CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact, WorkspacePaths,
+        CanonicalMapping, ConceptCatalogEntry, DerivedFundamentals, FundamentalObservation,
+        MarketHeadlines, MarketQuoteSnapshot, SecIngestionResult, SecRawFact, StarterFundamentals,
+        WorkspacePaths,
     },
 };
 
@@ -48,47 +49,22 @@ pub struct InitWorkspaceRequest {
     pub mapping_strategy: Option<ConceptMappingStrategy>,
 }
 
-/// SEC Company Facts ingest through concept catalog materialization (phases 1–2).
-#[derive(Debug, Clone)]
-pub(crate) struct SecFactsIngest {
-    pub company_name: Option<String>,
-    pub fetched_at: String,
-    pub raw_sec_facts: Vec<SecRawFact>,
-    pub concept_catalog_entries: Vec<ConceptCatalogEntry>,
-}
-
+/// Composed financial pipeline state for task orchestration (phases 1–4 + market).
 #[derive(Debug, Clone, Default)]
-pub struct FinancialSnapshot {
+pub struct FinancialRun {
     pub ticker: String,
     pub fetched_at: String,
+    pub currency: Option<String>,
+    pub company_name: Option<String>,
     pub data_sources: Vec<String>,
     pub source_notes: Vec<String>,
     pub quality_flags: Vec<String>,
-    pub observations: Vec<FundamentalObservation>,
-    pub raw_sec_facts: Vec<SecRawFact>,
-    pub concept_catalog_entries: Vec<ConceptCatalogEntry>,
-    pub canonical_mappings: Vec<CanonicalMapping>,
-    pub concept_review_decisions: Vec<ConceptReviewDecisionRecord>,
-    pub gaps: Vec<String>,
-    pub currency: Option<String>,
-    pub company_name: Option<String>,
-    pub current_price: Option<f64>,
-    pub market_cap: Option<f64>,
-    pub shares_outstanding: Option<f64>,
-    pub revenue_ttm: Option<f64>,
-    pub net_income_ttm: Option<f64>,
-    pub gross_profit_ttm: Option<f64>,
-    pub operating_income_ttm: Option<f64>,
-    pub gross_margin: Option<f64>,
-    pub operating_margin: Option<f64>,
-    pub net_margin: Option<f64>,
-    pub eps_ttm: Option<f64>,
-    pub trailing_pe: Option<f64>,
-    pub price_to_sales_ttm: Option<f64>,
-    pub cash: Option<f64>,
-    pub total_debt: Option<f64>,
-    pub fundamental_period_end: Option<String>,
     pub fundamental_source: Option<String>,
+    pub gaps: Vec<String>,
+    pub ingest: Option<SecIngestionResult>,
+    pub market: Option<MarketQuoteSnapshot>,
+    pub resolution: Option<crate::services::canonical_mapping::CanonicalResolutionResult>,
+    pub derived: Option<DerivedFundamentals>,
 }
 
 pub struct InitWorkspace;
@@ -278,45 +254,45 @@ async fn fetch_and_seed_financials(
         request.mapping_strategy
     };
 
-    match fetch_financial_snapshot_with_strategy(&request.ticker, fetch_strategy).await {
-        Ok(mut snapshot) => {
+    match fetch_financial_run_with_strategy(&request.ticker, fetch_strategy).await {
+        Ok(mut run) => {
             if llm_review {
-                persist_sec_ingestion(db, &snapshot).await?;
+                persist_sec_ingestion(db, &run).await?;
                 resolve_sec_canonical_layer(
-                    &mut snapshot,
+                    &mut run,
                     &request.ticker,
                     ConceptMappingStrategy::LlmReviewed,
                     Some(sqlite_path.to_path_buf()),
                 )
                 .await;
-                snapshot.compute_derived_metrics();
-                snapshot.mark_gaps();
-                persist_financial_snapshot(db, &snapshot).await?;
+                run.compute_derived_metrics();
+                run.mark_gaps();
+                persist_financial_run(db, &run).await?;
             } else if request.mapping_strategy.is_none() {
-                persist_sec_ingestion(db, &snapshot).await?;
+                persist_sec_ingestion(db, &run).await?;
             } else {
-                persist_financial_snapshot(db, &snapshot).await?;
+                persist_financial_run(db, &run).await?;
             }
 
             let status = if request.mapping_strategy.is_none() {
                 "ingested"
-            } else if snapshot.gaps.is_empty() {
+            } else if run.gaps.is_empty() {
                 "succeeded"
             } else {
                 "partial"
             };
             let error = if request.mapping_strategy.is_none() {
                 Some("canonical mapping and starter fundamentals deferred".to_string())
-            } else if snapshot.gaps.is_empty() {
+            } else if run.gaps.is_empty() {
                 None
             } else {
-                Some(format!("missing fields: {}", snapshot.gaps.join(", ")))
+                Some(format!("missing fields: {}", run.gaps.join(", ")))
             };
             record_financial_fetch_status(db, status, error.as_deref()).await?;
-            if request.mapping_strategy.is_some() && snapshot.gaps.is_empty() {
+            if request.mapping_strategy.is_some() && run.gaps.is_empty() {
                 close_data_gap(db, "starter_financials").await?;
             } else if request.mapping_strategy.is_some() {
-                record_financial_fetch_gap(db, status, error.as_deref(), &snapshot.gaps).await?;
+                record_financial_fetch_gap(db, status, error.as_deref(), &run.gaps).await?;
             }
         }
         Err(err) => {
@@ -328,15 +304,14 @@ async fn fetch_and_seed_financials(
     Ok(())
 }
 
-pub async fn fetch_financial_snapshot(ticker: &str) -> Result<FinancialSnapshot> {
-    fetch_financial_snapshot_with_strategy(ticker, Some(ConceptMappingStrategy::CandidateScoring))
-        .await
+pub async fn fetch_financial_run(ticker: &str) -> Result<FinancialRun> {
+    fetch_financial_run_with_strategy(ticker, Some(ConceptMappingStrategy::CandidateScoring)).await
 }
 
-async fn fetch_financial_snapshot_with_strategy(
+async fn fetch_financial_run_with_strategy(
     ticker: &str,
     mapping_strategy: Option<ConceptMappingStrategy>,
-) -> Result<FinancialSnapshot> {
+) -> Result<FinancialRun> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .user_agent("Mozilla/5.0")
@@ -344,28 +319,28 @@ async fn fetch_financial_snapshot_with_strategy(
         .map_err(|err| Error::string(&format!("failed to build HTTP client: {err}")))?;
     let market_data = YahooChartMarketDataAdapter::new(client.clone());
     let sec_provider = SecFactsProvider::new(client);
-    let mut snapshot = FinancialSnapshot::new(ticker);
+    let mut run = FinancialRun::new(ticker);
 
     match market_data.fetch_snapshot(ticker).await {
-        Ok(update) => snapshot.merge(update, false),
-        Err(err) => snapshot
+        Ok(market) => run.merge_market(market),
+        Err(err) => run
             .source_notes
             .push(format!("Yahoo chart fallback failed: {err}")),
     }
 
-    match fetch_sec_companyfacts_snapshot(&sec_provider, ticker, mapping_strategy).await {
-        Ok(update) => snapshot.merge(update, true),
-        Err(err) => snapshot
+    match fetch_sec_layers(&sec_provider, ticker, mapping_strategy).await {
+        Ok(sec_run) => run.merge_sec_layers(sec_run, true),
+        Err(err) => run
             .source_notes
             .push(format!("SEC Company Facts unavailable or failed: {err}")),
     }
 
-    snapshot.compute_derived_metrics();
-    snapshot.mark_gaps();
-    Ok(snapshot)
+    run.compute_derived_metrics();
+    run.mark_gaps();
+    Ok(run)
 }
 
-impl FinancialSnapshot {
+impl FinancialRun {
     pub(crate) fn new(ticker: &str) -> Self {
         Self {
             ticker: ticker.to_string(),
@@ -374,96 +349,158 @@ impl FinancialSnapshot {
         }
     }
 
-    fn merge(&mut self, update: Self, overwrite: bool) {
-        merge_string(&mut self.currency, update.currency, overwrite);
-        merge_string(&mut self.company_name, update.company_name, overwrite);
-        merge_number(&mut self.current_price, update.current_price, overwrite);
-        merge_number(&mut self.market_cap, update.market_cap, overwrite);
-        merge_number(
-            &mut self.shares_outstanding,
-            update.shares_outstanding,
-            overwrite,
-        );
-        merge_number(&mut self.revenue_ttm, update.revenue_ttm, overwrite);
-        merge_number(&mut self.net_income_ttm, update.net_income_ttm, overwrite);
-        merge_number(
-            &mut self.gross_profit_ttm,
-            update.gross_profit_ttm,
-            overwrite,
-        );
-        merge_number(
-            &mut self.operating_income_ttm,
-            update.operating_income_ttm,
-            overwrite,
-        );
-        merge_number(&mut self.gross_margin, update.gross_margin, overwrite);
-        merge_number(
-            &mut self.operating_margin,
-            update.operating_margin,
-            overwrite,
-        );
-        merge_number(&mut self.net_margin, update.net_margin, overwrite);
-        merge_number(&mut self.eps_ttm, update.eps_ttm, overwrite);
-        merge_number(&mut self.trailing_pe, update.trailing_pe, overwrite);
-        merge_number(
-            &mut self.price_to_sales_ttm,
-            update.price_to_sales_ttm,
-            overwrite,
-        );
-        merge_number(&mut self.cash, update.cash, overwrite);
-        merge_number(&mut self.total_debt, update.total_debt, overwrite);
-        merge_string(
-            &mut self.fundamental_period_end,
-            update.fundamental_period_end,
-            overwrite,
-        );
+    fn merge_market(&mut self, market: MarketQuoteSnapshot) {
+        self.fetched_at = market.fetched_at.clone();
+        merge_string(&mut self.currency, market.currency.clone(), false);
+        merge_string(&mut self.company_name, market.company_name.clone(), false);
+        extend_unique(&mut self.data_sources, market.data_sources.clone());
+        extend_unique(&mut self.source_notes, market.source_notes.clone());
+        self.market = Some(market);
+    }
+
+    fn merge_sec_layers(&mut self, other: FinancialRun, overwrite: bool) {
+        if let Some(ingest) = other.ingest {
+            if overwrite || self.ingest.is_none() {
+                self.ingest = Some(ingest);
+            }
+        }
+        if let Some(resolution) = other.resolution {
+            if overwrite || self.resolution.is_none() {
+                self.resolution = Some(resolution);
+            }
+        }
+        if let Some(derived) = other.derived {
+            if overwrite || self.derived.is_none() {
+                self.derived = Some(derived);
+            }
+        }
+        merge_string(&mut self.company_name, other.company_name, overwrite);
         merge_string(
             &mut self.fundamental_source,
-            update.fundamental_source,
+            other.fundamental_source,
             overwrite,
         );
-        extend_unique(&mut self.data_sources, update.data_sources);
-        extend_unique(&mut self.source_notes, update.source_notes);
-        extend_unique(&mut self.quality_flags, update.quality_flags);
-        self.raw_sec_facts.extend(update.raw_sec_facts);
-        self.concept_catalog_entries
-            .extend(update.concept_catalog_entries);
-        self.canonical_mappings.extend(update.canonical_mappings);
-        self.concept_review_decisions
-            .extend(update.concept_review_decisions);
-        self.observations.extend(update.observations);
+        extend_unique(&mut self.data_sources, other.data_sources);
+        extend_unique(&mut self.source_notes, other.source_notes);
+        extend_unique(&mut self.quality_flags, other.quality_flags);
+        if overwrite {
+            self.fetched_at = other.fetched_at;
+        }
+    }
+
+    fn apply_ingest(&mut self, ingest: SecIngestionResult) {
+        self.fetched_at = ingest.fetched_at.clone();
+        merge_string(&mut self.company_name, ingest.company_name.clone(), true);
+        self.fundamental_source = Some(ingest.source_provider.clone());
+        self.data_sources.push(ingest.source_provider.clone());
+        self.source_notes.push(
+            "Ingested SEC Company Facts raw data and materialized concept catalog entries."
+                .to_string(),
+        );
+        self.ingest = Some(ingest);
+    }
+
+    fn apply_resolution(
+        &mut self,
+        resolution: crate::services::canonical_mapping::CanonicalResolutionResult,
+    ) {
+        extend_unique(&mut self.quality_flags, resolution.quality_flags.clone());
+        self.resolution = Some(resolution);
+    }
+
+    fn apply_derived(&mut self, derived: DerivedFundamentals) {
+        extend_unique(&mut self.quality_flags, derived.quality_flags.clone());
+        extend_unique(&mut self.source_notes, derived.source_notes.clone());
+        self.derived = Some(derived);
+    }
+
+    fn market_headlines(&self) -> MarketHeadlines {
+        self.market
+            .as_ref()
+            .map(|market| market.headlines.clone())
+            .unwrap_or_default()
+    }
+
+    fn market_headlines_mut(&mut self) -> &mut MarketHeadlines {
+        if self.market.is_none() {
+            self.market = Some(MarketQuoteSnapshot {
+                ticker: self.ticker.clone(),
+                fetched_at: self.fetched_at.clone(),
+                currency: self.currency.clone(),
+                company_name: self.company_name.clone(),
+                headlines: MarketHeadlines::default(),
+                observations: Vec::new(),
+                data_sources: Vec::new(),
+                source_notes: Vec::new(),
+            });
+        }
+        &mut self.market.as_mut().expect("market layer").headlines
+    }
+
+    fn starter(&self) -> StarterFundamentals {
+        self.derived
+            .as_ref()
+            .map(|derived| derived.starter.clone())
+            .unwrap_or_default()
+    }
+
+    fn starter_mut(&mut self) -> &mut StarterFundamentals {
+        if self.derived.is_none() {
+            self.derived = Some(DerivedFundamentals::default());
+        }
+        &mut self.derived.as_mut().expect("derived layer").starter
+    }
+
+    fn all_observations(&self) -> Vec<FundamentalObservation> {
+        let mut observations = Vec::new();
+        if let Some(market) = &self.market {
+            observations.extend(market.observations.clone());
+        }
+        if let Some(derived) = &self.derived {
+            observations.extend(derived.observations.clone());
+        }
+        observations
     }
 
     fn compute_derived_metrics(&mut self) {
-        if self.market_cap.is_none() {
-            self.market_cap = multiply(self.current_price, self.shares_outstanding);
-            if self.market_cap.is_some() {
+        let current_price = self.market_headlines().current_price;
+        let starter = self.starter();
+        if self.market_headlines().market_cap.is_none() {
+            let market_cap = multiply(current_price, starter.shares_outstanding);
+            if market_cap.is_some() {
+                self.market_headlines_mut().market_cap = market_cap;
                 self.push_quality_flag("market_cap_derived_from_mixed_frequency_price_and_shares");
             }
         }
-        if self.gross_margin.is_none() {
-            self.gross_margin = ratio(self.gross_profit_ttm, self.revenue_ttm);
+        let starter = self.starter_mut();
+        if starter.gross_margin.is_none() {
+            starter.gross_margin = ratio(starter.gross_profit_ttm, starter.revenue_ttm);
         }
-        if self.operating_margin.is_none() {
-            self.operating_margin = ratio(self.operating_income_ttm, self.revenue_ttm);
+        if starter.operating_margin.is_none() {
+            starter.operating_margin = ratio(starter.operating_income_ttm, starter.revenue_ttm);
         }
-        if self.net_margin.is_none() {
-            self.net_margin = ratio(self.net_income_ttm, self.revenue_ttm);
+        if starter.net_margin.is_none() {
+            starter.net_margin = ratio(starter.net_income_ttm, starter.revenue_ttm);
         }
-        if self.eps_ttm.is_none() {
-            self.eps_ttm = ratio(self.net_income_ttm, self.shares_outstanding);
+        if starter.eps_ttm.is_none() {
+            starter.eps_ttm = ratio(starter.net_income_ttm, starter.shares_outstanding);
         }
-        if self.trailing_pe.is_none() {
-            self.trailing_pe = ratio(self.current_price, self.eps_ttm);
-            if self.trailing_pe.is_some() {
+        let eps_ttm = self.starter().eps_ttm;
+        if self.market_headlines().trailing_pe.is_none() {
+            let trailing_pe = ratio(current_price, eps_ttm);
+            if trailing_pe.is_some() {
+                self.market_headlines_mut().trailing_pe = trailing_pe;
                 self.push_quality_flag(
                     "trailing_pe_uses_market_price_and_latest_filing_period_eps",
                 );
             }
         }
-        if self.price_to_sales_ttm.is_none() {
-            self.price_to_sales_ttm = ratio(self.market_cap, self.revenue_ttm);
-            if self.price_to_sales_ttm.is_some() {
+        let market_cap = self.market_headlines().market_cap;
+        let revenue_ttm = self.starter().revenue_ttm;
+        if self.market_headlines().price_to_sales_ttm.is_none() {
+            let price_to_sales = ratio(market_cap, revenue_ttm);
+            if price_to_sales.is_some() {
+                self.market_headlines_mut().price_to_sales_ttm = price_to_sales;
                 self.push_quality_flag(
                     "price_to_sales_ttm_uses_market_cap_and_latest_filing_period_revenue",
                 );
@@ -478,13 +515,23 @@ impl FinancialSnapshot {
     }
 
     fn mark_gaps(&mut self) {
+        let headlines = self.market_headlines();
+        let starter = self.starter();
         let required = [
-            ("current_price", "current share price", self.current_price),
-            ("market_cap", "market cap", self.market_cap),
-            ("shares_outstanding", "share count", self.shares_outstanding),
-            ("revenue_ttm", "revenue", self.revenue_ttm),
-            ("net_margin", "net margin", self.net_margin),
-            ("eps_ttm", "EPS", self.eps_ttm),
+            (
+                "current_price",
+                "current share price",
+                headlines.current_price,
+            ),
+            ("market_cap", "market cap", headlines.market_cap),
+            (
+                "shares_outstanding",
+                "share count",
+                starter.shares_outstanding,
+            ),
+            ("revenue_ttm", "revenue", starter.revenue_ttm),
+            ("net_margin", "net margin", starter.net_margin),
+            ("eps_ttm", "EPS", starter.eps_ttm),
         ];
         self.gaps = required
             .iter()
@@ -493,120 +540,112 @@ impl FinancialSnapshot {
     }
 }
 
-async fn ingest_sec_facts(provider: &SecFactsProvider, ticker: &str) -> Result<SecFactsIngest> {
+async fn ingest_sec_facts(provider: &SecFactsProvider, ticker: &str) -> Result<SecIngestionResult> {
     let company = provider.lookup_company(ticker).await?;
     let payload = provider.fetch_company_facts(&company).await?;
-    let raw_sec_facts = provider.extract_raw_facts(&payload)?;
-    let concept_catalog_entries = ConceptCatalog::materialize_catalog_entries(&raw_sec_facts);
-    Ok(SecFactsIngest {
+    let raw_facts = provider.extract_raw_facts(&payload)?;
+    let catalog_entries = ConceptCatalog::materialize_catalog_entries(&raw_facts);
+    Ok(SecIngestionResult {
         company_name: company.company_title,
         fetched_at: payload.fetched_at,
-        raw_sec_facts,
-        concept_catalog_entries,
+        raw_facts,
+        catalog_entries,
+        source_provider: provider.provider_name().to_string(),
     })
 }
 
-fn apply_sec_ingest_to_snapshot(
-    snapshot: &mut FinancialSnapshot,
-    ingest: &SecFactsIngest,
-    provider_name: &str,
-) {
-    snapshot.fetched_at = ingest.fetched_at.clone();
-    snapshot.company_name = ingest.company_name.clone();
-    snapshot.raw_sec_facts = ingest.raw_sec_facts.clone();
-    snapshot.concept_catalog_entries = ingest.concept_catalog_entries.clone();
-    snapshot.fundamental_source = Some(provider_name.to_string());
-    snapshot.data_sources.push(provider_name.to_string());
-    snapshot.source_notes.push(
-        "Ingested SEC Company Facts raw data and materialized concept catalog entries.".to_string(),
-    );
-}
-
 async fn resolve_sec_canonical_layer(
-    snapshot: &mut FinancialSnapshot,
+    run: &mut FinancialRun,
     ticker: &str,
     mapping_strategy: ConceptMappingStrategy,
     workspace_sqlite: Option<PathBuf>,
 ) {
-    let raw_sec_facts = &snapshot.raw_sec_facts;
-    let concept_catalog_entries = &snapshot.concept_catalog_entries;
-    let fetched_at = snapshot.fetched_at.clone();
-
+    let ingest = run
+        .ingest
+        .as_ref()
+        .expect("resolve_sec_canonical_layer requires ingest layer");
     let resolution = resolve_canonical_mappings(
         mapping_strategy,
         &CanonicalResolutionContext {
             ticker,
-            raw_sec_facts,
-            catalog_entries: concept_catalog_entries,
-            fetched_at: &fetched_at,
+            raw_sec_facts: &ingest.raw_facts,
+            catalog_entries: &ingest.catalog_entries,
+            fetched_at: &ingest.fetched_at,
             workspace_sqlite,
         },
     )
     .await;
-    let canonical_mappings = resolution.mappings;
-    let concept_review_decisions = resolution.review_decisions;
-    let review_quality_flags = resolution.quality_flags;
-    snapshot.canonical_mappings = canonical_mappings;
-    snapshot.concept_review_decisions = concept_review_decisions;
-    snapshot.quality_flags.extend(review_quality_flags);
-    FundamentalDeriver::derive_starter_fundamentals(snapshot);
-    snapshot.source_notes.push(
+    let derived = FundamentalDeriver::derive_starter_fundamentals(
+        &ingest.raw_facts,
+        &resolution.mappings,
+        run.currency.as_deref(),
+    );
+    run.apply_resolution(resolution);
+    run.apply_derived(derived);
+    run.source_notes.push(
         "Resolved canonical mappings and derived starter fundamentals from SEC Company Facts. Baseline values are selected from aligned income statement periods; stale or mismatched concepts are excluded from derived margins."
             .to_string(),
     );
 }
 
-async fn fetch_sec_companyfacts_snapshot(
+async fn fetch_sec_layers(
     provider: &SecFactsProvider,
     ticker: &str,
     mapping_strategy: Option<ConceptMappingStrategy>,
-) -> Result<FinancialSnapshot> {
+) -> Result<FinancialRun> {
     let ingest = ingest_sec_facts(provider, ticker).await?;
-    let mut snapshot = FinancialSnapshot::new(ticker);
-    apply_sec_ingest_to_snapshot(&mut snapshot, &ingest, provider.provider_name());
+    let mut run = FinancialRun::new(ticker);
+    run.apply_ingest(ingest);
 
     if let Some(strategy) = mapping_strategy {
-        resolve_sec_canonical_layer(&mut snapshot, ticker, strategy, None).await;
+        resolve_sec_canonical_layer(&mut run, ticker, strategy, None).await;
     }
 
-    Ok(snapshot)
+    Ok(run)
 }
 
-async fn persist_sec_ingestion(
-    db: &sea_orm::DatabaseConnection,
-    snapshot: &FinancialSnapshot,
-) -> Result<()> {
-    let source_note = snapshot.source_notes.join(" ");
+async fn persist_sec_ingestion(db: &sea_orm::DatabaseConnection, run: &FinancialRun) -> Result<()> {
+    let ingest = run
+        .ingest
+        .as_ref()
+        .ok_or_else(|| Error::string("persist_sec_ingestion requires ingest layer"))?;
+    let source_note = run.source_notes.join(" ");
     let input = IngestPersist {
-        fetched_at: &snapshot.fetched_at,
-        company_name: snapshot.company_name.as_deref(),
-        currency: snapshot.currency.as_deref(),
+        fetched_at: &run.fetched_at,
+        company_name: run.company_name.as_deref(),
+        currency: run.currency.as_deref(),
         source_note: &source_note,
-        raw_sec_facts: &snapshot.raw_sec_facts,
-        concept_catalog_entries: &snapshot.concept_catalog_entries,
+        raw_sec_facts: &ingest.raw_facts,
+        concept_catalog_entries: &ingest.catalog_entries,
     };
     WorkspaceFinancialStore::new(db)
         .persist_ingestion(&input)
         .await
 }
 
-async fn persist_financial_snapshot(
-    db: &sea_orm::DatabaseConnection,
-    snapshot: &FinancialSnapshot,
-) -> Result<()> {
-    let source_note = snapshot.source_notes.join(" ");
-    let fundamentals = snapshot.fundamental_metrics();
+async fn persist_financial_run(db: &sea_orm::DatabaseConnection, run: &FinancialRun) -> Result<()> {
+    let ingest = run
+        .ingest
+        .as_ref()
+        .ok_or_else(|| Error::string("persist_financial_run requires ingest layer"))?;
+    let resolution = run
+        .resolution
+        .as_ref()
+        .ok_or_else(|| Error::string("persist_financial_run requires resolution layer"))?;
+    let source_note = run.source_notes.join(" ");
+    let fundamentals = run.fundamental_metrics();
+    let observations = run.all_observations();
     let input = SnapshotPersist {
-        fetched_at: &snapshot.fetched_at,
-        company_name: snapshot.company_name.as_deref(),
-        currency: snapshot.currency.as_deref(),
+        fetched_at: &run.fetched_at,
+        company_name: run.company_name.as_deref(),
+        currency: run.currency.as_deref(),
         source_note: &source_note,
-        raw_sec_facts: &snapshot.raw_sec_facts,
-        concept_catalog_entries: &snapshot.concept_catalog_entries,
-        concept_review_decisions: &snapshot.concept_review_decisions,
-        canonical_mappings: &snapshot.canonical_mappings,
-        observations: &snapshot.observations,
-        quality_flags: &snapshot.quality_flags,
+        raw_sec_facts: &ingest.raw_facts,
+        concept_catalog_entries: &ingest.catalog_entries,
+        concept_review_decisions: &resolution.review_decisions,
+        canonical_mappings: &resolution.mappings,
+        observations: &observations,
+        quality_flags: &run.quality_flags,
         fundamentals: &fundamentals,
     };
     WorkspaceFinancialStore::new(db)
@@ -671,15 +710,17 @@ async fn close_data_gap(db: &sea_orm::DatabaseConnection, gap_key: &str) -> Resu
     .await
 }
 
-impl FinancialSnapshot {
+impl FinancialRun {
     fn fundamental_metrics(&self) -> Vec<FundamentalInsert<'_>> {
-        let period = self.fundamental_period_end.clone();
+        let headlines = self.market_headlines();
+        let starter = self.starter();
+        let period = starter.fundamental_period_end.clone();
         let fundamental_source = self.fundamental_source.clone();
         vec![
             FundamentalInsert {
                 key: "current_price",
                 label: "Current price",
-                value: self.current_price,
+                value: headlines.current_price,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: None,
@@ -688,7 +729,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "market_cap",
                 label: "Market cap",
-                value: self.market_cap,
+                value: headlines.market_cap,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: None,
@@ -699,7 +740,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "shares_outstanding",
                 label: "Shares outstanding",
-                value: self.shares_outstanding,
+                value: starter.shares_outstanding,
                 text: None,
                 unit: Some("shares"),
                 period: period.clone(),
@@ -708,7 +749,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "revenue_ttm",
                 label: "Revenue TTM",
-                value: self.revenue_ttm,
+                value: starter.revenue_ttm,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: period.clone(),
@@ -717,7 +758,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "net_income_ttm",
                 label: "Net income TTM",
-                value: self.net_income_ttm,
+                value: starter.net_income_ttm,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: period.clone(),
@@ -726,7 +767,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "gross_profit_ttm",
                 label: "Gross profit TTM",
-                value: self.gross_profit_ttm,
+                value: starter.gross_profit_ttm,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: period.clone(),
@@ -735,7 +776,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "operating_income_ttm",
                 label: "Operating income TTM",
-                value: self.operating_income_ttm,
+                value: starter.operating_income_ttm,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: period.clone(),
@@ -744,7 +785,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "gross_margin",
                 label: "Gross margin",
-                value: self.gross_margin,
+                value: starter.gross_margin,
                 text: None,
                 unit: Some("ratio"),
                 period: period.clone(),
@@ -753,7 +794,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "operating_margin",
                 label: "Operating margin",
-                value: self.operating_margin,
+                value: starter.operating_margin,
                 text: None,
                 unit: Some("ratio"),
                 period: period.clone(),
@@ -762,7 +803,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "net_margin",
                 label: "Net margin",
-                value: self.net_margin,
+                value: starter.net_margin,
                 text: None,
                 unit: Some("ratio"),
                 period: period.clone(),
@@ -771,7 +812,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "eps_ttm",
                 label: "EPS TTM",
-                value: self.eps_ttm,
+                value: starter.eps_ttm,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: period.clone(),
@@ -780,7 +821,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "trailing_pe",
                 label: "Trailing P/E",
-                value: self.trailing_pe,
+                value: headlines.trailing_pe,
                 text: None,
                 unit: Some("multiple"),
                 period: None,
@@ -791,7 +832,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "price_to_sales_ttm",
                 label: "Price to sales TTM",
-                value: self.price_to_sales_ttm,
+                value: headlines.price_to_sales_ttm,
                 text: None,
                 unit: Some("multiple"),
                 period: None,
@@ -802,7 +843,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "cash",
                 label: "Cash and equivalents",
-                value: self.cash,
+                value: starter.cash,
                 text: None,
                 unit: self.currency.as_deref(),
                 period: period.clone(),
@@ -811,7 +852,7 @@ impl FinancialSnapshot {
             FundamentalInsert {
                 key: "total_debt",
                 label: "Total debt",
-                value: self.total_debt,
+                value: starter.total_debt,
                 text: None,
                 unit: self.currency.as_deref(),
                 period,
@@ -847,12 +888,6 @@ fn sql_value(value: Option<&str>) -> String {
 }
 
 fn merge_string(target: &mut Option<String>, update: Option<String>, overwrite: bool) {
-    if update.is_some() && (overwrite || target.is_none()) {
-        *target = update;
-    }
-}
-
-fn merge_number(target: &mut Option<f64>, update: Option<f64>, overwrite: bool) {
     if update.is_some() && (overwrite || target.is_none()) {
         *target = update;
     }
@@ -1448,20 +1483,21 @@ mod tests {
             }
         });
         let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-07T00:00:00Z");
-        let ingest = SecFactsIngest {
+        let ingest = SecIngestionResult {
             company_name: Some("Example Corp".to_string()),
             fetched_at: "2026-06-07T00:00:00Z".to_string(),
-            raw_sec_facts: raw_facts.clone(),
-            concept_catalog_entries: ConceptCatalog::materialize_catalog_entries(&raw_facts),
+            raw_facts: raw_facts.clone(),
+            catalog_entries: ConceptCatalog::materialize_catalog_entries(&raw_facts),
+            source_provider: "SEC Company Facts".to_string(),
         };
-        let mut snapshot = FinancialSnapshot::new("EXMP");
-        apply_sec_ingest_to_snapshot(&mut snapshot, &ingest, "SEC Company Facts");
+        let mut run = FinancialRun::new("EXMP");
+        run.apply_ingest(ingest);
 
-        assert!(!snapshot.raw_sec_facts.is_empty());
-        assert!(!snapshot.concept_catalog_entries.is_empty());
-        assert!(snapshot.canonical_mappings.is_empty());
-        assert!(snapshot.observations.is_empty());
-        assert!(snapshot.revenue_ttm.is_none());
+        assert!(!run.ingest.as_ref().unwrap().raw_facts.is_empty());
+        assert!(!run.ingest.as_ref().unwrap().catalog_entries.is_empty());
+        assert!(run.resolution.is_none());
+        assert!(run.all_observations().is_empty());
+        assert!(run.starter().revenue_ttm.is_none());
     }
 
     #[tokio::test]
@@ -1483,26 +1519,27 @@ mod tests {
             }
         });
         let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-07T00:00:00Z");
-        let ingest = SecFactsIngest {
+        let ingest = SecIngestionResult {
             company_name: Some("Example Corp".to_string()),
             fetched_at: "2026-06-07T00:00:00Z".to_string(),
-            raw_sec_facts: raw_facts,
-            concept_catalog_entries: ConceptCatalog::materialize_catalog_entries(
+            raw_facts,
+            catalog_entries: ConceptCatalog::materialize_catalog_entries(
                 &extract_raw_facts_from_root(&facts_root, "2026-06-07T00:00:00Z"),
             ),
+            source_provider: "SEC Company Facts".to_string(),
         };
-        let mut snapshot = FinancialSnapshot::new("EXMP");
-        apply_sec_ingest_to_snapshot(&mut snapshot, &ingest, "SEC Company Facts");
+        let mut run = FinancialRun::new("EXMP");
+        run.apply_ingest(ingest);
         resolve_sec_canonical_layer(
-            &mut snapshot,
+            &mut run,
             "EXMP",
             ConceptMappingStrategy::CandidateScoring,
             None,
         )
         .await;
 
-        assert!(!snapshot.canonical_mappings.is_empty());
-        assert!(!snapshot.observations.is_empty());
+        assert!(!run.resolution.as_ref().unwrap().mappings.is_empty());
+        assert!(!run.all_observations().is_empty());
     }
 
     #[test]
@@ -1564,19 +1601,44 @@ mod tests {
         let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
         let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
         let observations = FundamentalDeriver::build_observations(&raw_facts, &mappings);
-        let mut base = FinancialSnapshot::new("TEST");
-        let mut update = FinancialSnapshot::new("TEST");
-        update.raw_sec_facts = raw_facts.clone();
-        update.canonical_mappings = mappings.clone();
-        update.observations = observations.clone();
+        let mut base = FinancialRun::new("TEST");
+        let mut update = FinancialRun::new("TEST");
+        update.ingest = Some(SecIngestionResult {
+            company_name: None,
+            fetched_at: "2026-06-04T00:00:00Z".to_string(),
+            raw_facts: raw_facts.clone(),
+            catalog_entries: ConceptCatalog::materialize_catalog_entries(&raw_facts),
+            source_provider: "SEC Company Facts".to_string(),
+        });
+        update.resolution = Some(
+            crate::services::canonical_mapping::CanonicalResolutionResult {
+                mappings: mappings.clone(),
+                review_decisions: Vec::new(),
+                quality_flags: Vec::new(),
+                strategy_id: "candidate_scoring".to_string(),
+            },
+        );
+        update.derived = Some(DerivedFundamentals {
+            observations: observations.clone(),
+            ..DerivedFundamentals::default()
+        });
 
-        base.merge(update, true);
+        base.merge_sec_layers(update, true);
 
-        assert_eq!(base.raw_sec_facts.len(), raw_facts.len());
-        assert_eq!(base.canonical_mappings.len(), mappings.len());
-        assert_eq!(base.observations.len(), observations.len());
+        assert_eq!(
+            base.ingest.as_ref().unwrap().raw_facts.len(),
+            raw_facts.len()
+        );
+        assert_eq!(
+            base.resolution.as_ref().unwrap().mappings.len(),
+            mappings.len()
+        );
+        assert_eq!(base.all_observations().len(), observations.len());
         assert!(base
-            .raw_sec_facts
+            .ingest
+            .as_ref()
+            .unwrap()
+            .raw_facts
             .iter()
             .any(|fact| fact.concept_name == "CloudRemainingPerformanceObligation"));
     }
