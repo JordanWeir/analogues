@@ -2,6 +2,7 @@ use crate::services::{
     canonical_mapping::{resolve_canonical_mappings, CanonicalResolutionContext},
     concept_catalog::ConceptCatalog,
     concept_review::ConceptReviewDecisionRecord,
+    fundamental_deriver::FundamentalDeriver,
     market_quote_provider::YahooChartMarketDataAdapter,
     sec_facts_provider::SecFactsProvider,
     workspace_financial_store::{
@@ -545,67 +546,10 @@ async fn resolve_sec_canonical_layer(
     let canonical_mappings = resolution.mappings;
     let concept_review_decisions = resolution.review_decisions;
     let review_quality_flags = resolution.quality_flags;
-    let observations = ConceptCatalog::build_observations(raw_sec_facts, &canonical_mappings);
-    let bundle = ConceptCatalog::select_latest_baseline_bundle(raw_sec_facts, &canonical_mappings);
-    let shares_fact = ConceptCatalog::latest_value_fact(
-        raw_sec_facts,
-        &canonical_mappings,
-        "shares_outstanding",
-        "shares",
-        bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
-    );
-    let eps_fact = ConceptCatalog::latest_value_fact(
-        raw_sec_facts,
-        &canonical_mappings,
-        "eps",
-        "USD/shares",
-        bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
-    );
-    let cash_fact =
-        ConceptCatalog::latest_value_fact(raw_sec_facts, &canonical_mappings, "cash", "USD", None);
-    let debt = ConceptCatalog::total_latest_values(
-        raw_sec_facts,
-        &canonical_mappings,
-        &["debt_current", "debt_noncurrent"],
-        "USD",
-    );
-
     snapshot.canonical_mappings = canonical_mappings;
     snapshot.concept_review_decisions = concept_review_decisions;
-    snapshot.observations = observations;
     snapshot.quality_flags.extend(review_quality_flags);
-    if let Some(bundle) = bundle {
-        ConceptCatalog::apply_income_bundle(snapshot, &bundle);
-    } else {
-        snapshot.push_quality_flag("sec_income_statement_no_coherent_ttm_or_annual_bundle");
-    }
-    snapshot.shares_outstanding = shares_fact.as_ref().map(|fact| fact.value);
-    snapshot.cash = cash_fact.as_ref().map(|fact| fact.value);
-    snapshot.total_debt = debt;
-    snapshot.eps_ttm = eps_fact
-        .as_ref()
-        .and_then(|fact| (fact.end == snapshot.fundamental_period_end).then_some(fact.value))
-        .or_else(|| {
-            let shares_end = shares_fact.as_ref().and_then(|fact| fact.end.clone());
-            (shares_end == snapshot.fundamental_period_end)
-                .then(|| ratio(snapshot.net_income_ttm, snapshot.shares_outstanding))
-                .flatten()
-        });
-    if snapshot.eps_ttm.is_none()
-        && snapshot.net_income_ttm.is_some()
-        && snapshot.shares_outstanding.is_some()
-    {
-        snapshot.push_quality_flag(
-            "eps_ttm_not_derived_because_share_count_period_did_not_match_income_period",
-        );
-    }
-    if shares_fact.as_ref().and_then(|fact| fact.end.as_deref())
-        != snapshot.fundamental_period_end.as_deref()
-    {
-        snapshot.push_quality_flag(
-            "shares_outstanding_uses_latest_available_instant_not_income_period",
-        );
-    }
+    FundamentalDeriver::derive_starter_fundamentals(snapshot);
     snapshot.source_notes.push(
         "Resolved canonical mappings and derived starter fundamentals from SEC Company Facts. Baseline values are selected from aligned income statement periods; stale or mismatched concepts are excluded from derived margins."
             .to_string(),
@@ -1363,7 +1307,8 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
 mod tests {
     use super::*;
     use crate::services::{
-        concept_catalog::{ttm_windows, ConceptCatalog, SecFact},
+        concept_catalog::ConceptCatalog,
+        fundamental_deriver::{ttm_windows, FundamentalDeriver, SecFact},
         sec_facts_provider::extract_raw_facts_from_root,
     };
     use serde_json::{json, Value};
@@ -1420,7 +1365,7 @@ mod tests {
         let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
         let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
 
-        let bundle = ConceptCatalog::select_latest_baseline_bundle(&raw_facts, &mappings)
+        let bundle = FundamentalDeriver::select_latest_baseline_bundle(&raw_facts, &mappings)
             .expect("coherent revenue/net income");
 
         assert_eq!(bundle.period_end, "2026-03-31");
@@ -1454,7 +1399,7 @@ mod tests {
 
         let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
         let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
-        let observations = ConceptCatalog::build_observations(&raw_facts, &mappings);
+        let observations = FundamentalDeriver::build_observations(&raw_facts, &mappings);
 
         assert!(raw_facts
             .iter()
@@ -1593,7 +1538,7 @@ mod tests {
         assert!(mappings.iter().any(|mapping| {
             mapping.canonical_key == "revenue" && mapping.concept_name == "CustomerRevenue"
         }));
-        assert!(ConceptCatalog::select_latest_baseline_bundle(&raw_facts, &mappings).is_some());
+        assert!(FundamentalDeriver::select_latest_baseline_bundle(&raw_facts, &mappings).is_some());
     }
 
     #[test]
@@ -1618,7 +1563,7 @@ mod tests {
         });
         let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
         let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
-        let observations = ConceptCatalog::build_observations(&raw_facts, &mappings);
+        let observations = FundamentalDeriver::build_observations(&raw_facts, &mappings);
         let mut base = FinancialSnapshot::new("TEST");
         let mut update = FinancialSnapshot::new("TEST");
         update.raw_sec_facts = raw_facts.clone();

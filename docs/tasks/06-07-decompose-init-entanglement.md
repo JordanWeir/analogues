@@ -347,9 +347,10 @@ Use enum + match for two strategies today; introduce `dyn CanonicalMappingResolv
 - `LlmReviewedResolver` uses the real workspace `run.sqlite` path; `fetch_and_seed_financials` persists ingest before LLM review.
 - Removed temp `materialize_review_workspace`; `review_workspace.rs` retains `workspace_schema_hint()` only. Playground/tests use `materialize_standalone_ingest_workspace`.
 
-### Step 5 — Extract `FundamentalDeriver`
-- Move observation/TTM logic out of `ConceptCatalog`.
-- Delete or hollow out `ConceptCatalog` struct.
+### Step 5 — Extract `FundamentalDeriver` ✅
+- Added `src/services/fundamental_deriver.rs` with observations, TTM bundles, starter metrics, and `derive_starter_fundamentals`.
+- `ConceptCatalog` retains catalog materialization, mapping candidates, and registry seed only; `classify_period` delegates to the deriver.
+- `resolve_sec_canonical_layer` calls `FundamentalDeriver::derive_starter_fundamentals` after mapping resolution.
 
 ### Step 6 — Split `FinancialSnapshot`
 - Migrate callers to phase-specific structs.
