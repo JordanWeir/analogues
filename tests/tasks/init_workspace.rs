@@ -59,7 +59,7 @@ async fn test_initializes_workspace_directories_and_database() {
         date: "2026-06-04".to_string(),
         base_dir: base_dir.clone(),
         fetch_financials: false,
-        mapping_strategy: ConceptMappingStrategy::CandidateScoring,
+        mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
     };
 
     let paths = initialize_workspace(&request).await.unwrap();
@@ -169,7 +169,7 @@ async fn test_allocates_next_index_without_overwriting() {
         date: "2026-06-04".to_string(),
         base_dir: base_dir.clone(),
         fetch_financials: false,
-        mapping_strategy: ConceptMappingStrategy::CandidateScoring,
+        mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
     };
 
     let first = initialize_workspace(&request).await.unwrap();

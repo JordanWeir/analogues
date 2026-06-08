@@ -25,6 +25,16 @@ pub struct FundamentalInsert<'a> {
     pub source_note: Option<String>,
 }
 
+/// Phase 1–2 persistence: raw SEC facts and concept catalog only.
+pub struct IngestPersist<'a> {
+    pub fetched_at: &'a str,
+    pub company_name: Option<&'a str>,
+    pub currency: Option<&'a str>,
+    pub source_note: &'a str,
+    pub raw_sec_facts: &'a [SecRawFact],
+    pub concept_catalog_entries: &'a [ConceptCatalogEntry],
+}
+
 /// Decomposed financial snapshot payload for persistence without task-layer types.
 pub struct SnapshotPersist<'a> {
     pub fetched_at: &'a str,
@@ -43,6 +53,45 @@ pub struct SnapshotPersist<'a> {
 impl<'a> WorkspaceFinancialStore<'a> {
     pub fn new(db: &'a DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    pub async fn persist_ingestion(&self, input: &IngestPersist<'_>) -> Result<()> {
+        let txn = self.db.begin().await.map_err(|err| {
+            Error::string(&format!(
+                "failed to begin ingestion transaction: {err}"
+            ))
+        })?;
+        self.persist_ingestion_in(&txn, input).await?;
+        txn.commit().await.map_err(|err| {
+            Error::string(&format!("failed to commit ingestion transaction: {err}"))
+        })?;
+        Ok(())
+    }
+
+    pub async fn persist_ingestion_in(
+        &self,
+        db: &impl ConnectionTrait,
+        input: &IngestPersist<'_>,
+    ) -> Result<()> {
+        execute_sql(
+            db,
+            &format!(
+                "UPDATE stock_info
+                 SET company_name = {}, currency = {}, source_note = {}, updated_at = '{}'
+                 WHERE id = 1",
+                sql_value(input.company_name),
+                sql_value(input.currency),
+                sql_value(Some(input.source_note)),
+                sql_quote(input.fetched_at),
+            ),
+        )
+        .await?;
+
+        Self::insert_raw_sec_facts(db, input.raw_sec_facts).await?;
+        Self::insert_concept_catalog_entries(db, input.concept_catalog_entries, input.fetched_at)
+            .await?;
+
+        Ok(())
     }
 
     pub async fn persist_snapshot(&self, input: &SnapshotPersist<'_>) -> Result<()> {
@@ -690,7 +739,9 @@ mod tests {
                 date: "2026-06-07".to_string(),
                 base_dir: std::path::PathBuf::from("reports/stock-narrative-research"),
                 fetch_financials: false,
-                mapping_strategy: crate::tasks::init_workspace::ConceptMappingStrategy::CandidateScoring,
+                mapping_strategy: Some(
+                    crate::tasks::init_workspace::ConceptMappingStrategy::CandidateScoring,
+                ),
             },
             &crate::workspace::WorkspacePaths {
                 run_slug: "MSFT-2026-06-07-1".to_string(),
@@ -716,6 +767,39 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].concept_name, "Revenues");
         assert_eq!(loaded[0].value, 1_000_000.0);
+    }
+
+    #[tokio::test]
+    async fn persist_ingestion_writes_facts_and_catalog_only() {
+        let db = test_db().await;
+        let store = WorkspaceFinancialStore::new(&db);
+        let facts = vec![sample_fact()];
+        let entries = ConceptCatalog::materialize_catalog_entries(&facts);
+        store
+            .persist_ingestion(&IngestPersist {
+                fetched_at: "2026-06-07T00:00:00Z",
+                company_name: Some("Example Corp"),
+                currency: Some("USD"),
+                source_note: "ingest only",
+                raw_sec_facts: &facts,
+                concept_catalog_entries: &entries,
+            })
+            .await
+            .expect("persist ingestion");
+
+        let loaded_facts = store.load_sec_raw_facts().await.expect("load facts");
+        let loaded_entries = store
+            .load_concept_catalog_entries()
+            .await
+            .expect("load catalog");
+        let mappings = store
+            .load_active_canonical_mappings()
+            .await
+            .expect("load mappings");
+
+        assert_eq!(loaded_facts.len(), 1);
+        assert_eq!(loaded_entries.len(), entries.len());
+        assert!(mappings.is_empty());
     }
 
     #[tokio::test]

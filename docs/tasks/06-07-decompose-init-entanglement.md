@@ -337,10 +337,10 @@ Use enum + match for two strategies today; introduce `dyn CanonicalMappingResolv
 - `review_workspace.rs` deduped to use shared insert methods.
 - Round-trip unit tests for facts and catalog entries.
 
-### Step 3 — Split ingest from mapping
-- Extract `ingest_sec_facts` from `fetch_sec_companyfacts_snapshot`.
-- Add `mapping_strategy: None` (or `skip_mapping`) that persists raw facts + catalog only.
-- `fetch_financial_snapshot_with_strategy` becomes composition of phase functions.
+### Step 3 — Split ingest from mapping ✅
+- Extracted `ingest_sec_facts`, `apply_sec_ingest_to_snapshot`, `resolve_sec_canonical_layer`.
+- `mapping_strategy: None` via CLI `none` / `skip` / `skip_mapping`; persists phases 1–2 only via `persist_ingestion`.
+- `fetch_sec_companyfacts_snapshot` composes ingest + optional resolve; full pipeline unchanged when strategy is `Some`.
 
 ### Step 4 — Extract resolvers
 - Move `canonical_mappings_for_strategy` → `CandidateScoringResolver`, `LlmReviewedResolver`.

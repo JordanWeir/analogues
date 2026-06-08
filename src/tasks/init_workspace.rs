@@ -5,7 +5,9 @@ use crate::services::{
     model_client::OpenRouterModelClient,
     review_workspace::{cleanup_review_workspace, materialize_review_workspace},
     sec_facts_provider::SecFactsProvider,
-    workspace_financial_store::{FundamentalInsert, SnapshotPersist, WorkspaceFinancialStore},
+    workspace_financial_store::{
+        FundamentalInsert, IngestPersist, SnapshotPersist, WorkspaceFinancialStore,
+    },
     workspace_store::{
         normalize_ticker, validate_date, WorkspaceStore, DEFAULT_REPORT_ROOT, SCHEMA_VERSION,
     },
@@ -40,13 +42,23 @@ pub struct InitWorkspaceRequest {
     pub date: String,
     pub base_dir: PathBuf,
     pub fetch_financials: bool,
-    pub mapping_strategy: ConceptMappingStrategy,
+    /// `None` ingests SEC raw facts and concept catalog only (phases 1–2).
+    pub mapping_strategy: Option<ConceptMappingStrategy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConceptMappingStrategy {
     CandidateScoring,
     LlmReviewed,
+}
+
+/// SEC Company Facts ingest through concept catalog materialization (phases 1–2).
+#[derive(Debug, Clone)]
+pub(crate) struct SecFactsIngest {
+    pub company_name: Option<String>,
+    pub fetched_at: String,
+    pub raw_sec_facts: Vec<SecRawFact>,
+    pub concept_catalog_entries: Vec<ConceptCatalogEntry>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -140,7 +152,7 @@ impl InitWorkspaceRequest {
             .cli
             .get("mapping_strategy")
             .or_else(|| vars.cli.get("concept_mapping_strategy"))
-            .map_or(Ok(ConceptMappingStrategy::CandidateScoring), |value| {
+            .map_or(Ok(Some(ConceptMappingStrategy::CandidateScoring)), |value| {
                 ConceptMappingStrategy::from_var(value)
             })?;
 
@@ -155,12 +167,13 @@ impl InitWorkspaceRequest {
 }
 
 impl ConceptMappingStrategy {
-    fn from_var(value: &str) -> Result<Self> {
+    fn from_var(value: &str) -> Result<Option<Self>> {
         match value {
-            "candidate" | "candidate_scoring" | "heuristic" => Ok(Self::CandidateScoring),
-            "llm" | "llm_reviewed" | "model" => Ok(Self::LlmReviewed),
+            "none" | "skip" | "skip_mapping" => Ok(None),
+            "candidate" | "candidate_scoring" | "heuristic" => Ok(Some(Self::CandidateScoring)),
+            "llm" | "llm_reviewed" | "model" => Ok(Some(Self::LlmReviewed)),
             _ => Err(Error::string(
-                "mapping_strategy must be candidate_scoring or llm_reviewed",
+                "mapping_strategy must be none, candidate_scoring, or llm_reviewed",
             )),
         }
     }
@@ -271,21 +284,29 @@ async fn fetch_and_seed_financials(
 
     match fetch_financial_snapshot_with_strategy(&request.ticker, request.mapping_strategy).await {
         Ok(snapshot) => {
-            persist_financial_snapshot(db, &snapshot).await?;
-            let status = if snapshot.gaps.is_empty() {
+            if request.mapping_strategy.is_none() {
+                persist_sec_ingestion(db, &snapshot).await?;
+            } else {
+                persist_financial_snapshot(db, &snapshot).await?;
+            }
+            let status = if request.mapping_strategy.is_none() {
+                "ingested"
+            } else if snapshot.gaps.is_empty() {
                 "succeeded"
             } else {
                 "partial"
             };
-            let error = if snapshot.gaps.is_empty() {
+            let error = if request.mapping_strategy.is_none() {
+                Some("canonical mapping and starter fundamentals deferred".to_string())
+            } else if snapshot.gaps.is_empty() {
                 None
             } else {
                 Some(format!("missing fields: {}", snapshot.gaps.join(", ")))
             };
             record_financial_fetch_status(db, status, error.as_deref()).await?;
-            if snapshot.gaps.is_empty() {
+            if request.mapping_strategy.is_some() && snapshot.gaps.is_empty() {
                 close_data_gap(db, "starter_financials").await?;
-            } else {
+            } else if request.mapping_strategy.is_some() {
                 record_financial_fetch_gap(db, status, error.as_deref(), &snapshot.gaps).await?;
             }
         }
@@ -299,12 +320,13 @@ async fn fetch_and_seed_financials(
 }
 
 pub async fn fetch_financial_snapshot(ticker: &str) -> Result<FinancialSnapshot> {
-    fetch_financial_snapshot_with_strategy(ticker, ConceptMappingStrategy::CandidateScoring).await
+    fetch_financial_snapshot_with_strategy(ticker, Some(ConceptMappingStrategy::CandidateScoring))
+        .await
 }
 
 async fn fetch_financial_snapshot_with_strategy(
     ticker: &str,
-    mapping_strategy: ConceptMappingStrategy,
+    mapping_strategy: Option<ConceptMappingStrategy>,
 ) -> Result<FinancialSnapshot> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -462,60 +484,85 @@ impl FinancialSnapshot {
     }
 }
 
-async fn fetch_sec_companyfacts_snapshot(
-    provider: &SecFactsProvider,
-    ticker: &str,
-    mapping_strategy: ConceptMappingStrategy,
-) -> Result<FinancialSnapshot> {
+async fn ingest_sec_facts(provider: &SecFactsProvider, ticker: &str) -> Result<SecFactsIngest> {
     let company = provider.lookup_company(ticker).await?;
     let payload = provider.fetch_company_facts(&company).await?;
-    let mut snapshot = FinancialSnapshot::new(ticker);
-    snapshot.fetched_at = payload.fetched_at.clone();
     let raw_sec_facts = provider.extract_raw_facts(&payload)?;
     let concept_catalog_entries = ConceptCatalog::materialize_catalog_entries(&raw_sec_facts);
+    Ok(SecFactsIngest {
+        company_name: company.company_title,
+        fetched_at: payload.fetched_at,
+        raw_sec_facts,
+        concept_catalog_entries,
+    })
+}
+
+fn apply_sec_ingest_to_snapshot(
+    snapshot: &mut FinancialSnapshot,
+    ingest: &SecFactsIngest,
+    provider_name: &str,
+) {
+    snapshot.fetched_at = ingest.fetched_at.clone();
+    snapshot.company_name = ingest.company_name.clone();
+    snapshot.raw_sec_facts = ingest.raw_sec_facts.clone();
+    snapshot.concept_catalog_entries = ingest.concept_catalog_entries.clone();
+    snapshot.fundamental_source = Some(provider_name.to_string());
+    snapshot.data_sources.push(provider_name.to_string());
+    snapshot.source_notes.push(
+        "Ingested SEC Company Facts raw data and materialized concept catalog entries.".to_string(),
+    );
+}
+
+async fn resolve_sec_canonical_layer(
+    snapshot: &mut FinancialSnapshot,
+    ticker: &str,
+    mapping_strategy: ConceptMappingStrategy,
+) {
+    let raw_sec_facts = &snapshot.raw_sec_facts;
+    let concept_catalog_entries = &snapshot.concept_catalog_entries;
+    let fetched_at = snapshot.fetched_at.clone();
+
     let (canonical_mappings, concept_review_decisions, review_quality_flags) =
         canonical_mappings_for_strategy(
             mapping_strategy,
             ticker,
-            &raw_sec_facts,
-            &concept_catalog_entries,
-            &snapshot.fetched_at,
+            raw_sec_facts,
+            concept_catalog_entries,
+            &fetched_at,
         )
         .await;
-    let observations = ConceptCatalog::build_observations(&raw_sec_facts, &canonical_mappings);
-    let bundle = ConceptCatalog::select_latest_baseline_bundle(&raw_sec_facts, &canonical_mappings);
+    let observations = ConceptCatalog::build_observations(raw_sec_facts, &canonical_mappings);
+    let bundle =
+        ConceptCatalog::select_latest_baseline_bundle(raw_sec_facts, &canonical_mappings);
     let shares_fact = ConceptCatalog::latest_value_fact(
-        &raw_sec_facts,
+        raw_sec_facts,
         &canonical_mappings,
         "shares_outstanding",
         "shares",
         bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
     );
     let eps_fact = ConceptCatalog::latest_value_fact(
-        &raw_sec_facts,
+        raw_sec_facts,
         &canonical_mappings,
         "eps",
         "USD/shares",
         bundle.as_ref().map(|bundle| bundle.period_end.as_str()),
     );
     let cash_fact =
-        ConceptCatalog::latest_value_fact(&raw_sec_facts, &canonical_mappings, "cash", "USD", None);
+        ConceptCatalog::latest_value_fact(raw_sec_facts, &canonical_mappings, "cash", "USD", None);
     let debt = ConceptCatalog::total_latest_values(
-        &raw_sec_facts,
+        raw_sec_facts,
         &canonical_mappings,
         &["debt_current", "debt_noncurrent"],
         "USD",
     );
 
-    snapshot.company_name = company.company_title;
-    snapshot.raw_sec_facts = raw_sec_facts;
-    snapshot.concept_catalog_entries = concept_catalog_entries;
     snapshot.canonical_mappings = canonical_mappings;
     snapshot.concept_review_decisions = concept_review_decisions;
     snapshot.observations = observations;
     snapshot.quality_flags.extend(review_quality_flags);
     if let Some(bundle) = bundle {
-        ConceptCatalog::apply_income_bundle(&mut snapshot, &bundle);
+        ConceptCatalog::apply_income_bundle(snapshot, &bundle);
     } else {
         snapshot.push_quality_flag("sec_income_statement_no_coherent_ttm_or_annual_bundle");
     }
@@ -546,14 +593,25 @@ async fn fetch_sec_companyfacts_snapshot(
             "shares_outstanding_uses_latest_available_instant_not_income_period",
         );
     }
-    snapshot.fundamental_source = Some(provider.provider_name().to_string());
-    snapshot
-        .data_sources
-        .push(provider.provider_name().to_string());
     snapshot.source_notes.push(
-        "Fetched fundamentals from SEC Company Facts. Baseline values are selected from aligned income statement periods; stale or mismatched concepts are excluded from derived margins."
+        "Resolved canonical mappings and derived starter fundamentals from SEC Company Facts. Baseline values are selected from aligned income statement periods; stale or mismatched concepts are excluded from derived margins."
             .to_string(),
     );
+}
+
+async fn fetch_sec_companyfacts_snapshot(
+    provider: &SecFactsProvider,
+    ticker: &str,
+    mapping_strategy: Option<ConceptMappingStrategy>,
+) -> Result<FinancialSnapshot> {
+    let ingest = ingest_sec_facts(provider, ticker).await?;
+    let mut snapshot = FinancialSnapshot::new(ticker);
+    apply_sec_ingest_to_snapshot(&mut snapshot, &ingest, provider.provider_name());
+
+    if let Some(strategy) = mapping_strategy {
+        resolve_sec_canonical_layer(&mut snapshot, ticker, strategy).await;
+    }
+
     Ok(snapshot)
 }
 
@@ -652,6 +710,22 @@ async fn canonical_mappings_for_strategy(
             }
         }
     }
+}
+
+async fn persist_sec_ingestion(
+    db: &sea_orm::DatabaseConnection,
+    snapshot: &FinancialSnapshot,
+) -> Result<()> {
+    let source_note = snapshot.source_notes.join(" ");
+    let input = IngestPersist {
+        fetched_at: &snapshot.fetched_at,
+        company_name: snapshot.company_name.as_deref(),
+        currency: snapshot.currency.as_deref(),
+        source_note: &source_note,
+        raw_sec_facts: &snapshot.raw_sec_facts,
+        concept_catalog_entries: &snapshot.concept_catalog_entries,
+    };
+    WorkspaceFinancialStore::new(db).persist_ingestion(&input).await
 }
 
 async fn persist_financial_snapshot(
@@ -1511,6 +1585,75 @@ mod tests {
         assert_eq!(entries[0].dominant_period_shape, "annual");
         assert_eq!(entries[0].series_usability, "event_point");
         assert!(entries[0].narrative_tags.contains(&"backlog".to_string()));
+    }
+
+    #[test]
+    fn ingest_only_populates_catalog_without_canonical_layers() {
+        let facts_root = json!({
+            "us-gaap": {
+                "Revenues": {
+                    "label": "Revenues",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0)
+                    ]}
+                }
+            }
+        });
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-07T00:00:00Z");
+        let ingest = SecFactsIngest {
+            company_name: Some("Example Corp".to_string()),
+            fetched_at: "2026-06-07T00:00:00Z".to_string(),
+            raw_sec_facts: raw_facts.clone(),
+            concept_catalog_entries: ConceptCatalog::materialize_catalog_entries(&raw_facts),
+        };
+        let mut snapshot = FinancialSnapshot::new("EXMP");
+        apply_sec_ingest_to_snapshot(&mut snapshot, &ingest, "SEC Company Facts");
+
+        assert!(!snapshot.raw_sec_facts.is_empty());
+        assert!(!snapshot.concept_catalog_entries.is_empty());
+        assert!(snapshot.canonical_mappings.is_empty());
+        assert!(snapshot.observations.is_empty());
+        assert!(snapshot.revenue_ttm.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_sec_canonical_layer_populates_mappings_and_observations() {
+        let facts_root = json!({
+            "us-gaap": {
+                "Revenues": {
+                    "label": "Revenues",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0)
+                    ]}
+                },
+                "NetIncomeLoss": {
+                    "label": "Net income",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 10.0)
+                    ]}
+                }
+            }
+        });
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-07T00:00:00Z");
+        let ingest = SecFactsIngest {
+            company_name: Some("Example Corp".to_string()),
+            fetched_at: "2026-06-07T00:00:00Z".to_string(),
+            raw_sec_facts: raw_facts,
+            concept_catalog_entries: ConceptCatalog::materialize_catalog_entries(
+                &extract_raw_facts_from_root(&facts_root, "2026-06-07T00:00:00Z"),
+            ),
+        };
+        let mut snapshot = FinancialSnapshot::new("EXMP");
+        apply_sec_ingest_to_snapshot(&mut snapshot, &ingest, "SEC Company Facts");
+        resolve_sec_canonical_layer(
+            &mut snapshot,
+            "EXMP",
+            ConceptMappingStrategy::CandidateScoring,
+        )
+        .await;
+
+        assert!(!snapshot.canonical_mappings.is_empty());
+        assert!(!snapshot.observations.is_empty());
     }
 
     #[test]
