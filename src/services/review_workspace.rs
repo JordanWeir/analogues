@@ -1,6 +1,7 @@
 use crate::{
     services::concept_catalog::ConceptCatalog,
-    tasks::init_workspace::{ConceptCatalogEntry, SecRawFact, SCHEMA_STATEMENTS},
+    tasks::init_workspace::SCHEMA_STATEMENTS,
+    workspace::{ConceptCatalogEntry, SecRawFact},
 };
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
@@ -92,10 +93,13 @@ Query latest metric_value and period_end for your selected concept before valida
 }
 
 async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("review workspace SQL failed: {err}")))
-        .map(|_| ())
+    db.execute(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        sql.to_string(),
+    ))
+    .await
+    .map_err(|err| Error::string(&format!("review workspace SQL failed: {err}")))
+    .map(|_| ())
 }
 
 async fn insert_raw_sec_facts(db: &impl ConnectionTrait, facts: &[SecRawFact]) -> Result<()> {

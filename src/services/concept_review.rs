@@ -4,7 +4,7 @@ use crate::{
         model_client::{extract_json_blob, ModelClient, ModelRequest, WebSearchToolConfig},
         review_workspace::workspace_schema_hint,
     },
-    tasks::init_workspace::{CanonicalMapping, SecRawFact},
+    workspace::{CanonicalMapping, SecRawFact},
 };
 use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,10 @@ impl ConceptReviewService {
         _raw_facts: &[SecRawFact],
         preamble: &str,
         prompt_suffix: &str,
-    ) -> Result<(ConceptReviewOutput, crate::services::model_client::ModelResponse)> {
+    ) -> Result<(
+        ConceptReviewOutput,
+        crate::services::model_client::ModelResponse,
+    )> {
         let workspace_sqlite = self.workspace_sqlite.clone().ok_or_else(|| {
             Error::string("concept review agent requires workspace_sqlite to be configured")
         })?;

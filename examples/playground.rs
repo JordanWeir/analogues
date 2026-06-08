@@ -18,7 +18,7 @@ use analogues::{
         model_client::OpenRouterModelClient,
         review_workspace::{cleanup_review_workspace, materialize_review_workspace},
     },
-    tasks::init_workspace::{CanonicalMapping, SecRawFact},
+    workspace::{CanonicalMapping, SecRawFact},
 };
 use loco_rs::prelude::*;
 use reqwest::Client;
@@ -116,7 +116,10 @@ async fn main() -> loco_rs::Result<()> {
     }
 
     let prompt = service.build_prompt()?;
-    println!("--- generated prompt ({} chars) ---\n{prompt}\n--- end prompt ---\n", prompt.len());
+    println!(
+        "--- generated prompt ({} chars) ---\n{prompt}\n--- end prompt ---\n",
+        prompt.len()
+    );
 
     match service
         .review_workspace(&client, &raw_facts, AGENT_REVIEW_PREAMBLE, PROMPT_SUFFIX)
@@ -229,7 +232,9 @@ fn top_candidates_by_metric<'a>(
             .push(candidate);
     }
     for list in grouped.values_mut() {
-        list.sort_by(|left, right| (right.score, right.fact_count).cmp(&(left.score, left.fact_count)));
+        list.sort_by(|left, right| {
+            (right.score, right.fact_count).cmp(&(left.score, left.fact_count))
+        });
         list.truncate(limit);
     }
     grouped
@@ -244,7 +249,12 @@ fn heuristic_for_metric<'a>(
         .find(|mapping| mapping.canonical_key == canonical_key)
 }
 
-fn latest_fact_value(facts: &[SecRawFact], taxonomy: &str, concept_name: &str, unit: &str) -> Option<(String, f64)> {
+fn latest_fact_value(
+    facts: &[SecRawFact],
+    taxonomy: &str,
+    concept_name: &str,
+    unit: &str,
+) -> Option<(String, f64)> {
     facts
         .iter()
         .filter(|fact| {
@@ -282,7 +292,9 @@ fn print_candidate_board(
                 &mapping.unit,
             );
             let latest_note = latest
-                .map(|(period, value)| format!(" latest@{}={}", period, format_value(value, &mapping.unit)))
+                .map(|(period, value)| {
+                    format!(" latest@{}={}", period, format_value(value, &mapping.unit))
+                })
                 .unwrap_or_default();
             println!(
                 "  heuristic -> {} / {} (score via catalog, conf={}){latest_note}",
@@ -330,7 +342,10 @@ fn print_review_results(
     heuristic: &[CanonicalMapping],
     raw_facts: &[SecRawFact],
 ) {
-    println!("--- raw model JSON ---\n{}\n--- end raw JSON ---\n", serde_json::to_string_pretty(output).unwrap_or_else(|_| "{}".to_string()));
+    println!(
+        "--- raw model JSON ---\n{}\n--- end raw JSON ---\n",
+        serde_json::to_string_pretty(output).unwrap_or_else(|_| "{}".to_string())
+    );
 
     let promoted = service.promote_reviewed_mappings(output, raw_facts);
     if !promoted.warnings.is_empty() {
@@ -348,7 +363,9 @@ fn print_review_results(
             .as_deref()
             .zip(decision.concept_name.as_deref())
             .zip(decision.unit.as_deref())
-            .and_then(|((taxonomy, concept), unit)| latest_fact_value(raw_facts, taxonomy, concept, unit));
+            .and_then(|((taxonomy, concept), unit)| {
+                latest_fact_value(raw_facts, taxonomy, concept, unit)
+            });
         let unit = decision.unit.as_deref().unwrap_or("USD");
         let latest_note = latest
             .map(|(period, value)| format!(" latest@{}={}", period, format_value(value, unit)))
@@ -358,7 +375,11 @@ fn print_review_results(
             decision.canonical_key, decision.decision_type, decision.confidence, latest_note
         );
         if let Some(concept) = &decision.concept_name {
-            println!("  concept: {} / {}", decision.taxonomy.as_deref().unwrap_or("?"), concept);
+            println!(
+                "  concept: {} / {}",
+                decision.taxonomy.as_deref().unwrap_or("?"),
+                concept
+            );
         }
         println!("  rationale: {}", decision.rationale);
         if let Some(validation) = &decision.online_validation {
@@ -401,7 +422,10 @@ fn print_review_results(
             let baseline = heuristic_for_metric(heuristic, &mapping.canonical_key);
             match baseline {
                 Some(base) if base.concept_name == mapping.concept_name => {
-                    println!("  {}: unchanged ({})", mapping.canonical_key, mapping.concept_name);
+                    println!(
+                        "  {}: unchanged ({})",
+                        mapping.canonical_key, mapping.concept_name
+                    );
                 }
                 Some(base) => {
                     println!(
@@ -431,7 +455,11 @@ fn print_mapping_table(mappings: &[CanonicalMapping], raw_facts: &[SecRawFact]) 
             .unwrap_or_default();
         println!(
             "  {} -> {} / {}{} [{}]",
-            mapping.canonical_key, mapping.taxonomy, mapping.concept_name, latest_note, mapping.confidence
+            mapping.canonical_key,
+            mapping.taxonomy,
+            mapping.concept_name,
+            latest_note,
+            mapping.confidence
         );
     }
 }

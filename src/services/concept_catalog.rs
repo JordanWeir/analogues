@@ -1,5 +1,6 @@
-use crate::tasks::init_workspace::{
-    CanonicalMapping, ConceptCatalogEntry, FinancialSnapshot, FundamentalObservation, SecRawFact,
+use crate::{
+    tasks::init_workspace::FinancialSnapshot,
+    workspace::{CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact},
 };
 use chrono::NaiveDate;
 use loco_rs::prelude::*;
@@ -1388,7 +1389,7 @@ fn ratio(numerator: Option<f64>, denominator: Option<f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::init_workspace::SecRawFact;
+    use crate::workspace::SecRawFact;
 
     fn debt_fact(concept_name: &str, label: &str, period_end: &str, value: f64) -> SecRawFact {
         SecRawFact {

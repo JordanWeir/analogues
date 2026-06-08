@@ -1,6 +1,6 @@
 use crate::{
-    services::http_json::fetch_json,
-    tasks::init_workspace::{FinancialSnapshot, FundamentalObservation},
+    services::http_json::fetch_json, tasks::init_workspace::FinancialSnapshot,
+    workspace::FundamentalObservation,
 };
 use loco_rs::prelude::*;
 use serde_json::Value;

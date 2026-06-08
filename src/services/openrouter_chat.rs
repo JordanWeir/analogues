@@ -32,9 +32,7 @@ pub struct ChatCompletionResult {
     pub client_tool_calls: u32,
 }
 
-pub async fn run_chat_completion(
-    options: ChatCompletionOptions,
-) -> Result<ChatCompletionResult> {
+pub async fn run_chat_completion(options: ChatCompletionOptions) -> Result<ChatCompletionResult> {
     let api_key = env::var("OPENROUTER_API_KEY").map_err(|_| {
         Error::string("OPENROUTER_API_KEY is required for OpenRouter chat requests")
     })?;

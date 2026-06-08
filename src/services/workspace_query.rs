@@ -155,8 +155,10 @@ fn contains_sql_keyword(sql: &str, keyword: &str) -> bool {
 mod tests {
     use super::*;
     use crate::{
-        services::{concept_catalog::ConceptCatalog, review_workspace::materialize_review_workspace},
-        tasks::init_workspace::SecRawFact,
+        services::{
+            concept_catalog::ConceptCatalog, review_workspace::materialize_review_workspace,
+        },
+        workspace::SecRawFact,
     };
 
     fn sample_fact() -> SecRawFact {
@@ -184,10 +186,9 @@ mod tests {
     async fn executes_query_against_materialized_review_workspace() {
         let facts = vec![sample_fact()];
         let entries = ConceptCatalog::materialize_catalog_entries(&facts);
-        let path =
-            materialize_review_workspace("ORCL", &facts, &entries, "2026-06-07T00:00:00Z")
-                .await
-                .unwrap();
+        let path = materialize_review_workspace("ORCL", &facts, &entries, "2026-06-07T00:00:00Z")
+            .await
+            .unwrap();
         let result = execute_workspace_query(
             &path,
             "SELECT canonical_key, metric_label FROM canonical_metric_definitions ORDER BY display_order LIMIT 3",

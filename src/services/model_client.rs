@@ -39,10 +39,7 @@ impl WebSearchToolConfig {
             max_total_results: Some(15),
             search_context_size: Some("medium".to_string()),
             allowed_domains: None,
-            excluded_domains: Some(vec![
-                "reddit.com".to_string(),
-                "stocktwits.com".to_string(),
-            ]),
+            excluded_domains: Some(vec!["reddit.com".to_string(), "stocktwits.com".to_string()]),
         }
     }
 
@@ -55,10 +52,7 @@ impl WebSearchToolConfig {
             parameters.insert("max_results".to_string(), json!(max_results));
         }
         if let Some(max_total_results) = self.max_total_results {
-            parameters.insert(
-                "max_total_results".to_string(),
-                json!(max_total_results),
-            );
+            parameters.insert("max_total_results".to_string(), json!(max_total_results));
         }
         if let Some(search_context_size) = &self.search_context_size {
             parameters.insert(
@@ -182,7 +176,11 @@ async fn complete_with_openrouter_agent(request: &ModelRequest) -> Result<ModelR
     })
     .await?;
 
-    Ok(chat_result_to_model_response(request, result, started_at.elapsed().as_millis()))
+    Ok(chat_result_to_model_response(
+        request,
+        result,
+        started_at.elapsed().as_millis(),
+    ))
 }
 
 fn chat_result_to_model_response(
@@ -214,10 +212,7 @@ mod tests {
     #[test]
     fn extracts_json_from_markdown_fence() {
         let text = "```json\n{\"decisions\":[]}\n```";
-        assert_eq!(
-            extract_json_blob(text),
-            Some("{\"decisions\":[]}")
-        );
+        assert_eq!(extract_json_blob(text), Some("{\"decisions\":[]}"));
     }
 
     #[test]

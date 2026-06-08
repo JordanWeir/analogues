@@ -1,10 +1,11 @@
-use crate::tasks::init_workspace::{
-    seed_database, InitWorkspaceRequest, WorkspacePaths, SCHEMA_STATEMENTS,
+use crate::{
+    tasks::init_workspace::{seed_database, InitWorkspaceRequest, SCHEMA_STATEMENTS},
+    workspace::WorkspacePaths,
 };
+use chrono::NaiveDate;
 use loco_rs::prelude::*;
 use sea_orm::{Database, DatabaseBackend, Statement};
 use std::{fs, path::Path};
-use chrono::{NaiveDate};
 
 pub struct WorkspaceHandle {
     pub paths: WorkspacePaths,
@@ -15,11 +16,9 @@ pub struct WorkspaceHandle {
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceStore;
 
-
 pub const DEFAULT_REPORT_ROOT: &str = "reports/stock-narrative-research";
 pub const RUN_DB_FILENAME: &str = "run.sqlite";
 pub const SCHEMA_VERSION: i64 = 2;
-
 
 pub async fn execute_schema(db: &sea_orm::DatabaseConnection) -> Result<()> {
     for statement in SCHEMA_STATEMENTS {
@@ -63,7 +62,6 @@ pub fn sqlite_uri(path: &Path) -> String {
     let normalized_path = path.to_string_lossy().replace('\\', "/");
     format!("sqlite://{normalized_path}?mode=rwc")
 }
-
 
 impl WorkspaceHandle {
     pub fn connection(&self) -> &sea_orm::DatabaseConnection {
