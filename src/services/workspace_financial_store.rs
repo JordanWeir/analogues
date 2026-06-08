@@ -39,6 +39,31 @@ pub struct IngestPersist<'a> {
     pub concept_catalog_entries: &'a [ConceptCatalogEntry],
 }
 
+/// Phase 3 persistence: canonical mappings and review audit trail only.
+pub struct ResolutionPersist<'a> {
+    pub fetched_at: &'a str,
+    pub concept_review_decisions: &'a [ConceptReviewDecisionRecord],
+    pub canonical_mappings: &'a [CanonicalMapping],
+    pub quality_flags: &'a [String],
+}
+
+/// Phase 4 persistence: observations, headline fundamentals, and quality flags.
+pub struct DerivedPersist<'a> {
+    pub fetched_at: &'a str,
+    pub observations: &'a [FundamentalObservation],
+    pub quality_flags: &'a [String],
+    pub fundamentals: &'a [FundamentalInsert<'a>],
+}
+
+/// Stock metadata loaded from an existing workspace.
+pub struct WorkspaceStockInfo {
+    pub ticker: String,
+    pub company_name: Option<String>,
+    pub currency: Option<String>,
+    pub source_note: Option<String>,
+    pub updated_at: String,
+}
+
 /// Decomposed financial snapshot payload for persistence without task-layer types.
 pub struct SnapshotPersist<'a> {
     pub fetched_at: &'a str,
@@ -165,6 +190,95 @@ impl<'a> WorkspaceFinancialStore<'a> {
             ))
         })?;
         Ok(())
+    }
+
+    pub async fn persist_canonical_resolution(&self, input: &ResolutionPersist<'_>) -> Result<()> {
+        let txn = self.db.begin().await.map_err(|err| {
+            Error::string(&format!(
+                "failed to begin canonical resolution transaction: {err}"
+            ))
+        })?;
+        self.persist_canonical_resolution_in(&txn, input).await?;
+        txn.commit().await.map_err(|err| {
+            Error::string(&format!(
+                "failed to commit canonical resolution transaction: {err}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    pub async fn persist_canonical_resolution_in(
+        &self,
+        db: &impl ConnectionTrait,
+        input: &ResolutionPersist<'_>,
+    ) -> Result<()> {
+        Self::insert_concept_review_decisions(db, input.concept_review_decisions).await?;
+        for mapping in input.canonical_mappings {
+            Self::insert_canonical_mapping(db, mapping, input.fetched_at).await?;
+        }
+        for flag in input.quality_flags {
+            Self::insert_data_quality_flag(db, flag, input.fetched_at).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn persist_derived_fundamentals(&self, input: &DerivedPersist<'_>) -> Result<()> {
+        let txn = self.db.begin().await.map_err(|err| {
+            Error::string(&format!(
+                "failed to begin derived fundamentals transaction: {err}"
+            ))
+        })?;
+        Self::clear_derived_layers(&txn).await?;
+        self.persist_derived_fundamentals_in(&txn, input).await?;
+        txn.commit().await.map_err(|err| {
+            Error::string(&format!(
+                "failed to commit derived fundamentals transaction: {err}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    pub async fn persist_derived_fundamentals_in(
+        &self,
+        db: &impl ConnectionTrait,
+        input: &DerivedPersist<'_>,
+    ) -> Result<()> {
+        Self::insert_observations(db, input.observations, input.fetched_at).await?;
+        for flag in input.quality_flags {
+            Self::insert_data_quality_flag(db, flag, input.fetched_at).await?;
+        }
+        for metric in input.fundamentals {
+            Self::insert_fundamental(db, metric, input.fetched_at).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn clear_derived_layers(db: &impl ConnectionTrait) -> Result<()> {
+        execute_sql(db, "DELETE FROM fundamental_observations").await?;
+        execute_sql(db, "DELETE FROM fundamentals").await?;
+        execute_sql(db, "DELETE FROM data_quality_flags").await?;
+        Ok(())
+    }
+
+    pub async fn load_stock_info(&self) -> Result<WorkspaceStockInfo> {
+        let rows = query_all(
+            self.db,
+            "SELECT ticker, company_name, currency, source_note, updated_at
+             FROM stock_info
+             WHERE id = 1",
+        )
+        .await?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::string("workspace is missing stock_info row"))?;
+        Ok(WorkspaceStockInfo {
+            ticker: row_string(&row, "ticker")?,
+            company_name: row_opt_string(&row, "company_name")?,
+            currency: row_opt_string(&row, "currency")?,
+            source_note: row_opt_string(&row, "source_note")?,
+            updated_at: row_string(&row, "updated_at")?,
+        })
     }
 
     pub async fn persist_snapshot_in(

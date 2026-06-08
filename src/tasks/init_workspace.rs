@@ -400,7 +400,7 @@ impl FinancialRun {
         self.ingest = Some(ingest);
     }
 
-    fn apply_resolution(
+    pub(crate) fn apply_resolution(
         &mut self,
         resolution: crate::services::canonical_mapping::CanonicalResolutionResult,
     ) {
@@ -408,7 +408,7 @@ impl FinancialRun {
         self.resolution = Some(resolution);
     }
 
-    fn apply_derived(&mut self, derived: DerivedFundamentals) {
+    pub(crate) fn apply_derived(&mut self, derived: DerivedFundamentals) {
         extend_unique(&mut self.quality_flags, derived.quality_flags.clone());
         extend_unique(&mut self.source_notes, derived.source_notes.clone());
         self.derived = Some(derived);
@@ -437,7 +437,7 @@ impl FinancialRun {
         &mut self.market.as_mut().expect("market layer").headlines
     }
 
-    fn starter(&self) -> StarterFundamentals {
+    pub(crate) fn starter(&self) -> StarterFundamentals {
         self.derived
             .as_ref()
             .map(|derived| derived.starter.clone())
@@ -451,7 +451,7 @@ impl FinancialRun {
         &mut self.derived.as_mut().expect("derived layer").starter
     }
 
-    fn all_observations(&self) -> Vec<FundamentalObservation> {
+    pub(crate) fn all_observations(&self) -> Vec<FundamentalObservation> {
         let mut observations = Vec::new();
         if let Some(market) = &self.market {
             observations.extend(market.observations.clone());
@@ -462,7 +462,7 @@ impl FinancialRun {
         observations
     }
 
-    fn compute_derived_metrics(&mut self) {
+    pub(crate) fn compute_derived_metrics(&mut self) {
         let current_price = self.market_headlines().current_price;
         let starter = self.starter();
         if self.market_headlines().market_cap.is_none() {
@@ -514,7 +514,7 @@ impl FinancialRun {
         }
     }
 
-    fn mark_gaps(&mut self) {
+    pub(crate) fn mark_gaps(&mut self) {
         let headlines = self.market_headlines();
         let starter = self.starter();
         let required = [
@@ -711,7 +711,7 @@ async fn close_data_gap(db: &sea_orm::DatabaseConnection, gap_key: &str) -> Resu
 }
 
 impl FinancialRun {
-    fn fundamental_metrics(&self) -> Vec<FundamentalInsert<'_>> {
+    pub(crate) fn fundamental_metrics(&self) -> Vec<FundamentalInsert<'_>> {
         let headlines = self.market_headlines();
         let starter = self.starter();
         let period = starter.fundamental_period_end.clone();

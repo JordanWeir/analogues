@@ -77,6 +77,48 @@ impl WorkspaceHandle {
 }
 
 impl WorkspaceStore {
+    pub async fn open_workspace(&self, sqlite_path: &Path) -> Result<WorkspaceHandle> {
+        if !sqlite_path.is_file() {
+            return Err(Error::string(&format!(
+                "run SQLite database does not exist: {}",
+                sqlite_path.display()
+            )));
+        }
+
+        let workspace_dir = sqlite_path.parent().ok_or_else(|| {
+            Error::string(&format!(
+                "workspace path has no parent directory: {}",
+                sqlite_path.display()
+            ))
+        })?;
+        let run_slug = workspace_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                Error::string(&format!(
+                    "workspace directory has no name: {}",
+                    workspace_dir.display()
+                ))
+            })?
+            .to_string();
+        let paths = WorkspacePaths {
+            run_slug,
+            workspace_dir: workspace_dir.to_path_buf(),
+            sqlite_path: sqlite_path.to_path_buf(),
+            generated_dir: workspace_dir.join("generated"),
+        };
+
+        let db = Database::connect(sqlite_uri(&paths.sqlite_path))
+            .await
+            .map_err(|err| Error::string(&format!("failed to open run SQLite database: {err}")))?;
+
+        Ok(WorkspaceHandle {
+            paths,
+            schema_version: SCHEMA_VERSION,
+            db,
+        })
+    }
+
     pub async fn create_workspace(
         &self,
         request: &InitWorkspaceRequest,

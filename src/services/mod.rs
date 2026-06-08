@@ -10,5 +10,6 @@ pub(crate) mod openrouter_chat;
 pub mod review_workspace;
 pub mod sec_facts_provider;
 pub mod workspace_financial_store;
+pub mod workspace_phases;
 pub mod workspace_query;
 pub mod workspace_store;

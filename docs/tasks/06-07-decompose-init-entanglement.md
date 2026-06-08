@@ -1,7 +1,7 @@
 # Decompose init_workspace Entanglement
 
 **Date:** 2026-06-07 (updated 2026-06-08)  
-**Status:** Steps 1–6 complete; Steps 7–11 in progress
+**Status:** Steps 1–7 complete; Steps 8–11 in progress
 **Scope:** Separate raw SEC/market ingestion from canonical concept processing; make heuristic vs LLM mapping swappable without re-fetching data.
 
 ## Problem Statement
@@ -360,13 +360,12 @@ Use enum + match for two strategies today; introduce `dyn CanonicalMappingResolv
 
 ## Migration Plan, Part 2
 
-### Step 7 — Phase re-run on existing workspace
-- Open existing run.sqlite, load phases 1–2, run 3–4, persist without SEC re-fetch
-- Tasks: resolveCanonicalMappings, deriveStarterFundamentals
-- Wire WorkspaceFinancialStore::load_* into production
-- Add partial persist methods if needed
-- LLM re-run passes sqlite_path like fresh-init path
-- Tests: round-trip on mapping_strategy:none fixture
+### Step 7 — Phase re-run on existing workspace ✅
+- `WorkspaceStore::open_workspace` opens an existing `run.sqlite`
+- `resolveCanonicalMappings` / `deriveStarterFundamentals` tasks load phases 1–2 via `WorkspaceFinancialStore::load_*`, run phase 3 or 4, persist without SEC re-fetch
+- `WorkspaceFinancialStore::persist_canonical_resolution` and `persist_derived_fundamentals` (with `clear_derived_layers` on re-derive)
+- LLM re-run passes `workspace_sqlite` from the real workspace path (`workspace_phases::resolve_canonical_mappings_on_workspace`)
+- Test: `workspace_phases::tests::reruns_mapping_and_derivation_on_ingest_only_workspace`
 
 ### Step 8 — Break tasks ↔ services dependency cycle
 - Move SCHEMA_STATEMENTS, seed_database, InitWorkspaceRequest out of task module
@@ -410,8 +409,8 @@ Yes. Phases 2 and 4 are pure Rust over SQLite or in-memory slices. Only phase 3'
 
 ## Success Criteria
 
-- [ ] `initWorkspace` can persist `sec_raw_facts` without running canonical mapping.
-- [ ] `resolveCanonicalMappings` can run against an existing workspace SQLite file.
+- [x] `initWorkspace` can persist `sec_raw_facts` without running canonical mapping.
+- [x] `resolveCanonicalMappings` can run against an existing workspace SQLite file.
 - [ ] Heuristic and LLM strategies are selectable without changing ingest code.
 - [ ] No service module imports `tasks::init_workspace`.
 - [ ] LLM concept review uses the real workspace DB (no throwaway copy).
