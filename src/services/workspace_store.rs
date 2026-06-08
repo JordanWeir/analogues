@@ -1,7 +1,4 @@
-use crate::{
-    tasks::init_workspace::{seed_database, InitWorkspaceRequest, SCHEMA_STATEMENTS},
-    workspace::WorkspacePaths,
-};
+use crate::workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths, SCHEMA_STATEMENTS};
 use chrono::NaiveDate;
 use loco_rs::prelude::*;
 use sea_orm::{Database, DatabaseBackend, Statement};

@@ -1,7 +1,7 @@
 # Decompose init_workspace Entanglement
 
 **Date:** 2026-06-07 (updated 2026-06-08)  
-**Status:** Steps 1–7 complete; Steps 8–11 in progress
+**Status:** Steps 1–8 complete; Steps 9–11 in progress
 **Scope:** Separate raw SEC/market ingestion from canonical concept processing; make heuristic vs LLM mapping swappable without re-fetching data.
 
 ## Problem Statement
@@ -367,9 +367,12 @@ Use enum + match for two strategies today; introduce `dyn CanonicalMappingResolv
 - LLM re-run passes `workspace_sqlite` from the real workspace path (`workspace_phases::resolve_canonical_mappings_on_workspace`)
 - Test: `workspace_phases::tests::reruns_mapping_and_derivation_on_ingest_only_workspace`
 
-### Step 8 — Break tasks ↔ services dependency cycle
-- Move SCHEMA_STATEMENTS, seed_database, InitWorkspaceRequest out of task module
-- Remove tasks::init_workspace imports from services
+### Step 8 — Break tasks ↔ services dependency cycle ✅
+- `SCHEMA_STATEMENTS` → `src/workspace/schema.rs`
+- `seed_database` → `src/workspace/seed.rs`
+- `InitWorkspaceRequest` → `src/workspace/request.rs`
+- `FinancialRun` → `src/services/financial_run.rs` (services no longer import tasks)
+- `init_workspace.rs` re-exports request/run types for task callers; `from_vars` stays on task
 
 ### Step 9 — Slim the task layer
 - Move compute_derived_metrics, fundamental_metrics, tests out of init_workspace.rs
@@ -412,7 +415,7 @@ Yes. Phases 2 and 4 are pure Rust over SQLite or in-memory slices. Only phase 3'
 - [x] `initWorkspace` can persist `sec_raw_facts` without running canonical mapping.
 - [x] `resolveCanonicalMappings` can run against an existing workspace SQLite file.
 - [ ] Heuristic and LLM strategies are selectable without changing ingest code.
-- [ ] No service module imports `tasks::init_workspace`.
+- [x] No service module imports `tasks::init_workspace`.
 - [ ] LLM concept review uses the real workspace DB (no throwaway copy).
 - [ ] Existing tests pass after each migration step; behavior unchanged until explicitly changed.
 

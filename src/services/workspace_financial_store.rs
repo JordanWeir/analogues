@@ -878,8 +878,7 @@ mod tests {
     use super::*;
     use crate::{
         services::{concept_catalog::ConceptCatalog, workspace_store::execute_schema},
-        tasks::init_workspace::seed_database,
-        workspace::SecRawFact,
+        workspace::{seed_database, InitWorkspaceRequest, SecRawFact, WorkspacePaths},
     };
     use sea_orm::Database;
 
@@ -911,7 +910,7 @@ mod tests {
         execute_schema(&db).await.expect("schema");
         seed_database(
             &db,
-            &crate::tasks::init_workspace::InitWorkspaceRequest {
+            &InitWorkspaceRequest {
                 ticker: "MSFT".to_string(),
                 date: "2026-06-07".to_string(),
                 base_dir: std::path::PathBuf::from("reports/stock-narrative-research"),
@@ -920,7 +919,7 @@ mod tests {
                     crate::services::canonical_mapping::ConceptMappingStrategy::CandidateScoring,
                 ),
             },
-            &crate::workspace::WorkspacePaths {
+            &WorkspacePaths {
                 run_slug: "MSFT-2026-06-07-1".to_string(),
                 workspace_dir: std::path::PathBuf::from("/tmp/msft"),
                 sqlite_path: std::path::PathBuf::from("/tmp/msft/run.sqlite"),

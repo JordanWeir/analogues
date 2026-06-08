@@ -8,10 +8,13 @@ use crate::{
         workspace_financial_store::{
             DerivedPersist, ResolutionPersist, WorkspaceFinancialStore, WorkspaceStockInfo,
         },
+        financial_run::FinancialRun,
         workspace_store::WorkspaceHandle,
     },
-    tasks::init_workspace::FinancialRun,
-    workspace::{ConceptCatalogEntry, DerivedFundamentals, SecIngestionResult, SecRawFact},
+    workspace::{
+        seed_database, ConceptCatalogEntry, DerivedFundamentals,
+        SecIngestionResult, SecRawFact,
+    },
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
@@ -299,8 +302,7 @@ mod tests {
             sec_facts_provider::extract_raw_facts_from_root,
             workspace_store::{execute_schema, WorkspaceStore},
         },
-        tasks::init_workspace::{seed_database, InitWorkspaceRequest},
-        workspace::{SecRawFact, WorkspacePaths},
+        workspace::{InitWorkspaceRequest, SecRawFact, WorkspacePaths},
     };
     use sea_orm::Database;
     use serde_json::json;
