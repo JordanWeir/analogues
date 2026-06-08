@@ -342,10 +342,10 @@ Use enum + match for two strategies today; introduce `dyn CanonicalMappingResolv
 - `mapping_strategy: None` via CLI `none` / `skip` / `skip_mapping`; persists phases 1–2 only via `persist_ingestion`.
 - `fetch_sec_companyfacts_snapshot` composes ingest + optional resolve; full pipeline unchanged when strategy is `Some`.
 
-### Step 4 — Extract resolvers
-- Move `canonical_mappings_for_strategy` → `CandidateScoringResolver`, `LlmReviewedResolver`.
-- Point `LlmReviewedResolver` at real workspace DB (post step 2–3).
-- Delete temp review workspace materialization where redundant.
+### Step 4 — Extract resolvers ✅
+- Added `src/services/canonical_mapping/` with `CandidateScoringResolver`, `LlmReviewedResolver`, `CanonicalMappingResolver` trait, and `ConceptMappingStrategy`.
+- `LlmReviewedResolver` uses the real workspace `run.sqlite` path; `fetch_and_seed_financials` persists ingest before LLM review.
+- Removed temp `materialize_review_workspace`; `review_workspace.rs` retains `workspace_schema_hint()` only. Playground/tests use `materialize_standalone_ingest_workspace`.
 
 ### Step 5 — Extract `FundamentalDeriver`
 - Move observation/TTM logic out of `ConceptCatalog`.
