@@ -1,27 +1,36 @@
 use crate::{
     services::{
-        concept_catalog::CanonicalMappingCandidate,
-        model_client::{ModelClient, ModelRequest},
+        concept_catalog::ConceptCatalog,
+        model_client::{extract_json_blob, ModelClient, ModelRequest, WebSearchToolConfig},
+        review_workspace::workspace_schema_hint,
     },
-    tasks::init_workspace::CanonicalMapping,
+    tasks::init_workspace::{CanonicalMapping, SecRawFact},
 };
 use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 pub const DEFAULT_REVIEW_PREAMBLE: &str = "You review SEC Company Facts concept catalogs. Return only valid JSON. Prefer precise audited mappings over broad name matches. If a concept needs calculation from components, do not mark it as a direct mapping.";
+
+pub const AGENT_REVIEW_PREAMBLE: &str = "You are a financial data analyst agent reviewing SEC Company Facts for a public company. Use workspace_sql to investigate the workspace SQLite database. Use web search to validate that each selected SEC XBRL concept and its latest reported value align with public sources. Return only valid JSON as your final answer. Prefer precise audited balance-sheet and income-statement concepts over maturity schedules, rollforwards, or flow items when a balance is required.";
 
 #[derive(Debug, Clone)]
 pub struct ConceptReviewService {
     pub model: String,
-    pub max_candidates_per_metric: usize,
+    pub enable_web_search: bool,
+    pub enable_workspace_sql: bool,
+    pub company_label: Option<String>,
+    pub workspace_sqlite: Option<PathBuf>,
 }
 
 impl Default for ConceptReviewService {
     fn default() -> Self {
         Self {
             model: "deepseek/deepseek-v4-flash".to_string(),
-            max_candidates_per_metric: 8,
+            enable_web_search: false,
+            enable_workspace_sql: false,
+            company_label: None,
+            workspace_sqlite: None,
         }
     }
 }
@@ -44,6 +53,24 @@ pub struct ConceptReviewDecision {
     pub rationale: String,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub online_validation: Option<OnlineValidation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineValidation {
+    pub status: String,
+    pub summary: String,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub search_queries: Vec<String>,
+    #[serde(default)]
+    pub db_latest_value: Option<f64>,
+    #[serde(default)]
+    pub db_latest_period_end: Option<String>,
+    #[serde(default)]
+    pub online_value_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,77 +107,87 @@ pub struct PromotedReview {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct CandidatePromptRow<'a> {
-    canonical_key: &'a str,
-    metric_label: &'a str,
-    taxonomy: &'a str,
-    concept_name: &'a str,
-    unit: &'a str,
-    confidence: &'a str,
-    score: i64,
-    fact_count: i64,
-    rationale: &'a str,
-}
-
 impl ConceptReviewService {
-    pub async fn review_candidates(
+    pub async fn review_workspace(
         &self,
         client: &dyn ModelClient,
-        candidates: &[CanonicalMappingCandidate],
-    ) -> Result<ConceptReviewOutput> {
-        self.review_candidates_with_preamble(client, candidates, DEFAULT_REVIEW_PREAMBLE, "")
-            .await
-            .map(|(output, _)| output)
-    }
-
-    pub fn build_prompt(&self, candidates: &[CanonicalMappingCandidate]) -> Result<String> {
-        self.prompt(candidates)
-    }
-
-    pub fn parse_output(text: &str) -> Result<ConceptReviewOutput> {
-        serde_json::from_str(text).map_err(|err| {
-            Error::string(&format!(
-                "concept review response was not valid ConceptReviewOutput JSON: {err}"
-            ))
-        })
-    }
-
-    pub async fn review_candidates_with_preamble(
-        &self,
-        client: &dyn ModelClient,
-        candidates: &[CanonicalMappingCandidate],
+        _raw_facts: &[SecRawFact],
         preamble: &str,
         prompt_suffix: &str,
     ) -> Result<(ConceptReviewOutput, crate::services::model_client::ModelResponse)> {
-        let mut prompt = self.prompt(candidates)?;
+        let workspace_sqlite = self.workspace_sqlite.clone().ok_or_else(|| {
+            Error::string("concept review agent requires workspace_sqlite to be configured")
+        })?;
+
+        let web_search = self
+            .enable_web_search
+            .then(WebSearchToolConfig::concept_validation_defaults);
+
+        let mut prompt = self.agent_prompt()?;
         if !prompt_suffix.is_empty() {
             prompt.push_str(prompt_suffix);
         }
+
         let response = client
             .complete(ModelRequest {
                 model: self.model.clone(),
                 preamble: preamble.to_string(),
                 prompt,
-                json_mode: true,
+                json_mode: false,
                 metadata: BTreeMap::from([(
                     "worker_lane".to_string(),
                     "concept_catalog_review".to_string(),
                 )]),
+                web_search,
+                workspace_sqlite: Some(workspace_sqlite),
+                client_tools: None,
             })
             .await?;
 
-        let output = Self::parse_output(&response.text)?;
+        let output = Self::parse_output(&response.text).map_err(|err| {
+            let preview: String = response.text.chars().take(500).collect();
+            Error::string(&format!("{err}; raw model text preview: {preview}"))
+        })?;
         Ok((output, response))
+    }
+
+    pub async fn review_candidates(
+        &self,
+        client: &dyn ModelClient,
+        raw_facts: &[SecRawFact],
+    ) -> Result<ConceptReviewOutput> {
+        self.review_workspace(client, raw_facts, AGENT_REVIEW_PREAMBLE, "")
+            .await
+            .map(|(output, _)| output)
+    }
+
+    pub fn build_prompt(&self) -> Result<String> {
+        self.agent_prompt()
+    }
+
+    pub fn parse_output(text: &str) -> Result<ConceptReviewOutput> {
+        let json_text = extract_json_blob(text).ok_or_else(|| {
+            Error::string(
+                "concept review response did not contain a JSON object; the model may have stopped after tool calls or reasoning",
+            )
+        })?;
+        serde_json::from_str(json_text).map_err(|err| {
+            let preview: String = json_text.chars().take(240).collect();
+            Error::string(&format!(
+                "concept review response was not valid ConceptReviewOutput JSON: {err} (preview: {preview})"
+            ))
+        })
     }
 
     pub fn promote_reviewed_mappings(
         &self,
         output: &ConceptReviewOutput,
-        candidates: &[CanonicalMappingCandidate],
+        raw_facts: &[SecRawFact],
     ) -> PromotedReview {
         let mut warnings = Vec::new();
         let mut mappings = Vec::new();
+        let selected_by = format!("llm_agent_review:{}", self.model);
+
         for decision in &output.decisions {
             if decision.decision_type != "direct_mapping" {
                 warnings.push(format!(
@@ -166,25 +203,35 @@ impl ConceptReviewService {
                 ));
                 continue;
             }
-            let Some(candidate) = candidates.iter().find(|candidate| {
-                candidate.mapping.canonical_key == decision.canonical_key
-                    && Some(candidate.mapping.taxonomy.as_str()) == decision.taxonomy.as_deref()
-                    && Some(candidate.mapping.concept_name.as_str())
-                        == decision.concept_name.as_deref()
-                    && Some(candidate.mapping.unit.as_str()) == decision.unit.as_deref()
-            }) else {
+            let (Some(taxonomy), Some(concept_name), Some(unit)) = (
+                decision.taxonomy.as_deref(),
+                decision.concept_name.as_deref(),
+                decision.unit.as_deref(),
+            ) else {
                 warnings.push(format!(
-                    "{} was not promoted because the selected concept was not a gated candidate",
+                    "{} was not promoted because taxonomy, concept_name, or unit was missing",
                     decision.canonical_key
                 ));
                 continue;
             };
 
-            let mut mapping = candidate.mapping.clone();
-            mapping.confidence = decision.confidence.clone();
-            mapping.rationale = decision.rationale.clone();
-            mapping.selected_by = format!("llm_batch_review:{}", self.model);
-            mapping.is_active = true;
+            let Some(mapping) = ConceptCatalog::mapping_from_review_decision(
+                &decision.canonical_key,
+                taxonomy,
+                concept_name,
+                unit,
+                &decision.confidence,
+                &decision.rationale,
+                &selected_by,
+                raw_facts,
+            ) else {
+                warnings.push(format!(
+                    "{} was not promoted because the selected concept was not found in sec_raw_facts or canonical_key is unknown",
+                    decision.canonical_key
+                ));
+                continue;
+            };
+
             mappings.push(mapping);
         }
 
@@ -218,42 +265,25 @@ impl ConceptReviewService {
             .collect()
     }
 
-    fn prompt(&self, candidates: &[CanonicalMappingCandidate]) -> Result<String> {
-        let mut by_metric: BTreeMap<&str, Vec<&CanonicalMappingCandidate>> = BTreeMap::new();
-        for candidate in candidates {
-            by_metric
-                .entry(candidate.mapping.canonical_key.as_str())
-                .or_default()
-                .push(candidate);
-        }
-
-        let mut rows = Vec::new();
-        for candidates in by_metric.values_mut() {
-            candidates.sort_by(|left, right| {
-                (right.score, right.fact_count).cmp(&(left.score, left.fact_count))
-            });
-            rows.extend(
-                candidates
-                    .iter()
-                    .take(self.max_candidates_per_metric)
-                    .map(|candidate| CandidatePromptRow {
-                        canonical_key: &candidate.mapping.canonical_key,
-                        metric_label: &candidate.mapping.metric_label,
-                        taxonomy: &candidate.mapping.taxonomy,
-                        concept_name: &candidate.mapping.concept_name,
-                        unit: &candidate.mapping.unit,
-                        confidence: &candidate.mapping.confidence,
-                        score: candidate.score,
-                        fact_count: candidate.fact_count,
-                        rationale: &candidate.mapping.rationale,
-                    }),
-            );
-        }
-
-        let candidate_json = serde_json::to_string_pretty(&rows)
-            .map_err(|err| Error::string(&format!("failed to serialize candidates: {err}")))?;
+    fn agent_prompt(&self) -> Result<String> {
+        let company_context = self
+            .company_label
+            .as_deref()
+            .map(|label| format!("Company: {label}\n\n"))
+            .unwrap_or_default();
         Ok(format!(
-            "Review these SEC concept candidates and return JSON matching this shape: {{\"decisions\":[{{\"canonical_key\":\"revenue\",\"decision_type\":\"direct_mapping|calculated_from_components|unavailable|review_required\",\"taxonomy\":\"us-gaap\",\"concept_name\":\"Revenues\",\"unit\":\"USD\",\"confidence\":\"high|medium|low|review_required\",\"rationale\":\"...\",\"warnings\":[]}}],\"supporting_metrics\":[]}}.\n\nCandidates:\n{candidate_json}"
+            r#"{company_context}{schema}
+
+Workflow:
+1. Use workspace_sql to read canonical_metric_definitions and discover candidate SEC concepts yourself from concept_catalog_entries, raw_fact_metric_catalog, and sec_raw_facts.
+2. For each canonical metric, choose direct_mapping, calculated_from_components, unavailable, or review_required.
+3. For each direct_mapping, query sec_raw_facts for the latest metric_value and period_end you selected.
+4. Use web search to validate both the concept choice and whether the latest workspace value is broadly consistent with public filings, investor materials, or financial data sources.
+5. Return JSON only as the final message with this shape:
+{{"decisions":[{{"canonical_key":"revenue","decision_type":"direct_mapping|calculated_from_components|unavailable|review_required","taxonomy":"us-gaap","concept_name":"Revenues","unit":"USD","confidence":"high|medium|low|review_required","rationale":"...","warnings":[],"online_validation":{{"status":"aligned|misaligned|inconclusive","summary":"...","sources":["https://..."],"search_queries":["..."],"db_latest_value":17190000000.0,"db_latest_period_end":"2026-02-28","online_value_note":"..."}}}}],"supporting_metrics":[]}}
+
+Do not expect pre-selected candidates. Investigate the database yourself before deciding."#,
+            schema = workspace_schema_hint(),
         ))
     }
 }
@@ -261,7 +291,78 @@ impl ConceptReviewService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::concept_catalog::CanonicalMappingCandidate;
 
+    fn sample_fact(taxonomy: &str, concept_name: &str, unit: &str) -> SecRawFact {
+        SecRawFact {
+            taxonomy: taxonomy.to_string(),
+            concept_name: concept_name.to_string(),
+            label: None,
+            description: None,
+            unit: unit.to_string(),
+            form: None,
+            start: None,
+            end: Some("2026-02-28".to_string()),
+            filed: None,
+            fiscal_year: None,
+            fiscal_period: None,
+            accession: None,
+            frame: None,
+            value: 100.0,
+            raw_json: "{}".to_string(),
+            fetched_at: "2026-06-07".to_string(),
+        }
+    }
+
+    #[test]
+    fn promotes_direct_mappings_found_in_raw_facts() {
+        let service = ConceptReviewService::default();
+        let raw_facts = vec![sample_fact(
+            "us-gaap",
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "USD",
+        )];
+        let output = ConceptReviewOutput {
+            decisions: vec![
+                ConceptReviewDecision {
+                    canonical_key: "revenue".to_string(),
+                    decision_type: "direct_mapping".to_string(),
+                    taxonomy: Some("us-gaap".to_string()),
+                    concept_name: Some(
+                        "RevenueFromContractWithCustomerExcludingAssessedTax".to_string(),
+                    ),
+                    unit: Some("USD".to_string()),
+                    confidence: "high".to_string(),
+                    rationale: "Best company revenue concept.".to_string(),
+                    warnings: Vec::new(),
+                    online_validation: None,
+                },
+                ConceptReviewDecision {
+                    canonical_key: "net_income".to_string(),
+                    decision_type: "unavailable".to_string(),
+                    taxonomy: None,
+                    concept_name: None,
+                    unit: None,
+                    confidence: "review_required".to_string(),
+                    rationale: "No reliable candidate.".to_string(),
+                    warnings: Vec::new(),
+                    online_validation: None,
+                },
+            ],
+            supporting_metrics: Vec::new(),
+        };
+
+        let promoted = service.promote_reviewed_mappings(&output, &raw_facts);
+
+        assert_eq!(promoted.mappings.len(), 1);
+        assert_eq!(promoted.mappings[0].confidence, "high");
+        assert!(promoted.mappings[0]
+            .selected_by
+            .starts_with("llm_agent_review:"));
+        assert_eq!(promoted.warnings.len(), 1);
+    }
+
+    #[allow(dead_code)]
     fn candidate(canonical_key: &str, concept_name: &str) -> CanonicalMappingCandidate {
         CanonicalMappingCandidate {
             mapping: CanonicalMapping {
@@ -281,50 +382,5 @@ mod tests {
             fact_count: 12,
             latest_period_end: None,
         }
-    }
-
-    #[test]
-    fn promotes_only_direct_gated_review_decisions() {
-        let service = ConceptReviewService::default();
-        let candidates = vec![candidate(
-            "revenue",
-            "RevenueFromContractWithCustomerExcludingAssessedTax",
-        )];
-        let output = ConceptReviewOutput {
-            decisions: vec![
-                ConceptReviewDecision {
-                    canonical_key: "revenue".to_string(),
-                    decision_type: "direct_mapping".to_string(),
-                    taxonomy: Some("us-gaap".to_string()),
-                    concept_name: Some(
-                        "RevenueFromContractWithCustomerExcludingAssessedTax".to_string(),
-                    ),
-                    unit: Some("USD".to_string()),
-                    confidence: "high".to_string(),
-                    rationale: "Best company revenue concept.".to_string(),
-                    warnings: Vec::new(),
-                },
-                ConceptReviewDecision {
-                    canonical_key: "net_income".to_string(),
-                    decision_type: "unavailable".to_string(),
-                    taxonomy: None,
-                    concept_name: None,
-                    unit: None,
-                    confidence: "review_required".to_string(),
-                    rationale: "No reliable candidate.".to_string(),
-                    warnings: Vec::new(),
-                },
-            ],
-            supporting_metrics: Vec::new(),
-        };
-
-        let promoted = service.promote_reviewed_mappings(&output, &candidates);
-
-        assert_eq!(promoted.mappings.len(), 1);
-        assert_eq!(promoted.mappings[0].confidence, "high");
-        assert!(promoted.mappings[0]
-            .selected_by
-            .starts_with("llm_batch_review:"));
-        assert_eq!(promoted.warnings.len(), 1);
     }
 }

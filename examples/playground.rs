@@ -1,11 +1,12 @@
-//! LLM concept-mapping review playground — approximates `initWorkspace` with
-//! `mapping_strategy:llm` without writing a workspace.
+//! LLM concept-mapping review playground — agent investigates workspace SQLite,
+//! validates mappings online, and returns structured review JSON.
 //!
 //! ```sh
 //! cargo run --example playground
 //! TICKER=ORCL cargo run --example playground
 //! SQLITE=reports/stock-narrative-research/ORCL-2026-06-07-9/run.sqlite cargo run --example playground
 //! SKIP_LLM=1 cargo run --example playground   # candidates + heuristic only
+//! WEB_SEARCH=0 cargo run --example playground # disable online validation
 //! ```
 //!
 //! Requires `OPENROUTER_API_KEY` unless `SKIP_LLM=1`.
@@ -13,9 +14,9 @@
 use analogues::{
     services::{
         concept_catalog::{CanonicalMappingCandidate, ConceptCatalog},
-        concept_review::{ConceptReviewOutput, ConceptReviewService, DEFAULT_REVIEW_PREAMBLE},
+        concept_review::{ConceptReviewOutput, ConceptReviewService, AGENT_REVIEW_PREAMBLE},
         model_client::OpenRouterModelClient,
-        sec_facts_provider::SecFactsProvider,
+        review_workspace::{cleanup_review_workspace, materialize_review_workspace},
     },
     tasks::init_workspace::{CanonicalMapping, SecRawFact},
 };
@@ -25,7 +26,7 @@ use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use std::{
     collections::BTreeMap,
     env,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 // =============================================================================
@@ -35,10 +36,7 @@ use std::{
 const DEFAULT_TICKER: &str = "ORCL";
 const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash";
 
-/// System preamble sent to the model.
-const REVIEW_PREAMBLE: &str = DEFAULT_REVIEW_PREAMBLE;
-
-/// Extra instructions appended after the auto-generated candidate JSON prompt.
+/// Extra instructions appended after the auto-generated agent prompt.
 const PROMPT_SUFFIX: &str = r#"
 For balance-sheet debt metrics:
 - debt_noncurrent must be an outstanding noncurrent borrowings balance, not a maturity schedule or repayment amount.
@@ -55,14 +53,25 @@ async fn main() -> loco_rs::Result<()> {
     let ticker = env::var("TICKER").unwrap_or_else(|_| DEFAULT_TICKER.to_string());
     let model = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let skip_llm = env_bool("SKIP_LLM");
+    let enable_web_search = env_bool_default("WEB_SEARCH", true);
+    let fetched_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    let raw_facts = if let Ok(sqlite) = env::var("SQLITE") {
-        println!("Loading sec_raw_facts from {sqlite}");
-        load_raw_facts_from_sqlite(Path::new(&sqlite)).await?
-    } else {
-        println!("Fetching SEC Company Facts for {ticker}");
-        fetch_raw_facts(&ticker).await?
-    };
+    let (raw_facts, catalog_entries, workspace_sqlite, cleanup_workspace) =
+        if let Ok(sqlite) = env::var("SQLITE") {
+            let path = PathBuf::from(sqlite);
+            println!("Loading sec_raw_facts from {}", path.display());
+            let facts = load_raw_facts_from_sqlite(&path).await?;
+            let entries = ConceptCatalog::materialize_catalog_entries(&facts);
+            (facts, entries, path, false)
+        } else {
+            println!("Fetching SEC Company Facts for {ticker}");
+            let facts = fetch_raw_facts(&ticker).await?;
+            let entries = ConceptCatalog::materialize_catalog_entries(&facts);
+            let workspace =
+                materialize_review_workspace(&ticker, &facts, &entries, &fetched_at).await?;
+            println!("Materialized review workspace at {}", workspace.display());
+            (facts, entries, workspace, true)
+        };
 
     println!(
         "Loaded {} raw facts across {} concepts",
@@ -70,8 +79,7 @@ async fn main() -> loco_rs::Result<()> {
         unique_concepts(&raw_facts)
     );
 
-    let entries = ConceptCatalog::materialize_catalog_entries(&raw_facts);
-    let candidates = ConceptCatalog::canonical_mapping_candidates(&entries);
+    let candidates = ConceptCatalog::canonical_mapping_candidates(&catalog_entries);
     let heuristic = ConceptCatalog::seed_canonical_mappings(&raw_facts);
     let grouped = top_candidates_by_metric(&candidates, MAX_CANDIDATES_SHOWN);
 
@@ -79,40 +87,64 @@ async fn main() -> loco_rs::Result<()> {
 
     if skip_llm {
         println!("\nSKIP_LLM=1 set; not calling the model.");
+        if cleanup_workspace {
+            cleanup_review_workspace(&workspace_sqlite);
+        }
         return Ok(());
     }
 
     let service = ConceptReviewService {
         model: model.clone(),
+        enable_web_search,
+        enable_workspace_sql: true,
+        company_label: Some(ticker.clone()),
+        workspace_sqlite: Some(workspace_sqlite.clone()),
         ..ConceptReviewService::default()
     };
     let client = OpenRouterModelClient;
 
-    println!("\n=== LLM review ({model}) ===");
-    println!("Preamble:\n{REVIEW_PREAMBLE}\n");
+    println!("\n=== LLM agent review ({model}) ===");
+    println!("workspace_sql: enabled ({})", workspace_sqlite.display());
+    if enable_web_search {
+        println!("Web search: enabled (OpenRouter openrouter:web_search)");
+    } else {
+        println!("Web search: disabled");
+    }
+    println!("Preamble:\n{AGENT_REVIEW_PREAMBLE}\n");
     if !PROMPT_SUFFIX.trim().is_empty() {
         println!("Prompt suffix:\n{PROMPT_SUFFIX}\n");
     }
 
-    let prompt = service.build_prompt(&candidates)?;
+    let prompt = service.build_prompt()?;
     println!("--- generated prompt ({} chars) ---\n{prompt}\n--- end prompt ---\n", prompt.len());
 
     match service
-        .review_candidates_with_preamble(&client, &candidates, REVIEW_PREAMBLE, PROMPT_SUFFIX)
+        .review_workspace(&client, &raw_facts, AGENT_REVIEW_PREAMBLE, PROMPT_SUFFIX)
         .await
     {
         Ok((output, response)) => {
+            println!("Model latency: {} ms", response.latency_ms);
             println!(
-                "Model latency: {} ms\n",
-                response.latency_ms
+                "Agent rounds: {} | finish_reason: {:?} | workspace_sql calls: {} | web searches: {} | tokens: in={:?} out={:?}",
+                response.agent_rounds,
+                response.finish_reason,
+                response.client_tool_calls,
+                response.web_search_requests,
+                response.input_tokens,
+                response.output_tokens,
             );
-            print_review_results(&output, &service, &candidates, &heuristic, &raw_facts);
+            println!();
+            print_review_results(&output, &service, &heuristic, &raw_facts);
         }
         Err(err) => {
             println!("LLM review failed: {err}");
             println!("\nHeuristic fallback that initWorkspace would use:");
             print_mapping_table(&heuristic, &raw_facts);
         }
+    }
+
+    if cleanup_workspace {
+        cleanup_review_workspace(&workspace_sqlite);
     }
 
     Ok(())
@@ -123,7 +155,7 @@ async fn fetch_raw_facts(ticker: &str) -> Result<Vec<SecRawFact>> {
         .user_agent("stock-agent-2/0.1 research@example.local")
         .build()
         .map_err(|err| Error::string(&format!("failed to build HTTP client: {err}")))?;
-    let provider = SecFactsProvider::new(client);
+    let provider = analogues::services::sec_facts_provider::SecFactsProvider::new(client);
     let company = provider.lookup_company(ticker).await?;
     let payload = provider.fetch_company_facts(&company).await?;
     provider.extract_raw_facts(&payload)
@@ -235,7 +267,7 @@ fn print_candidate_board(
     heuristic: &[CanonicalMapping],
     raw_facts: &[SecRawFact],
 ) {
-    println!("\n=== Candidate board (heuristic vs top gated candidates) ===");
+    println!("\n=== Candidate board (heuristic vs top gated candidates — reference only, not sent to agent) ===");
     for (canonical_key, candidates) in grouped {
         let label = candidates
             .first()
@@ -295,13 +327,12 @@ fn print_candidate_board(
 fn print_review_results(
     output: &ConceptReviewOutput,
     service: &ConceptReviewService,
-    candidates: &[CanonicalMappingCandidate],
     heuristic: &[CanonicalMapping],
     raw_facts: &[SecRawFact],
 ) {
     println!("--- raw model JSON ---\n{}\n--- end raw JSON ---\n", serde_json::to_string_pretty(output).unwrap_or_else(|_| "{}".to_string()));
 
-    let promoted = service.promote_reviewed_mappings(output, candidates);
+    let promoted = service.promote_reviewed_mappings(output, raw_facts);
     if !promoted.warnings.is_empty() {
         println!("Promotion warnings:");
         for warning in &promoted.warnings {
@@ -330,6 +361,30 @@ fn print_review_results(
             println!("  concept: {} / {}", decision.taxonomy.as_deref().unwrap_or("?"), concept);
         }
         println!("  rationale: {}", decision.rationale);
+        if let Some(validation) = &decision.online_validation {
+            println!(
+                "  online_validation: {} — {}",
+                validation.status, validation.summary
+            );
+            if let Some(value) = validation.db_latest_value {
+                println!("    db_latest_value: {value}");
+            }
+            if let Some(period) = &validation.db_latest_period_end {
+                println!("    db_latest_period_end: {period}");
+            }
+            if let Some(note) = &validation.online_value_note {
+                println!("    online_value_note: {note}");
+            }
+            if !validation.search_queries.is_empty() {
+                println!("    queries: {}", validation.search_queries.join(" | "));
+            }
+            if !validation.sources.is_empty() {
+                println!("    sources:");
+                for source in &validation.sources {
+                    println!("      - {source}");
+                }
+            }
+        }
         if !decision.warnings.is_empty() {
             println!("  warnings: {}", decision.warnings.join("; "));
         }
@@ -382,7 +437,13 @@ fn print_mapping_table(mappings: &[CanonicalMapping], raw_facts: &[SecRawFact]) 
 }
 
 fn env_bool(key: &str) -> bool {
-    env::var(key)
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+    env_bool_default(key, false)
+}
+
+fn env_bool_default(key: &str, default: bool) -> bool {
+    match env::var(key).ok().as_deref() {
+        Some("1" | "true" | "yes") => true,
+        Some("0" | "false" | "no") => false,
+        _ => default,
+    }
 }

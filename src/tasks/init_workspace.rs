@@ -1,6 +1,7 @@
 use crate::services::{
-    concept_catalog::{CanonicalMappingCandidate, ConceptCatalog},
-    concept_review::{ConceptReviewDecisionRecord, ConceptReviewService},
+    concept_catalog::ConceptCatalog,
+    concept_review::{ConceptReviewDecisionRecord, ConceptReviewService, AGENT_REVIEW_PREAMBLE},
+    review_workspace::{cleanup_review_workspace, materialize_review_workspace},
     market_quote_provider::YahooChartMarketDataAdapter,
     model_client::OpenRouterModelClient,
     sec_facts_provider::SecFactsProvider,
@@ -556,12 +557,12 @@ async fn fetch_sec_companyfacts_snapshot(
     snapshot.fetched_at = payload.fetched_at.clone();
     let raw_sec_facts = provider.extract_raw_facts(&payload)?;
     let concept_catalog_entries = ConceptCatalog::materialize_catalog_entries(&raw_sec_facts);
-    let review_candidates = ConceptCatalog::canonical_mapping_candidates(&concept_catalog_entries);
     let (canonical_mappings, concept_review_decisions, review_quality_flags) =
         canonical_mappings_for_strategy(
             mapping_strategy,
+            ticker,
             &raw_sec_facts,
-            &review_candidates,
+            &concept_catalog_entries,
             &snapshot.fetched_at,
         )
         .await;
@@ -640,10 +641,17 @@ async fn fetch_sec_companyfacts_snapshot(
     Ok(snapshot)
 }
 
+fn concept_review_web_search_enabled() -> bool {
+    std::env::var("CONCEPT_REVIEW_WEB_SEARCH")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
 async fn canonical_mappings_for_strategy(
     mapping_strategy: ConceptMappingStrategy,
+    ticker: &str,
     raw_sec_facts: &[SecRawFact],
-    candidates: &[CanonicalMappingCandidate],
+    catalog_entries: &[ConceptCatalogEntry],
     fetched_at: &str,
 ) -> (
     Vec<CanonicalMapping>,
@@ -657,15 +665,45 @@ async fn canonical_mappings_for_strategy(
             Vec::new(),
         ),
         ConceptMappingStrategy::LlmReviewed => {
-            let service = ConceptReviewService::default();
+            let review_db = match materialize_review_workspace(
+                ticker,
+                raw_sec_facts,
+                catalog_entries,
+                fetched_at,
+            )
+            .await
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    return (
+                        ConceptCatalog::seed_canonical_mappings(raw_sec_facts),
+                        Vec::new(),
+                        vec![format!(
+                            "llm_concept_review_workspace_bootstrap_failed_used_candidate_scoring_{}",
+                            normalize_quality_flag(&err.to_string())
+                        )],
+                    );
+                }
+            };
+            let service = ConceptReviewService {
+                enable_web_search: concept_review_web_search_enabled(),
+                enable_workspace_sql: true,
+                company_label: Some(ticker.to_string()),
+                workspace_sqlite: Some(review_db.clone()),
+                ..ConceptReviewService::default()
+            };
             let client = OpenRouterModelClient;
-            match service.review_candidates(&client, candidates).await {
-                Ok(output) => {
+            let review_result = service
+                .review_workspace(&client, raw_sec_facts, AGENT_REVIEW_PREAMBLE, "")
+                .await;
+            cleanup_review_workspace(&review_db);
+            match review_result {
+                Ok((output, _response)) => {
                     let review_run_id = Uuid::new_v4().to_string();
-                    let selected_by = format!("llm_batch_review:{}", service.model);
+                    let selected_by = format!("llm_agent_review:{}", service.model);
                     let decisions =
                         service.decision_records(&output, &review_run_id, &selected_by, fetched_at);
-                    let promoted = service.promote_reviewed_mappings(&output, candidates);
+                    let promoted = service.promote_reviewed_mappings(&output, raw_sec_facts);
                     let mut quality_flags = promoted
                         .warnings
                         .into_iter()

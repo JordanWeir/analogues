@@ -99,6 +99,40 @@ impl ConceptCatalog {
         seed_canonical_mappings(raw_facts)
     }
 
+    pub fn mapping_from_review_decision(
+        canonical_key: &str,
+        taxonomy: &str,
+        concept_name: &str,
+        unit: &str,
+        confidence: &str,
+        rationale: &str,
+        selected_by: &str,
+        raw_facts: &[SecRawFact],
+    ) -> Option<CanonicalMapping> {
+        let spec = CANONICAL_METRIC_SPECS
+            .iter()
+            .find(|spec| spec.canonical_key == canonical_key)?;
+        let exists = raw_facts.iter().any(|fact| {
+            fact.taxonomy == taxonomy && fact.concept_name == concept_name && fact.unit == unit
+        });
+        if !exists {
+            return None;
+        }
+        Some(CanonicalMapping {
+            canonical_key: canonical_key.to_string(),
+            metric_key: spec.metric_key.to_string(),
+            metric_label: spec.metric_label.to_string(),
+            statement_type: spec.statement_type.to_string(),
+            taxonomy: taxonomy.to_string(),
+            concept_name: concept_name.to_string(),
+            unit: unit.to_string(),
+            confidence: confidence.to_string(),
+            rationale: rationale.to_string(),
+            selected_by: selected_by.to_string(),
+            is_active: true,
+        })
+    }
+
     pub fn materialize_catalog_entries(raw_facts: &[SecRawFact]) -> Vec<ConceptCatalogEntry> {
         materialize_catalog_entries(raw_facts)
     }
