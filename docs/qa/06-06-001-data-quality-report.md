@@ -42,8 +42,8 @@ Market quote: DB price $213.68; search result for Jun. 5, 2026 close shows about
 
 ## Recommendations
 
-Fix duration classification: distinguish quarter, ytd, annual, ttm, and instant; do not label 9-month 10-Q facts as annual.
-Add debt canonical mappings for Oracle-style NotesPayableCurrent, LongTermNotesPayable/borrowings equivalents, and a derived total debt with inputs persisted.
-Promote deterministic starter fundamentals from existing observations: latest quarter revenue, YTD/annual revenue, net income, operating income, EPS, OCF, capex, FCF, cash, current debt, noncurrent debt, total debt, net debt.
-Persist company identity fields: CIK, exchange, sector, industry, fiscal year convention, and quote timestamp/source.
-Upgrade quality flags from info to actionable severities when headline fields are missing, stale, mixed-period, or derived from incomplete inputs.
+- Fix duration classification: distinguish quarter, ytd, annual, ttm, and instant; do not label 9-month 10-Q facts as annual.
+- Add debt canonical mappings for Oracle-style NotesPayableCurrent, LongTermNotesPayable/borrowings equivalents, and a derived total debt with inputs persisted.
+- Promote deterministic starter fundamentals from existing observations: latest quarter revenue, YTD/annual revenue, net income, operating income, EPS, OCF, capex, FCF, cash, current debt, noncurrent debt, total debt, net debt.
+- Persist company identity fields: CIK, exchange, sector, industry, fiscal year convention, and quote timestamp/source.
+- Upgrade quality flags from info to actionable severities when headline fields are missing, stale, mixed-period, or derived from incomplete inputs.
