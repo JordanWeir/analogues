@@ -156,10 +156,13 @@ mod tests {
     use super::*;
     use crate::{
         services::{
-            concept_catalog::ConceptCatalog, review_workspace::materialize_review_workspace,
+            concept_catalog::ConceptCatalog,
+            workspace_financial_store::materialize_standalone_ingest_workspace,
         },
         workspace::SecRawFact,
     };
+    use std::path::PathBuf;
+    use uuid::Uuid;
 
     fn sample_fact() -> SecRawFact {
         SecRawFact {
@@ -186,9 +189,17 @@ mod tests {
     async fn executes_query_against_materialized_review_workspace() {
         let facts = vec![sample_fact()];
         let entries = ConceptCatalog::materialize_catalog_entries(&facts);
-        let path = materialize_review_workspace("ORCL", &facts, &entries, "2026-06-07T00:00:00Z")
-            .await
-            .unwrap();
+        let path =
+            PathBuf::from("target").join(format!("workspace-query-test-{}.sqlite", Uuid::new_v4()));
+        materialize_standalone_ingest_workspace(
+            &path,
+            "ORCL",
+            &facts,
+            &entries,
+            "2026-06-07T00:00:00Z",
+        )
+        .await
+        .unwrap();
         let result = execute_workspace_query(
             &path,
             "SELECT canonical_key, metric_label FROM canonical_metric_definitions ORDER BY display_order LIMIT 3",

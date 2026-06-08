@@ -1,9 +1,8 @@
 use crate::services::{
+    canonical_mapping::{resolve_canonical_mappings, CanonicalResolutionContext},
     concept_catalog::ConceptCatalog,
-    concept_review::{ConceptReviewDecisionRecord, ConceptReviewService, AGENT_REVIEW_PREAMBLE},
+    concept_review::ConceptReviewDecisionRecord,
     market_quote_provider::YahooChartMarketDataAdapter,
-    model_client::OpenRouterModelClient,
-    review_workspace::{cleanup_review_workspace, materialize_review_workspace},
     sec_facts_provider::SecFactsProvider,
     workspace_financial_store::{
         FundamentalInsert, IngestPersist, SnapshotPersist, WorkspaceFinancialStore,
@@ -15,11 +14,13 @@ use crate::services::{
 use chrono::Utc;
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
-use std::{path::PathBuf, time::Duration};
-use uuid::Uuid;
+use std::{path::Path, path::PathBuf, time::Duration};
 
-pub use crate::workspace::{
-    CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact, WorkspacePaths,
+pub use crate::{
+    services::canonical_mapping::ConceptMappingStrategy,
+    workspace::{
+        CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact, WorkspacePaths,
+    },
 };
 
 const REQUIRED_SECTIONS: &[&str] = &[
@@ -44,12 +45,6 @@ pub struct InitWorkspaceRequest {
     pub fetch_financials: bool,
     /// `None` ingests SEC raw facts and concept catalog only (phases 1–2).
     pub mapping_strategy: Option<ConceptMappingStrategy>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConceptMappingStrategy {
-    CandidateScoring,
-    LlmReviewed,
 }
 
 /// SEC Company Facts ingest through concept catalog materialization (phases 1–2).
@@ -152,9 +147,10 @@ impl InitWorkspaceRequest {
             .cli
             .get("mapping_strategy")
             .or_else(|| vars.cli.get("concept_mapping_strategy"))
-            .map_or(Ok(Some(ConceptMappingStrategy::CandidateScoring)), |value| {
-                ConceptMappingStrategy::from_var(value)
-            })?;
+            .map_or(
+                Ok(Some(ConceptMappingStrategy::CandidateScoring)),
+                |value| crate::services::canonical_mapping::ConceptMappingStrategy::from_var(value),
+            )?;
 
         Ok(Self {
             ticker: normalize_ticker(ticker)?,
@@ -166,19 +162,6 @@ impl InitWorkspaceRequest {
     }
 }
 
-impl ConceptMappingStrategy {
-    fn from_var(value: &str) -> Result<Option<Self>> {
-        match value {
-            "none" | "skip" | "skip_mapping" => Ok(None),
-            "candidate" | "candidate_scoring" | "heuristic" => Ok(Some(Self::CandidateScoring)),
-            "llm" | "llm_reviewed" | "model" => Ok(Some(Self::LlmReviewed)),
-            _ => Err(Error::string(
-                "mapping_strategy must be none, candidate_scoring, or llm_reviewed",
-            )),
-        }
-    }
-}
-
 pub async fn initialize_workspace(request: &InitWorkspaceRequest) -> Result<WorkspacePaths> {
     let normalized_request = request.normalized()?;
     let store = WorkspaceStore;
@@ -186,7 +169,8 @@ pub async fn initialize_workspace(request: &InitWorkspaceRequest) -> Result<Work
     let paths = handle.paths.clone();
 
     let ingestion_result =
-        fetch_and_seed_financials(handle.connection(), &normalized_request).await;
+        fetch_and_seed_financials(handle.connection(), &paths.sqlite_path, &normalized_request)
+            .await;
     let close_result = handle.close().await;
 
     ingestion_result?;
@@ -269,6 +253,7 @@ pub(crate) async fn seed_database(
 
 async fn fetch_and_seed_financials(
     db: &sea_orm::DatabaseConnection,
+    sqlite_path: &Path,
     request: &InitWorkspaceRequest,
 ) -> Result<()> {
     if !request.fetch_financials {
@@ -282,13 +267,36 @@ async fn fetch_and_seed_financials(
         return Ok(());
     }
 
-    match fetch_financial_snapshot_with_strategy(&request.ticker, request.mapping_strategy).await {
-        Ok(snapshot) => {
-            if request.mapping_strategy.is_none() {
+    let llm_review = matches!(
+        request.mapping_strategy,
+        Some(ConceptMappingStrategy::LlmReviewed)
+    );
+    let fetch_strategy = if llm_review {
+        None
+    } else {
+        request.mapping_strategy
+    };
+
+    match fetch_financial_snapshot_with_strategy(&request.ticker, fetch_strategy).await {
+        Ok(mut snapshot) => {
+            if llm_review {
+                persist_sec_ingestion(db, &snapshot).await?;
+                resolve_sec_canonical_layer(
+                    &mut snapshot,
+                    &request.ticker,
+                    ConceptMappingStrategy::LlmReviewed,
+                    Some(sqlite_path.to_path_buf()),
+                )
+                .await;
+                snapshot.compute_derived_metrics();
+                snapshot.mark_gaps();
+                persist_financial_snapshot(db, &snapshot).await?;
+            } else if request.mapping_strategy.is_none() {
                 persist_sec_ingestion(db, &snapshot).await?;
             } else {
                 persist_financial_snapshot(db, &snapshot).await?;
             }
+
             let status = if request.mapping_strategy.is_none() {
                 "ingested"
             } else if snapshot.gaps.is_empty() {
@@ -517,23 +525,28 @@ async fn resolve_sec_canonical_layer(
     snapshot: &mut FinancialSnapshot,
     ticker: &str,
     mapping_strategy: ConceptMappingStrategy,
+    workspace_sqlite: Option<PathBuf>,
 ) {
     let raw_sec_facts = &snapshot.raw_sec_facts;
     let concept_catalog_entries = &snapshot.concept_catalog_entries;
     let fetched_at = snapshot.fetched_at.clone();
 
-    let (canonical_mappings, concept_review_decisions, review_quality_flags) =
-        canonical_mappings_for_strategy(
-            mapping_strategy,
+    let resolution = resolve_canonical_mappings(
+        mapping_strategy,
+        &CanonicalResolutionContext {
             ticker,
             raw_sec_facts,
-            concept_catalog_entries,
-            &fetched_at,
-        )
-        .await;
+            catalog_entries: concept_catalog_entries,
+            fetched_at: &fetched_at,
+            workspace_sqlite,
+        },
+    )
+    .await;
+    let canonical_mappings = resolution.mappings;
+    let concept_review_decisions = resolution.review_decisions;
+    let review_quality_flags = resolution.quality_flags;
     let observations = ConceptCatalog::build_observations(raw_sec_facts, &canonical_mappings);
-    let bundle =
-        ConceptCatalog::select_latest_baseline_bundle(raw_sec_facts, &canonical_mappings);
+    let bundle = ConceptCatalog::select_latest_baseline_bundle(raw_sec_facts, &canonical_mappings);
     let shares_fact = ConceptCatalog::latest_value_fact(
         raw_sec_facts,
         &canonical_mappings,
@@ -609,107 +622,10 @@ async fn fetch_sec_companyfacts_snapshot(
     apply_sec_ingest_to_snapshot(&mut snapshot, &ingest, provider.provider_name());
 
     if let Some(strategy) = mapping_strategy {
-        resolve_sec_canonical_layer(&mut snapshot, ticker, strategy).await;
+        resolve_sec_canonical_layer(&mut snapshot, ticker, strategy, None).await;
     }
 
     Ok(snapshot)
-}
-
-fn concept_review_web_search_enabled() -> bool {
-    std::env::var("CONCEPT_REVIEW_WEB_SEARCH")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-}
-
-async fn canonical_mappings_for_strategy(
-    mapping_strategy: ConceptMappingStrategy,
-    ticker: &str,
-    raw_sec_facts: &[SecRawFact],
-    catalog_entries: &[ConceptCatalogEntry],
-    fetched_at: &str,
-) -> (
-    Vec<CanonicalMapping>,
-    Vec<ConceptReviewDecisionRecord>,
-    Vec<String>,
-) {
-    match mapping_strategy {
-        ConceptMappingStrategy::CandidateScoring => (
-            ConceptCatalog::seed_canonical_mappings(raw_sec_facts),
-            Vec::new(),
-            Vec::new(),
-        ),
-        ConceptMappingStrategy::LlmReviewed => {
-            let review_db = match materialize_review_workspace(
-                ticker,
-                raw_sec_facts,
-                catalog_entries,
-                fetched_at,
-            )
-            .await
-            {
-                Ok(path) => path,
-                Err(err) => {
-                    return (
-                        ConceptCatalog::seed_canonical_mappings(raw_sec_facts),
-                        Vec::new(),
-                        vec![format!(
-                            "llm_concept_review_workspace_bootstrap_failed_used_candidate_scoring_{}",
-                            normalize_quality_flag(&err.to_string())
-                        )],
-                    );
-                }
-            };
-            let service = ConceptReviewService {
-                enable_web_search: concept_review_web_search_enabled(),
-                enable_workspace_sql: true,
-                company_label: Some(ticker.to_string()),
-                workspace_sqlite: Some(review_db.clone()),
-                ..ConceptReviewService::default()
-            };
-            let client = OpenRouterModelClient;
-            let review_result = service
-                .review_workspace(&client, raw_sec_facts, AGENT_REVIEW_PREAMBLE, "")
-                .await;
-            cleanup_review_workspace(&review_db);
-            match review_result {
-                Ok((output, _response)) => {
-                    let review_run_id = Uuid::new_v4().to_string();
-                    let selected_by = format!("llm_agent_review:{}", service.model);
-                    let decisions =
-                        service.decision_records(&output, &review_run_id, &selected_by, fetched_at);
-                    let promoted = service.promote_reviewed_mappings(&output, raw_sec_facts);
-                    let mut quality_flags = promoted
-                        .warnings
-                        .into_iter()
-                        .map(|warning| {
-                            format!(
-                                "llm_concept_review_warning_{}",
-                                normalize_quality_flag(&warning)
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let mappings = if promoted.mappings.is_empty() {
-                        quality_flags.push(
-                            "llm_concept_review_returned_no_promoted_mappings_used_candidate_scoring"
-                                .to_string(),
-                        );
-                        ConceptCatalog::seed_canonical_mappings(raw_sec_facts)
-                    } else {
-                        promoted.mappings
-                    };
-                    (mappings, decisions, quality_flags)
-                }
-                Err(err) => (
-                    ConceptCatalog::seed_canonical_mappings(raw_sec_facts),
-                    Vec::new(),
-                    vec![format!(
-                        "llm_concept_review_failed_used_candidate_scoring_{}",
-                        normalize_quality_flag(&err.to_string())
-                    )],
-                ),
-            }
-        }
-    }
 }
 
 async fn persist_sec_ingestion(
@@ -725,7 +641,9 @@ async fn persist_sec_ingestion(
         raw_sec_facts: &snapshot.raw_sec_facts,
         concept_catalog_entries: &snapshot.concept_catalog_entries,
     };
-    WorkspaceFinancialStore::new(db).persist_ingestion(&input).await
+    WorkspaceFinancialStore::new(db)
+        .persist_ingestion(&input)
+        .await
 }
 
 async fn persist_financial_snapshot(
@@ -747,7 +665,9 @@ async fn persist_financial_snapshot(
         quality_flags: &snapshot.quality_flags,
         fundamentals: &fundamentals,
     };
-    WorkspaceFinancialStore::new(db).persist_snapshot(&input).await
+    WorkspaceFinancialStore::new(db)
+        .persist_snapshot(&input)
+        .await
 }
 
 async fn record_financial_fetch_gap(
@@ -980,23 +900,6 @@ fn sql_value(value: Option<&str>) -> String {
         || "NULL".to_string(),
         |value| format!("'{}'", sql_quote(value)),
     )
-}
-
-fn normalize_quality_flag(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
 }
 
 fn merge_string(target: &mut Option<String>, update: Option<String>, overwrite: bool) {
@@ -1649,6 +1552,7 @@ mod tests {
             &mut snapshot,
             "EXMP",
             ConceptMappingStrategy::CandidateScoring,
+            None,
         )
         .await;
 

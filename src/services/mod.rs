@@ -1,4 +1,5 @@
 pub mod agent_tools;
+pub mod canonical_mapping;
 pub mod concept_catalog;
 pub mod concept_review;
 pub(crate) mod http_json;

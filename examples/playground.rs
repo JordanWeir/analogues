@@ -16,7 +16,7 @@ use analogues::{
         concept_catalog::{CanonicalMappingCandidate, ConceptCatalog},
         concept_review::{ConceptReviewOutput, ConceptReviewService, AGENT_REVIEW_PREAMBLE},
         model_client::OpenRouterModelClient,
-        review_workspace::{cleanup_review_workspace, materialize_review_workspace},
+        workspace_financial_store::materialize_standalone_ingest_workspace,
     },
     workspace::{CanonicalMapping, SecRawFact},
 };
@@ -56,22 +56,25 @@ async fn main() -> loco_rs::Result<()> {
     let enable_web_search = env_bool_default("WEB_SEARCH", true);
     let fetched_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    let (raw_facts, catalog_entries, workspace_sqlite, cleanup_workspace) =
-        if let Ok(sqlite) = env::var("SQLITE") {
-            let path = PathBuf::from(sqlite);
-            println!("Loading sec_raw_facts from {}", path.display());
-            let facts = load_raw_facts_from_sqlite(&path).await?;
-            let entries = ConceptCatalog::materialize_catalog_entries(&facts);
-            (facts, entries, path, false)
-        } else {
-            println!("Fetching SEC Company Facts for {ticker}");
-            let facts = fetch_raw_facts(&ticker).await?;
-            let entries = ConceptCatalog::materialize_catalog_entries(&facts);
-            let workspace =
-                materialize_review_workspace(&ticker, &facts, &entries, &fetched_at).await?;
-            println!("Materialized review workspace at {}", workspace.display());
-            (facts, entries, workspace, true)
-        };
+    let (raw_facts, catalog_entries, workspace_sqlite, cleanup_workspace) = if let Ok(sqlite) =
+        env::var("SQLITE")
+    {
+        let path = PathBuf::from(sqlite);
+        println!("Loading sec_raw_facts from {}", path.display());
+        let facts = load_raw_facts_from_sqlite(&path).await?;
+        let entries = ConceptCatalog::materialize_catalog_entries(&facts);
+        (facts, entries, path, false)
+    } else {
+        println!("Fetching SEC Company Facts for {ticker}");
+        let facts = fetch_raw_facts(&ticker).await?;
+        let entries = ConceptCatalog::materialize_catalog_entries(&facts);
+        let workspace = PathBuf::from("target")
+            .join(format!("playground-review-{}.sqlite", uuid::Uuid::new_v4()));
+        materialize_standalone_ingest_workspace(&workspace, &ticker, &facts, &entries, &fetched_at)
+            .await?;
+        println!("Materialized review workspace at {}", workspace.display());
+        (facts, entries, workspace, true)
+    };
 
     println!(
         "Loaded {} raw facts across {} concepts",
@@ -88,7 +91,7 @@ async fn main() -> loco_rs::Result<()> {
     if skip_llm {
         println!("\nSKIP_LLM=1 set; not calling the model.");
         if cleanup_workspace {
-            cleanup_review_workspace(&workspace_sqlite);
+            let _ = std::fs::remove_file(&workspace_sqlite);
         }
         return Ok(());
     }
@@ -147,7 +150,7 @@ async fn main() -> loco_rs::Result<()> {
     }
 
     if cleanup_workspace {
-        cleanup_review_workspace(&workspace_sqlite);
+        let _ = std::fs::remove_file(&workspace_sqlite);
     }
 
     Ok(())

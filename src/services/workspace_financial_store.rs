@@ -1,12 +1,16 @@
 use crate::{
-    services::concept_review::ConceptReviewDecisionRecord,
-    workspace::{
-        CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact,
+    services::{
+        concept_catalog::ConceptCatalog, concept_review::ConceptReviewDecisionRecord,
+        workspace_store::execute_schema,
     },
+    workspace::{CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact},
 };
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, QueryResult, Statement, TransactionTrait};
-use std::collections::BTreeMap;
+use sea_orm::{
+    ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, QueryResult, Statement,
+    TransactionTrait,
+};
+use std::{collections::BTreeMap, path::Path};
 
 const BULK_INSERT_CHUNK_SIZE: usize = 250;
 
@@ -50,6 +54,62 @@ pub struct SnapshotPersist<'a> {
     pub fundamentals: &'a [FundamentalInsert<'a>],
 }
 
+/// Create a standalone SQLite file with schema and ingest layers for tests or playgrounds.
+pub async fn materialize_standalone_ingest_workspace(
+    sqlite_path: &Path,
+    ticker: &str,
+    raw_facts: &[SecRawFact],
+    catalog_entries: &[ConceptCatalogEntry],
+    fetched_at: &str,
+) -> Result<()> {
+    if let Some(parent) = sqlite_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            Error::string(&format!(
+                "failed to create parent directory for {}: {err}",
+                sqlite_path.display()
+            ))
+        })?;
+    }
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        sqlite_path.to_string_lossy().replace('\\', "/")
+    );
+    let db = Database::connect(&url)
+        .await
+        .map_err(|err| Error::string(&format!("failed to open standalone workspace: {err}")))?;
+    execute_schema(&db).await?;
+    ConceptCatalog::seed_canonical_definitions(&db, fetched_at).await?;
+    execute_sql(
+        &db,
+        &format!(
+            "INSERT INTO run_metadata (
+                id, ticker, run_slug, workspace_path, sqlite_path, status, schema_version,
+                created_at, financial_fetch_status, financial_fetch_error
+            ) VALUES (
+                1, '{}', 'standalone-ingest', '{}', '{}', 'review', 1, '{}', 'ok', NULL
+            )",
+            sql_quote(ticker),
+            sql_quote(&sqlite_path.to_string_lossy()),
+            sql_quote(&sqlite_path.to_string_lossy()),
+            sql_quote(fetched_at),
+        ),
+    )
+    .await?;
+    execute_sql(
+        &db,
+        &format!(
+            "INSERT INTO stock_info (id, ticker, updated_at) VALUES (1, '{}', '{}')",
+            sql_quote(ticker),
+            sql_quote(fetched_at),
+        ),
+    )
+    .await?;
+    WorkspaceFinancialStore::insert_raw_sec_facts(&db, raw_facts).await?;
+    WorkspaceFinancialStore::insert_concept_catalog_entries(&db, catalog_entries, fetched_at)
+        .await?;
+    Ok(())
+}
+
 impl<'a> WorkspaceFinancialStore<'a> {
     pub fn new(db: &'a DatabaseConnection) -> Self {
         Self { db }
@@ -57,9 +117,7 @@ impl<'a> WorkspaceFinancialStore<'a> {
 
     pub async fn persist_ingestion(&self, input: &IngestPersist<'_>) -> Result<()> {
         let txn = self.db.begin().await.map_err(|err| {
-            Error::string(&format!(
-                "failed to begin ingestion transaction: {err}"
-            ))
+            Error::string(&format!("failed to begin ingestion transaction: {err}"))
         })?;
         self.persist_ingestion_in(&txn, input).await?;
         txn.commit().await.map_err(|err| {
@@ -432,9 +490,12 @@ impl<'a> WorkspaceFinancialStore<'a> {
 }
 
 async fn query_all(db: &DatabaseConnection, sql: &str) -> Result<Vec<QueryResult>> {
-    db.query_all(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("financial store query failed: {err}")))
+    db.query_all(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        sql.to_string(),
+    ))
+    .await
+    .map_err(|err| Error::string(&format!("financial store query failed: {err}")))
 }
 
 fn row_to_sec_raw_fact(row: QueryResult) -> Result<SecRawFact> {
@@ -460,8 +521,7 @@ fn row_to_sec_raw_fact(row: QueryResult) -> Result<SecRawFact> {
 
 fn row_to_concept_catalog_entry(row: QueryResult) -> Result<ConceptCatalogEntry> {
     let period_shape_counts: BTreeMap<String, i64> =
-        serde_json::from_str(&row_string(&row, "period_shape_counts")?)
-            .unwrap_or_default();
+        serde_json::from_str(&row_string(&row, "period_shape_counts")?).unwrap_or_default();
     let narrative_tags: Vec<String> =
         serde_json::from_str(&row_string(&row, "narrative_tags")?).unwrap_or_default();
     Ok(ConceptCatalogEntry {
@@ -575,9 +635,12 @@ fn row_opt_f64(row: &QueryResult, column: &str) -> Result<Option<f64>> {
 }
 
 async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
+    db.execute(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        sql.to_string(),
+    ))
+    .await
+    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
     Ok(())
 }
 
@@ -740,7 +803,7 @@ mod tests {
                 base_dir: std::path::PathBuf::from("reports/stock-narrative-research"),
                 fetch_financials: false,
                 mapping_strategy: Some(
-                    crate::tasks::init_workspace::ConceptMappingStrategy::CandidateScoring,
+                    crate::services::canonical_mapping::ConceptMappingStrategy::CandidateScoring,
                 ),
             },
             &crate::workspace::WorkspacePaths {
@@ -808,9 +871,13 @@ mod tests {
         let store = WorkspaceFinancialStore::new(&db);
         let facts = vec![sample_fact()];
         let entries = ConceptCatalog::materialize_catalog_entries(&facts);
-        WorkspaceFinancialStore::insert_concept_catalog_entries(&db, &entries, "2026-06-07T00:00:00Z")
-            .await
-            .expect("insert");
+        WorkspaceFinancialStore::insert_concept_catalog_entries(
+            &db,
+            &entries,
+            "2026-06-07T00:00:00Z",
+        )
+        .await
+        .expect("insert");
         let loaded = store.load_concept_catalog_entries().await.expect("load");
         assert_eq!(loaded.len(), entries.len());
         assert_eq!(loaded[0].concept_name, entries[0].concept_name);
