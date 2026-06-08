@@ -330,10 +330,12 @@ Use enum + match for two strategies today; introduce `dyn CanonicalMappingResolv
 - Re-exported from `init_workspace` for backward compat; services import from `crate::workspace`.
 - Deferred: `FinancialSnapshot` (step 6), `ConceptReviewDecisionRecord` (still in `concept_review`).
 
-### Step 2 — Extract `WorkspaceFinancialStore`
-- Move `insert_*` from `init_workspace.rs` into `workspace_financial_store.rs`.
-- Add `load_*` counterparts.
-- Wire `persist_financial_snapshot` through store unchanged (behavior-preserving refactor).
+### Step 2 — Extract `WorkspaceFinancialStore` ✅
+- Created `src/services/workspace_financial_store.rs` with all `insert_*` methods.
+- Added `load_*` for `sec_raw_facts`, `concept_catalog_entries`, `active_canonical_mappings`, `concept_review_decisions`, `fundamental_observations`.
+- `persist_financial_snapshot` delegates to `WorkspaceFinancialStore::persist_snapshot` via `SnapshotPersist` (avoids circular dep on `FinancialSnapshot`).
+- `review_workspace.rs` deduped to use shared insert methods.
+- Round-trip unit tests for facts and catalog entries.
 
 ### Step 3 — Split ingest from mapping
 - Extract `ingest_sec_facts` from `fetch_sec_companyfacts_snapshot`.

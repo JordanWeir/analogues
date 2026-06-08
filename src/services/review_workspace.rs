@@ -1,5 +1,8 @@
 use crate::{
-    services::concept_catalog::ConceptCatalog,
+    services::{
+        concept_catalog::ConceptCatalog,
+        workspace_financial_store::WorkspaceFinancialStore,
+    },
     tasks::init_workspace::SCHEMA_STATEMENTS,
     workspace::{ConceptCatalogEntry, SecRawFact},
 };
@@ -7,8 +10,6 @@ use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-
-const BULK_INSERT_CHUNK_SIZE: usize = 250;
 
 const REVIEW_SCHEMA_STATEMENTS: &[&str] = &[
     SCHEMA_STATEMENTS[0],
@@ -74,8 +75,9 @@ pub async fn materialize_review_workspace(
     )
     .await?;
 
-    insert_raw_sec_facts(&db, raw_facts).await?;
-    insert_concept_catalog_entries(&db, catalog_entries, fetched_at).await?;
+    WorkspaceFinancialStore::insert_raw_sec_facts(&db, raw_facts).await?;
+    WorkspaceFinancialStore::insert_concept_catalog_entries(&db, catalog_entries, fetched_at)
+        .await?;
 
     Ok(path)
 }
@@ -102,126 +104,8 @@ async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
     .map(|_| ())
 }
 
-async fn insert_raw_sec_facts(db: &impl ConnectionTrait, facts: &[SecRawFact]) -> Result<()> {
-    for chunk in facts.chunks(BULK_INSERT_CHUNK_SIZE) {
-        let values = chunk
-            .iter()
-            .map(raw_sec_fact_values)
-            .collect::<Vec<_>>()
-            .join(",\n");
-        execute_sql(
-            db,
-            &format!(
-                "INSERT INTO sec_raw_facts (
-                    taxonomy, concept_name, label, description, unit, form, period_start, period_end,
-                    filed_at, fiscal_year, fiscal_period, accession, frame, metric_value, raw_json,
-                    fetched_at
-                ) VALUES
-                {values}"
-            ),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-async fn insert_concept_catalog_entries(
-    db: &impl ConnectionTrait,
-    entries: &[ConceptCatalogEntry],
-    updated_at: &str,
-) -> Result<()> {
-    for chunk in entries.chunks(BULK_INSERT_CHUNK_SIZE) {
-        let values = chunk
-            .iter()
-            .map(|entry| concept_catalog_entry_values(entry, updated_at))
-            .collect::<Vec<_>>()
-            .join(",\n");
-        execute_sql(
-            db,
-            &format!(
-                "INSERT INTO concept_catalog_entries (
-                    taxonomy, concept_name, label, description, unit, fact_count,
-                    earliest_period_end, latest_period_end, latest_filed_at, min_value, max_value,
-                    period_shape_counts, dominant_period_shape, series_usability, plot_readiness,
-                    narrative_tags, updated_at
-                ) VALUES
-                {values}"
-            ),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-fn raw_sec_fact_values(fact: &SecRawFact) -> String {
-    format!(
-        "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', '{}')",
-        sql_quote(&fact.taxonomy),
-        sql_quote(&fact.concept_name),
-        sql_value(fact.label.as_deref()),
-        sql_value(fact.description.as_deref()),
-        sql_quote(&fact.unit),
-        sql_value(fact.form.as_deref()),
-        sql_value(fact.start.as_deref()),
-        sql_value(fact.end.as_deref()),
-        sql_value(fact.filed.as_deref()),
-        sql_i64(fact.fiscal_year),
-        sql_value(fact.fiscal_period.as_deref()),
-        sql_value(fact.accession.as_deref()),
-        sql_value(fact.frame.as_deref()),
-        fact.value,
-        sql_quote(&fact.raw_json),
-        sql_quote(&fact.fetched_at),
-    )
-}
-
-fn concept_catalog_entry_values(entry: &ConceptCatalogEntry, updated_at: &str) -> String {
-    let period_shape_counts =
-        serde_json::to_string(&entry.period_shape_counts).unwrap_or_else(|_| "{}".to_string());
-    let narrative_tags =
-        serde_json::to_string(&entry.narrative_tags).unwrap_or_else(|_| "[]".to_string());
-    format!(
-        "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, '{}', '{}', '{}', '{}', '{}', '{}')",
-        sql_quote(&entry.taxonomy),
-        sql_quote(&entry.concept_name),
-        sql_value(entry.label.as_deref()),
-        sql_value(entry.description.as_deref()),
-        sql_quote(&entry.unit),
-        entry.fact_count,
-        sql_value(entry.earliest_period_end.as_deref()),
-        sql_value(entry.latest_period_end.as_deref()),
-        sql_value(entry.latest_filed_at.as_deref()),
-        sql_option_f64(entry.min_value),
-        sql_option_f64(entry.max_value),
-        sql_quote(&period_shape_counts),
-        sql_quote(&entry.dominant_period_shape),
-        sql_quote(&entry.series_usability),
-        sql_quote(&entry.plot_readiness),
-        sql_quote(&narrative_tags),
-        sql_quote(updated_at),
-    )
-}
-
 fn sql_quote(value: &str) -> String {
     value.replace('\'', "''")
-}
-
-fn sql_value(value: Option<&str>) -> String {
-    value
-        .map(|inner| format!("'{}'", sql_quote(inner)))
-        .unwrap_or_else(|| "NULL".to_string())
-}
-
-fn sql_i64(value: Option<i64>) -> String {
-    value
-        .map(|inner| inner.to_string())
-        .unwrap_or_else(|| "NULL".to_string())
-}
-
-fn sql_option_f64(value: Option<f64>) -> String {
-    value
-        .map(|inner| inner.to_string())
-        .unwrap_or_else(|| "NULL".to_string())
 }
 
 pub fn cleanup_review_workspace(path: &Path) {

@@ -5,13 +5,14 @@ use crate::services::{
     model_client::OpenRouterModelClient,
     review_workspace::{cleanup_review_workspace, materialize_review_workspace},
     sec_facts_provider::SecFactsProvider,
+    workspace_financial_store::{FundamentalInsert, SnapshotPersist, WorkspaceFinancialStore},
     workspace_store::{
         normalize_ticker, validate_date, WorkspaceStore, DEFAULT_REPORT_ROOT, SCHEMA_VERSION,
     },
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::{path::PathBuf, time::Duration};
 use uuid::Uuid;
 
@@ -19,7 +20,6 @@ pub use crate::workspace::{
     CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact, WorkspacePaths,
 };
 
-const BULK_INSERT_CHUNK_SIZE: usize = 250;
 const REQUIRED_SECTIONS: &[&str] = &[
     "orientation",
     "business_model",
@@ -658,361 +658,22 @@ async fn persist_financial_snapshot(
     db: &sea_orm::DatabaseConnection,
     snapshot: &FinancialSnapshot,
 ) -> Result<()> {
-    let txn = db.begin().await.map_err(|err| {
-        Error::string(&format!(
-            "failed to begin financial snapshot transaction: {err}"
-        ))
-    })?;
     let source_note = snapshot.source_notes.join(" ");
-    execute_sql(
-        &txn,
-        &format!(
-            "UPDATE stock_info
-             SET company_name = {}, currency = {}, source_note = {}, updated_at = '{}'
-             WHERE id = 1",
-            sql_value(snapshot.company_name.as_deref()),
-            sql_value(snapshot.currency.as_deref()),
-            sql_value(Some(&source_note)),
-            sql_quote(&snapshot.fetched_at),
-        ),
-    )
-    .await?;
-
-    insert_raw_sec_facts(&txn, &snapshot.raw_sec_facts).await?;
-    insert_concept_catalog_entries(
-        &txn,
-        &snapshot.concept_catalog_entries,
-        &snapshot.fetched_at,
-    )
-    .await?;
-    insert_concept_review_decisions(&txn, &snapshot.concept_review_decisions).await?;
-    for mapping in &snapshot.canonical_mappings {
-        insert_canonical_mapping(&txn, mapping, &snapshot.fetched_at).await?;
-    }
-    insert_observations(&txn, &snapshot.observations, &snapshot.fetched_at).await?;
-    for flag in &snapshot.quality_flags {
-        insert_data_quality_flag(&txn, flag, &snapshot.fetched_at).await?;
-    }
-    for metric in snapshot.fundamental_metrics() {
-        insert_fundamental(&txn, &metric, &snapshot.fetched_at).await?;
-    }
-
-    txn.commit().await.map_err(|err| {
-        Error::string(&format!(
-            "failed to commit financial snapshot transaction: {err}"
-        ))
-    })?;
-
-    Ok(())
-}
-
-async fn insert_raw_sec_facts(db: &impl ConnectionTrait, facts: &[SecRawFact]) -> Result<()> {
-    for chunk in facts.chunks(BULK_INSERT_CHUNK_SIZE) {
-        let values = chunk
-            .iter()
-            .map(raw_sec_fact_values)
-            .collect::<Vec<_>>()
-            .join(",\n");
-        execute_sql(
-            db,
-            &format!(
-                "INSERT INTO sec_raw_facts (
-                    taxonomy, concept_name, label, description, unit, form, period_start, period_end,
-                    filed_at, fiscal_year, fiscal_period, accession, frame, metric_value, raw_json,
-                    fetched_at
-                ) VALUES
-                {values}"
-            ),
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-fn raw_sec_fact_values(fact: &SecRawFact) -> String {
-    format!(
-        "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', '{}')",
-        sql_quote(&fact.taxonomy),
-        sql_quote(&fact.concept_name),
-        sql_value(fact.label.as_deref()),
-        sql_value(fact.description.as_deref()),
-        sql_quote(&fact.unit),
-        sql_value(fact.form.as_deref()),
-        sql_value(fact.start.as_deref()),
-        sql_value(fact.end.as_deref()),
-        sql_value(fact.filed.as_deref()),
-        sql_i64(fact.fiscal_year),
-        sql_value(fact.fiscal_period.as_deref()),
-        sql_value(fact.accession.as_deref()),
-        sql_value(fact.frame.as_deref()),
-        fact.value,
-        sql_quote(&fact.raw_json),
-        sql_quote(&fact.fetched_at),
-    )
-}
-
-async fn insert_concept_catalog_entries(
-    db: &impl ConnectionTrait,
-    entries: &[ConceptCatalogEntry],
-    updated_at: &str,
-) -> Result<()> {
-    for chunk in entries.chunks(BULK_INSERT_CHUNK_SIZE) {
-        let values = chunk
-            .iter()
-            .map(|entry| concept_catalog_entry_values(entry, updated_at))
-            .collect::<Vec<_>>()
-            .join(",\n");
-        execute_sql(
-            db,
-            &format!(
-                "INSERT INTO concept_catalog_entries (
-                    taxonomy, concept_name, label, description, unit, fact_count,
-                    earliest_period_end, latest_period_end, latest_filed_at, min_value, max_value,
-                    period_shape_counts, dominant_period_shape, series_usability, plot_readiness,
-                    narrative_tags, updated_at
-                ) VALUES
-                {values}
-                ON CONFLICT(taxonomy, concept_name, unit) DO UPDATE SET
-                    label = excluded.label,
-                    description = excluded.description,
-                    fact_count = excluded.fact_count,
-                    earliest_period_end = excluded.earliest_period_end,
-                    latest_period_end = excluded.latest_period_end,
-                    latest_filed_at = excluded.latest_filed_at,
-                    min_value = excluded.min_value,
-                    max_value = excluded.max_value,
-                    period_shape_counts = excluded.period_shape_counts,
-                    dominant_period_shape = excluded.dominant_period_shape,
-                    series_usability = excluded.series_usability,
-                    plot_readiness = excluded.plot_readiness,
-                    narrative_tags = excluded.narrative_tags,
-                    updated_at = excluded.updated_at"
-            ),
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-fn concept_catalog_entry_values(entry: &ConceptCatalogEntry, updated_at: &str) -> String {
-    let period_shape_counts =
-        serde_json::to_string(&entry.period_shape_counts).unwrap_or_else(|_| "{}".to_string());
-    let narrative_tags =
-        serde_json::to_string(&entry.narrative_tags).unwrap_or_else(|_| "[]".to_string());
-    format!(
-        "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, '{}', '{}', '{}', '{}', '{}', '{}')",
-        sql_quote(&entry.taxonomy),
-        sql_quote(&entry.concept_name),
-        sql_value(entry.label.as_deref()),
-        sql_value(entry.description.as_deref()),
-        sql_quote(&entry.unit),
-        entry.fact_count,
-        sql_value(entry.earliest_period_end.as_deref()),
-        sql_value(entry.latest_period_end.as_deref()),
-        sql_value(entry.latest_filed_at.as_deref()),
-        sql_number(entry.min_value),
-        sql_number(entry.max_value),
-        sql_quote(&period_shape_counts),
-        sql_quote(&entry.dominant_period_shape),
-        sql_quote(&entry.series_usability),
-        sql_quote(&entry.plot_readiness),
-        sql_quote(&narrative_tags),
-        sql_quote(updated_at),
-    )
-}
-
-async fn insert_concept_review_decisions(
-    db: &impl ConnectionTrait,
-    decisions: &[ConceptReviewDecisionRecord],
-) -> Result<()> {
-    for chunk in decisions.chunks(BULK_INSERT_CHUNK_SIZE) {
-        let values = chunk
-            .iter()
-            .map(concept_review_decision_values)
-            .collect::<Vec<_>>()
-            .join(",\n");
-        execute_sql(
-            db,
-            &format!(
-                "INSERT INTO concept_review_decisions (
-                    review_run_id, canonical_key, decision_type, taxonomy, concept_name, unit,
-                    confidence, rationale, selected_by, warnings_json, payload_json, created_at
-                ) VALUES
-                {values}"
-            ),
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-fn concept_review_decision_values(decision: &ConceptReviewDecisionRecord) -> String {
-    let warnings_json =
-        serde_json::to_string(&decision.warnings).unwrap_or_else(|_| "[]".to_string());
-    format!(
-        "('{}', {}, '{}', {}, {}, {}, '{}', '{}', '{}', '{}', '{}', '{}')",
-        sql_quote(&decision.review_run_id),
-        sql_value(decision.canonical_key.as_deref()),
-        sql_quote(&decision.decision_type),
-        sql_value(decision.taxonomy.as_deref()),
-        sql_value(decision.concept_name.as_deref()),
-        sql_value(decision.unit.as_deref()),
-        sql_quote(&decision.confidence),
-        sql_quote(&decision.rationale),
-        sql_quote(&decision.selected_by),
-        sql_quote(&warnings_json),
-        sql_quote(&decision.payload_json),
-        sql_quote(&decision.created_at),
-    )
-}
-
-async fn insert_canonical_mapping(
-    db: &impl ConnectionTrait,
-    mapping: &CanonicalMapping,
-    updated_at: &str,
-) -> Result<()> {
-    execute_sql(
-        db,
-        &format!(
-            "INSERT INTO canonical_metric_mappings (
-                canonical_key, taxonomy, concept_name, unit, confidence, rationale, selected_by,
-                is_active, created_at, updated_at
-            ) VALUES (
-                '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, '{}', '{}'
-            )
-            ON CONFLICT(canonical_key, taxonomy, concept_name, unit) DO UPDATE SET
-                confidence = excluded.confidence,
-                rationale = excluded.rationale,
-                selected_by = excluded.selected_by,
-                is_active = excluded.is_active,
-                updated_at = excluded.updated_at",
-            sql_quote(&mapping.canonical_key),
-            sql_quote(&mapping.taxonomy),
-            sql_quote(&mapping.concept_name),
-            sql_quote(&mapping.unit),
-            sql_quote(&mapping.confidence),
-            sql_quote(&mapping.rationale),
-            sql_quote(&mapping.selected_by),
-            if mapping.is_active { 1 } else { 0 },
-            sql_quote(updated_at),
-            sql_quote(updated_at),
-        ),
-    )
-    .await
-}
-
-async fn insert_observations(
-    db: &impl ConnectionTrait,
-    observations: &[FundamentalObservation],
-    updated_at: &str,
-) -> Result<()> {
-    for chunk in observations.chunks(BULK_INSERT_CHUNK_SIZE) {
-        let values = chunk
-            .iter()
-            .map(|observation| observation_values(observation, updated_at))
-            .collect::<Vec<_>>()
-            .join(",\n");
-        execute_sql(
-            db,
-            &format!(
-                "INSERT INTO fundamental_observations (
-                    canonical_key, metric_key, metric_label, statement_type, period_type, period_start, period_end,
-                    as_of_date, filed_at, fiscal_year, fiscal_period, metric_value, unit,
-                    source_type, source_note, concept_name, form, accession, quality, is_derived,
-                    updated_at
-                ) VALUES
-                {values}"
-            ),
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-fn observation_values(observation: &FundamentalObservation, updated_at: &str) -> String {
-    format!(
-        "({}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}, {}, {}, '{}', {}, {}, {}, {}, {}, {}, '{}')",
-        sql_value(observation.canonical_key.as_deref()),
-        sql_quote(&observation.metric_key),
-        sql_quote(&observation.metric_label),
-        sql_quote(&observation.statement_type),
-        sql_quote(&observation.period_type),
-        sql_value(observation.period_start.as_deref()),
-        sql_value(observation.period_end.as_deref()),
-        sql_value(observation.as_of_date.as_deref()),
-        sql_value(observation.filed_at.as_deref()),
-        sql_i64(observation.fiscal_year),
-        sql_value(observation.fiscal_period.as_deref()),
-        observation.value,
-        sql_value(observation.unit.as_deref()),
-        sql_quote(&observation.source_type),
-        sql_value(observation.source_note.as_deref()),
-        sql_value(observation.concept_name.as_deref()),
-        sql_value(observation.form.as_deref()),
-        sql_value(observation.accession.as_deref()),
-        sql_value(observation.quality.as_deref()),
-        if observation.is_derived { 1 } else { 0 },
-        sql_quote(updated_at),
-    )
-}
-
-async fn insert_data_quality_flag(
-    db: &impl ConnectionTrait,
-    flag: &str,
-    created_at: &str,
-) -> Result<()> {
-    execute_sql(
-        db,
-        &format!(
-            "INSERT INTO data_quality_flags (flag_key, severity, description, created_at)
-             VALUES ('{}', 'info', '{}', '{}')
-             ON CONFLICT(flag_key, metric_key, period) DO UPDATE SET
-                severity = excluded.severity,
-                description = excluded.description,
-                created_at = excluded.created_at",
-            sql_quote(flag),
-            sql_quote(&flag.replace('_', " ")),
-            sql_quote(created_at),
-        ),
-    )
-    .await
-}
-
-async fn insert_fundamental(
-    db: &impl ConnectionTrait,
-    metric: &FinancialMetric<'_>,
-    updated_at: &str,
-) -> Result<()> {
-    execute_sql(
-        db,
-        &format!(
-            "INSERT INTO fundamentals (
-                metric_key, metric_label, metric_value, metric_text, unit, period, source_note, updated_at
-            ) VALUES (
-                '{}', '{}', {}, {}, {}, {}, {}, '{}'
-            )
-            ON CONFLICT(metric_key, period) DO UPDATE SET
-                metric_label = excluded.metric_label,
-                metric_value = excluded.metric_value,
-                metric_text = excluded.metric_text,
-                unit = excluded.unit,
-                source_note = excluded.source_note,
-                updated_at = excluded.updated_at",
-            sql_quote(metric.key),
-            sql_quote(metric.label),
-            sql_number(metric.value),
-            sql_value(metric.text.as_deref()),
-            sql_value(metric.unit),
-            sql_value(metric.period.as_deref()),
-            sql_value(metric.source_note.as_deref()),
-            sql_quote(updated_at),
-        ),
-    )
-    .await
+    let fundamentals = snapshot.fundamental_metrics();
+    let input = SnapshotPersist {
+        fetched_at: &snapshot.fetched_at,
+        company_name: snapshot.company_name.as_deref(),
+        currency: snapshot.currency.as_deref(),
+        source_note: &source_note,
+        raw_sec_facts: &snapshot.raw_sec_facts,
+        concept_catalog_entries: &snapshot.concept_catalog_entries,
+        concept_review_decisions: &snapshot.concept_review_decisions,
+        canonical_mappings: &snapshot.canonical_mappings,
+        observations: &snapshot.observations,
+        quality_flags: &snapshot.quality_flags,
+        fundamentals: &fundamentals,
+    };
+    WorkspaceFinancialStore::new(db).persist_snapshot(&input).await
 }
 
 async fn record_financial_fetch_gap(
@@ -1072,22 +733,12 @@ async fn close_data_gap(db: &sea_orm::DatabaseConnection, gap_key: &str) -> Resu
     .await
 }
 
-struct FinancialMetric<'a> {
-    key: &'a str,
-    label: &'a str,
-    value: Option<f64>,
-    text: Option<String>,
-    unit: Option<&'a str>,
-    period: Option<String>,
-    source_note: Option<String>,
-}
-
 impl FinancialSnapshot {
-    fn fundamental_metrics(&self) -> Vec<FinancialMetric<'_>> {
+    fn fundamental_metrics(&self) -> Vec<FundamentalInsert<'_>> {
         let period = self.fundamental_period_end.clone();
         let fundamental_source = self.fundamental_source.clone();
         vec![
-            FinancialMetric {
+            FundamentalInsert {
                 key: "current_price",
                 label: "Current price",
                 value: self.current_price,
@@ -1096,7 +747,7 @@ impl FinancialSnapshot {
                 period: None,
                 source_note: Some("Yahoo chart endpoint".to_string()),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "market_cap",
                 label: "Market cap",
                 value: self.market_cap,
@@ -1107,7 +758,7 @@ impl FinancialSnapshot {
                     "Derived from price and shares when unavailable directly.".to_string(),
                 ),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "shares_outstanding",
                 label: "Shares outstanding",
                 value: self.shares_outstanding,
@@ -1116,7 +767,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "revenue_ttm",
                 label: "Revenue TTM",
                 value: self.revenue_ttm,
@@ -1125,7 +776,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "net_income_ttm",
                 label: "Net income TTM",
                 value: self.net_income_ttm,
@@ -1134,7 +785,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "gross_profit_ttm",
                 label: "Gross profit TTM",
                 value: self.gross_profit_ttm,
@@ -1143,7 +794,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "operating_income_ttm",
                 label: "Operating income TTM",
                 value: self.operating_income_ttm,
@@ -1152,7 +803,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "gross_margin",
                 label: "Gross margin",
                 value: self.gross_margin,
@@ -1161,7 +812,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "operating_margin",
                 label: "Operating margin",
                 value: self.operating_margin,
@@ -1170,7 +821,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "net_margin",
                 label: "Net margin",
                 value: self.net_margin,
@@ -1179,7 +830,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "eps_ttm",
                 label: "EPS TTM",
                 value: self.eps_ttm,
@@ -1188,7 +839,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "trailing_pe",
                 label: "Trailing P/E",
                 value: self.trailing_pe,
@@ -1199,7 +850,7 @@ impl FinancialSnapshot {
                     "Derived from current price and EPS when unavailable directly.".to_string(),
                 ),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "price_to_sales_ttm",
                 label: "Price to sales TTM",
                 value: self.price_to_sales_ttm,
@@ -1210,7 +861,7 @@ impl FinancialSnapshot {
                     "Derived from market cap and revenue when unavailable directly.".to_string(),
                 ),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "cash",
                 label: "Cash and equivalents",
                 value: self.cash,
@@ -1219,7 +870,7 @@ impl FinancialSnapshot {
                 period: period.clone(),
                 source_note: fundamental_source.clone(),
             },
-            FinancialMetric {
+            FundamentalInsert {
                 key: "total_debt",
                 label: "Total debt",
                 value: self.total_debt,
@@ -1255,14 +906,6 @@ fn sql_value(value: Option<&str>) -> String {
         || "NULL".to_string(),
         |value| format!("'{}'", sql_quote(value)),
     )
-}
-
-fn sql_number(value: Option<f64>) -> String {
-    value.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-}
-
-fn sql_i64(value: Option<i64>) -> String {
-    value.map_or_else(|| "NULL".to_string(), |value| value.to_string())
 }
 
 fn normalize_quality_flag(value: &str) -> String {
