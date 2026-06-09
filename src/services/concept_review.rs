@@ -1,42 +1,15 @@
 use crate::{
     services::{
         concept_catalog::ConceptCatalog,
-        model_client::{extract_json_blob, ModelClient, ModelRequest, WebSearchToolConfig},
-        review_workspace::{concept_review_golden_path, workspace_schema_hint},
+        model_client::extract_json_blob,
     },
     workspace::{CanonicalMapping, SecRawFact},
 };
 use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::HashSet;
 
 pub const DEFAULT_REVIEW_PREAMBLE: &str = "You review SEC Company Facts concept catalogs. Return only valid JSON. Prefer precise audited mappings over broad name matches. If a concept needs calculation from components, do not mark it as a direct mapping.";
-
-pub const AGENT_REVIEW_PREAMBLE: &str = "You are the Fundamental Catalog Manager for a public company workspace. The database has raw SEC facts and a derived concept catalog, but no canonical metric mappings yet. Your job is to link each product metric in canonical_metric_definitions to the best company-specific SEC XBRL concept(s), or declare calculated_from_components / unavailable / review_required when appropriate. Use workspace_sql following the golden path: search concept_catalog_entries first (use latest_period_end, series_usability, dominant_period_shape), then spot-check sec_raw_facts. Issue multiple independent workspace_sql calls in one turn when exploring different metrics. Use web search to validate that promoted concepts and their latest values align with public filings or investor materials when web search is available. When finished exploring, call submit_concept_review with your final decisions — do not end with a plain assistant message. If submit_concept_review returns validation errors, fix the payload and call it again. Prefer precise audited balance-sheet concepts over maturity schedules, rollforwards, or flow items when a balance is required. You have a limited step budget; after each tool round the user message will report steps remaining. On the penultimate step, submit your final answer so the last step can repair validation errors.";
-
-#[derive(Debug, Clone)]
-pub struct ConceptReviewService {
-    pub model: String,
-    pub enable_web_search: bool,
-    pub enable_workspace_sql: bool,
-    pub company_label: Option<String>,
-    pub workspace_sqlite: Option<PathBuf>,
-}
-
-impl Default for ConceptReviewService {
-    fn default() -> Self {
-        Self {
-            model: "deepseek/deepseek-v4-flash".to_string(),
-            enable_web_search: false,
-            enable_workspace_sql: false,
-            company_label: None,
-            workspace_sqlite: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConceptReviewOutput {
@@ -110,67 +83,9 @@ pub struct PromotedReview {
     pub warnings: Vec<String>,
 }
 
+pub struct ConceptReviewService;
+
 impl ConceptReviewService {
-    pub async fn review_workspace(
-        &self,
-        client: &dyn ModelClient,
-        _raw_facts: &[SecRawFact],
-        preamble: &str,
-        prompt_suffix: &str,
-    ) -> Result<(
-        ConceptReviewOutput,
-        crate::services::model_client::ModelResponse,
-    )> {
-        let workspace_sqlite = self.workspace_sqlite.clone().ok_or_else(|| {
-            Error::string("concept review agent requires workspace_sqlite to be configured")
-        })?;
-
-        let web_search = self
-            .enable_web_search
-            .then(WebSearchToolConfig::concept_validation_defaults);
-
-        let mut prompt = self.agent_prompt()?;
-        if !prompt_suffix.is_empty() {
-            prompt.push_str(prompt_suffix);
-        }
-
-        let response = client
-            .complete(ModelRequest {
-                model: self.model.clone(),
-                preamble: preamble.to_string(),
-                prompt,
-                json_mode: false,
-                metadata: BTreeMap::from([(
-                    "worker_lane".to_string(),
-                    "concept_catalog_review".to_string(),
-                )]),
-                web_search,
-                workspace_sqlite: Some(workspace_sqlite),
-                client_tools: None,
-            })
-            .await?;
-
-        let output = Self::parse_output(&response.text).map_err(|err| {
-            let preview: String = response.text.chars().take(500).collect();
-            Error::string(&format!("{err}; raw model text preview: {preview}"))
-        })?;
-        Ok((output, response))
-    }
-
-    pub async fn review_candidates(
-        &self,
-        client: &dyn ModelClient,
-        raw_facts: &[SecRawFact],
-    ) -> Result<ConceptReviewOutput> {
-        self.review_workspace(client, raw_facts, AGENT_REVIEW_PREAMBLE, "")
-            .await
-            .map(|(output, _)| output)
-    }
-
-    pub fn build_prompt(&self) -> Result<String> {
-        self.agent_prompt()
-    }
-
     pub fn parse_output(text: &str) -> Result<ConceptReviewOutput> {
         let json_text = extract_json_blob(text).ok_or_else(|| {
             Error::string(
@@ -251,13 +166,13 @@ impl ConceptReviewService {
     }
 
     pub fn promote_reviewed_mappings(
-        &self,
+        model: &str,
         output: &ConceptReviewOutput,
         raw_facts: &[SecRawFact],
     ) -> PromotedReview {
         let mut warnings = Vec::new();
         let mut mappings = Vec::new();
-        let selected_by = format!("llm_agent_review:{}", self.model);
+        let selected_by = format!("llm_agent_review:{model}");
 
         for decision in &output.decisions {
             if decision.decision_type != "direct_mapping" {
@@ -310,7 +225,6 @@ impl ConceptReviewService {
     }
 
     pub fn decision_records(
-        &self,
         output: &ConceptReviewOutput,
         review_run_id: &str,
         selected_by: &str,
@@ -334,27 +248,6 @@ impl ConceptReviewService {
                 created_at: created_at.to_string(),
             })
             .collect()
-    }
-
-    fn agent_prompt(&self) -> Result<String> {
-        let company_context = self
-            .company_label
-            .as_deref()
-            .map(|label| format!("Company: {label}\n\n"))
-            .unwrap_or_default();
-        Ok(format!(
-            r#"{company_context}{schema}
-
-{golden_path}
-
-Output:
-When finished, call submit_concept_review with this shape:
-{{"decisions":[{{"canonical_key":"revenue","decision_type":"direct_mapping|calculated_from_components|unavailable|review_required","taxonomy":"us-gaap","concept_name":"Revenues","unit":"USD","confidence":"high|medium|low|review_required","rationale":"...","warnings":[],"online_validation":{{"status":"aligned|misaligned|inconclusive","summary":"...","sources":["https://..."],"search_queries":["..."],"db_latest_value":17190000000.0,"db_latest_period_end":"2026-02-28","online_value_note":"..."}}}}],"supporting_metrics":[]}}
-
-Emit one decision per row in canonical_metric_definitions. Validation errors from submit_concept_review should be corrected and resubmitted."#,
-            schema = workspace_schema_hint(),
-            golden_path = concept_review_golden_path(),
-        ))
     }
 }
 
@@ -406,7 +299,6 @@ mod tests {
 
     #[test]
     fn promotes_direct_mappings_found_in_raw_facts() {
-        let service = ConceptReviewService::default();
         let raw_facts = vec![sample_fact(
             "us-gaap",
             "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -442,7 +334,8 @@ mod tests {
             supporting_metrics: Vec::new(),
         };
 
-        let promoted = service.promote_reviewed_mappings(&output, &raw_facts);
+        let promoted =
+            ConceptReviewService::promote_reviewed_mappings("test-model", &output, &raw_facts);
 
         assert_eq!(promoted.mappings.len(), 1);
         assert_eq!(promoted.mappings[0].confidence, "high");

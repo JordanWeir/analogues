@@ -370,6 +370,7 @@ mod tests {
             resolve_canonical_mappings_on_workspace(
                 &workspace,
                 ConceptMappingStrategy::CandidateScoring,
+                None,
             )
             .await
             .expect("resolve");

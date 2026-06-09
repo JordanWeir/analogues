@@ -1,4 +1,5 @@
 mod gate;
+mod strategy;
 mod writes;
 
 use super::{
@@ -16,13 +17,23 @@ use async_trait::async_trait;
 use loco_rs::prelude::*;
 use std::sync::Arc;
 
+pub use strategy::CatalogResolutionStrategy;
+
 pub struct BuildCatalogLane {
-    mapping_strategy: ConceptMappingStrategy,
+    resolution_strategy: CatalogResolutionStrategy,
 }
 
 impl BuildCatalogLane {
     pub fn new(mapping_strategy: ConceptMappingStrategy) -> Self {
-        Self { mapping_strategy }
+        Self {
+            resolution_strategy: CatalogResolutionStrategy::from_mapping_strategy(mapping_strategy),
+        }
+    }
+
+    pub fn with_resolution_strategy(resolution_strategy: CatalogResolutionStrategy) -> Self {
+        Self {
+            resolution_strategy,
+        }
     }
 }
 
@@ -53,7 +64,12 @@ impl Lane for BuildCatalogLane {
         }
 
         materialize_catalog_on_workspace(&ctx.workspace).await?;
-        resolve_canonical_mappings_on_workspace(&ctx.workspace, self.mapping_strategy).await?;
+        resolve_canonical_mappings_on_workspace(
+            &ctx.workspace,
+            self.resolution_strategy.mapping_strategy(),
+            self.resolution_strategy.agent_config().cloned(),
+        )
+        .await?;
         let run = derive_starter_fundamentals_on_workspace(&ctx.workspace).await?;
 
         let error = if run.gaps.is_empty() {

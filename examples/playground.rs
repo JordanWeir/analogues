@@ -12,10 +12,14 @@
 //! Requires `OPENROUTER_API_KEY` unless `SKIP_LLM=1`.
 
 use analogues::{
+    agents::fundamental_catalog_manager::{
+        prompt::{self, PREAMBLE},
+        FundamentalCatalogManagerAgent, FundamentalCatalogManagerConfig,
+    },
     services::{
+        canonical_mapping::CanonicalResolutionContext,
         concept_catalog::{CanonicalMappingCandidate, ConceptCatalog},
-        concept_review::{ConceptReviewOutput, ConceptReviewService, AGENT_REVIEW_PREAMBLE},
-        model_client::OpenRouterModelClient,
+        concept_review::{ConceptReviewOutput, ConceptReviewService},
         workspace_financial_store::materialize_standalone_ingest_workspace,
     },
     workspace::{CanonicalMapping, SecRawFact},
@@ -96,15 +100,18 @@ async fn main() -> loco_rs::Result<()> {
         return Ok(());
     }
 
-    let service = ConceptReviewService {
+    let agent = FundamentalCatalogManagerAgent::new(FundamentalCatalogManagerConfig {
         model: model.clone(),
         enable_web_search,
-        enable_workspace_sql: true,
-        company_label: Some(ticker.clone()),
+        ..FundamentalCatalogManagerConfig::default()
+    });
+    let review_ctx = CanonicalResolutionContext {
+        ticker: &ticker,
+        raw_sec_facts: &raw_facts,
+        catalog_entries: &catalog_entries,
+        fetched_at: &fetched_at,
         workspace_sqlite: Some(workspace_sqlite.clone()),
-        ..ConceptReviewService::default()
     };
-    let client = OpenRouterModelClient;
 
     println!("\n=== LLM agent review ({model}) ===");
     println!("workspace_sql: enabled ({})", workspace_sqlite.display());
@@ -113,19 +120,19 @@ async fn main() -> loco_rs::Result<()> {
     } else {
         println!("Web search: disabled");
     }
-    println!("Preamble:\n{AGENT_REVIEW_PREAMBLE}\n");
+    println!("Preamble:\n{PREAMBLE}\n");
     if !PROMPT_SUFFIX.trim().is_empty() {
         println!("Prompt suffix:\n{PROMPT_SUFFIX}\n");
     }
 
-    let prompt = service.build_prompt()?;
+    let prompt = prompt::build_user_prompt(&ticker, PROMPT_SUFFIX);
     println!(
         "--- generated prompt ({} chars) ---\n{prompt}\n--- end prompt ---\n",
         prompt.len()
     );
 
-    match service
-        .review_workspace(&client, &raw_facts, AGENT_REVIEW_PREAMBLE, PROMPT_SUFFIX)
+    match agent
+        .review_workspace_with_telemetry(&review_ctx, PROMPT_SUFFIX)
         .await
     {
         Ok((output, response)) => {
@@ -143,7 +150,7 @@ async fn main() -> loco_rs::Result<()> {
                 response.usage.cost_usd,
             );
             println!();
-            print_review_results(&output, &service, &heuristic, &raw_facts);
+            print_review_results(&output, &model, &heuristic, &raw_facts);
         }
         Err(err) => {
             println!("LLM review failed: {err}");
@@ -344,7 +351,7 @@ fn print_candidate_board(
 
 fn print_review_results(
     output: &ConceptReviewOutput,
-    service: &ConceptReviewService,
+    model: &str,
     heuristic: &[CanonicalMapping],
     raw_facts: &[SecRawFact],
 ) {
@@ -353,7 +360,7 @@ fn print_review_results(
         serde_json::to_string_pretty(output).unwrap_or_else(|_| "{}".to_string())
     );
 
-    let promoted = service.promote_reviewed_mappings(output, raw_facts);
+    let promoted = ConceptReviewService::promote_reviewed_mappings(model, output, raw_facts);
     if !promoted.warnings.is_empty() {
         println!("Promotion warnings:");
         for warning in &promoted.warnings {
