@@ -16,11 +16,9 @@ impl QualityGateStore {
             return Ok(());
         }
 
-        let db = Database::connect(crate::services::workspace_store::sqlite_uri(
-            sqlite_path,
-        ))
-        .await
-        .map_err(|err| Error::string(&format!("failed to open workspace db: {err}")))?;
+        let db = Database::connect(crate::services::workspace_store::sqlite_uri(sqlite_path))
+            .await
+            .map_err(|err| Error::string(&format!("failed to open workspace db: {err}")))?;
 
         let created_at = Utc::now().to_rfc3339();
 
@@ -54,11 +52,9 @@ impl QualityGateStore {
     }
 
     pub async fn count_for_lane(sqlite_path: &Path, lane_name: &str) -> Result<u64> {
-        let db = Database::connect(crate::services::workspace_store::sqlite_uri(
-            sqlite_path,
-        ))
-        .await
-        .map_err(|err| Error::string(&format!("failed to open workspace db: {err}")))?;
+        let db = Database::connect(crate::services::workspace_store::sqlite_uri(sqlite_path))
+            .await
+            .map_err(|err| Error::string(&format!("failed to open workspace db: {err}")))?;
 
         let row = db
             .query_one(Statement::from_string(

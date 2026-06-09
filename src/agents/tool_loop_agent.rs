@@ -6,11 +6,13 @@ use crate::{
             ChatCompletionOptions, ChatCompletionResult, ClientToolHandler,
         },
         usage_snapshot::UsageSnapshot,
-        worker_run_store::{WorkerRunRecord, WorkerRunStore, WORKER_RUN_STATUS_ERROR, WORKER_RUN_STATUS_SUCCESS},
+        worker_run_store::{
+            WorkerRunRecord, WorkerRunStore, WORKER_RUN_STATUS_ERROR, WORKER_RUN_STATUS_SUCCESS,
+        },
     },
 };
 use loco_rs::prelude::*;
-use openrouter_rs::api::chat::{Message};
+use openrouter_rs::api::chat::Message;
 use openrouter_rs::types::Role;
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};

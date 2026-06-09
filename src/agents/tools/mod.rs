@@ -3,7 +3,9 @@ pub mod fundamentals_lookup;
 pub mod sql_query;
 pub mod web_search;
 
-use crate::services::openrouter_chat::{ClientToolHandler, ClientToolExecuteResult, CompletionTool};
+use crate::services::openrouter_chat::{
+    ClientToolExecuteResult, ClientToolHandler, CompletionTool,
+};
 use concept_review_submit::TOOL_NAME as CONCEPT_REVIEW_SUBMIT_TOOL_NAME;
 use fundamentals_lookup::TOOL_NAME as FUNDAMENTALS_LOOKUP_TOOL_NAME;
 use sql_query::TOOL_NAME as SQL_QUERY_TOOL_NAME;
@@ -99,7 +101,9 @@ impl ToolRegistry {
         if !self.tools.iter().any(|tool| {
             matches!(
                 tool,
-                SharedTool::SqlQuery | SharedTool::FundamentalsLookup | SharedTool::ConceptReviewSubmit
+                SharedTool::SqlQuery
+                    | SharedTool::FundamentalsLookup
+                    | SharedTool::ConceptReviewSubmit
             )
         }) {
             return None;

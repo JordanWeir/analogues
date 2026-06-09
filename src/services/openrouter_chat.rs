@@ -2,14 +2,14 @@ use crate::services::usage_snapshot::UsageSnapshot;
 use async_trait::async_trait;
 use loco_rs::prelude::*;
 use openrouter_rs::{
-    OpenRouterClient,
     api::chat::{ChatCompletionRequest, Message},
     error::OpenRouterError,
     types::{
-        Tool, ToolChoice,
         completion::{CompletionsResponse, FinishReason},
         response_format::ResponseFormat,
+        Tool, ToolChoice,
     },
+    OpenRouterClient,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -170,15 +170,14 @@ pub async fn run_single_shot_completion(
 /// Follows the openrouter-rs typed tool agent pattern: every returned tool call
 /// is executed locally and the conversation continues until the model answers.
 pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<ChatCompletionResult> {
-    let handler = options.client_tools.as_ref().ok_or_else(|| {
-        Error::string("client tool loop requires a client tool handler")
-    })?;
+    let handler = options
+        .client_tools
+        .as_ref()
+        .ok_or_else(|| Error::string("client tool loop requires a client tool handler"))?;
 
     let client = build_openrouter_client()?;
     let mut messages = options.messages;
-    let max_agent_rounds = options
-        .max_agent_rounds
-        .unwrap_or(DEFAULT_MAX_AGENT_ROUNDS);
+    let max_agent_rounds = options.max_agent_rounds.unwrap_or(DEFAULT_MAX_AGENT_ROUNDS);
     let submit_tool_name = options.submit_tool_name.as_deref();
     let mut total_usage = UsageSnapshot::default();
     let mut total_client_tool_calls = 0u32;
@@ -305,7 +304,8 @@ fn append_step_budget_message(
         return;
     }
     let steps_remaining = max_rounds - steps_used;
-    let content = agent_step_budget_message(steps_used, max_rounds, steps_remaining, submit_tool_name);
+    let content =
+        agent_step_budget_message(steps_used, max_rounds, steps_remaining, submit_tool_name);
     messages.push(Message::new(
         openrouter_rs::types::Role::User,
         content.as_str(),
@@ -386,9 +386,7 @@ async fn send_completion(
             tool_choice: tools
                 .filter(|items| !items.is_empty())
                 .map(|_| ToolChoice::auto()),
-            parallel_tool_calls: tools
-                .filter(|items| !items.is_empty())
-                .map(|_| true),
+            parallel_tool_calls: tools.filter(|items| !items.is_empty()).map(|_| true),
             response_format: (json_mode && tools.is_none())
                 .then_some(ResponseFormat::json_object()),
         };
@@ -457,9 +455,10 @@ async fn post_agent_chat(request: &AgentChatRequest) -> Result<(CompletionsRespo
         .map_err(|err| Error::string(&format!("OpenRouter request failed: {err}")))?;
 
     let status = response.status();
-    let raw_payload: Value = response.json().await.map_err(|err| {
-        Error::string(&format!("OpenRouter response was not JSON: {err}"))
-    })?;
+    let raw_payload: Value = response
+        .json()
+        .await
+        .map_err(|err| Error::string(&format!("OpenRouter response was not JSON: {err}")))?;
 
     if !status.is_success() {
         let message = raw_payload
@@ -471,9 +470,12 @@ async fn post_agent_chat(request: &AgentChatRequest) -> Result<(CompletionsRespo
         )));
     }
 
-    let parsed: CompletionsResponse = serde_json::from_value(raw_payload.clone()).map_err(|err| {
-        Error::string(&format!("OpenRouter response did not match expected schema: {err}"))
-    })?;
+    let parsed: CompletionsResponse =
+        serde_json::from_value(raw_payload.clone()).map_err(|err| {
+            Error::string(&format!(
+                "OpenRouter response did not match expected schema: {err}"
+            ))
+        })?;
 
     Ok((parsed, raw_payload))
 }
@@ -678,10 +680,7 @@ mod tests {
     fn agent_chat_request_enables_parallel_tool_calls_when_tools_present() {
         let request = AgentChatRequest {
             model: "test/model".to_string(),
-            messages: vec![Message::new(
-                openrouter_rs::types::Role::User,
-                "hello",
-            )],
+            messages: vec![Message::new(openrouter_rs::types::Role::User, "hello")],
             tools: Some(vec![web_search_server_tool(serde_json::json!({}))]),
             tool_choice: Some(ToolChoice::auto()),
             parallel_tool_calls: Some(true),

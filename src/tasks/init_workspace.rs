@@ -14,8 +14,7 @@ use loco_rs::prelude::*;
 use std::path::PathBuf;
 
 pub use crate::{
-    services::canonical_mapping::ConceptMappingStrategy,
-    workspace::InitWorkspaceRequest,
+    services::canonical_mapping::ConceptMappingStrategy, workspace::InitWorkspaceRequest,
 };
 
 pub struct InitWorkspace;

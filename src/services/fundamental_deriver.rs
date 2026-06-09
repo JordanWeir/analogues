@@ -717,11 +717,8 @@ impl From<&SecRawFact> for SecFact {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        services::{
-            concept_catalog::ConceptCatalog,
-            sec_facts_provider::extract_raw_facts_from_root,
-        },
+    use crate::services::{
+        concept_catalog::ConceptCatalog, sec_facts_provider::extract_raw_facts_from_root,
     };
     use serde_json::json;
 
@@ -835,7 +832,13 @@ mod tests {
         }
     }
 
-    fn sec_fact_json(form: &str, start: &str, end: &str, filed: &str, value: f64) -> serde_json::Value {
+    fn sec_fact_json(
+        form: &str,
+        start: &str,
+        end: &str,
+        filed: &str,
+        value: f64,
+    ) -> serde_json::Value {
         json!({
             "form": form,
             "start": start,

@@ -8,8 +8,8 @@ pub mod result;
 pub mod runner;
 
 pub use context::{LaneConfig, LaneContext};
-pub use init_pipeline::lanes_for_request;
 pub use gate::{Gate, GateResult, GateStatus};
+pub use init_pipeline::lanes_for_request;
 pub use lane::Lane;
 pub use result::{LaneResult, LaneStatus, LaneWritesSummary, LinearRunReport};
 pub use runner::LinearRunner;

@@ -26,11 +26,9 @@ pub struct WorkerRunStore;
 
 impl WorkerRunStore {
     pub async fn persist(sqlite_path: &Path, record: &WorkerRunRecord) -> Result<i64> {
-        let db = Database::connect(crate::services::workspace_store::sqlite_uri(
-            sqlite_path,
-        ))
-        .await
-        .map_err(|err| Error::string(&format!("failed to open workspace db: {err}")))?;
+        let db = Database::connect(crate::services::workspace_store::sqlite_uri(sqlite_path))
+            .await
+            .map_err(|err| Error::string(&format!("failed to open workspace db: {err}")))?;
 
         let created_at = Utc::now().to_rfc3339();
         let metadata_json = serde_json::to_string(&record.metadata_json).map_err(|err| {
@@ -215,21 +213,17 @@ mod tests {
             row.try_get::<String>("", "status").expect("status"),
             WORKER_RUN_STATUS_SUCCESS
         );
-        assert_eq!(
-            row.try_get::<i64>("", "agent_rounds").expect("rounds"),
-            2
-        );
+        assert_eq!(row.try_get::<i64>("", "agent_rounds").expect("rounds"), 2);
         assert_eq!(
             row.try_get::<i64>("", "cache_reads").expect("cache reads"),
             12
         );
         assert_eq!(
-            row.try_get::<i64>("", "cache_writes").expect("cache writes"),
+            row.try_get::<i64>("", "cache_writes")
+                .expect("cache writes"),
             4
         );
-        assert!(
-            (row.try_get::<f64>("", "cost_usd").expect("cost") - 0.0025).abs() < f64::EPSILON
-        );
+        assert!((row.try_get::<f64>("", "cost_usd").expect("cost") - 0.0025).abs() < f64::EPSILON);
 
         let _ = std::fs::remove_file(path);
         let _ = db;

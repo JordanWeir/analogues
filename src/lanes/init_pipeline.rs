@@ -1,8 +1,4 @@
-use super::{
-    build_catalog::BuildCatalogLane,
-    init_workspace::InitWorkspaceLane,
-    lane::Lane,
-};
+use super::{build_catalog::BuildCatalogLane, init_workspace::InitWorkspaceLane, lane::Lane};
 use crate::workspace::InitWorkspaceRequest;
 use std::sync::Arc;
 

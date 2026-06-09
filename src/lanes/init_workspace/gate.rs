@@ -35,7 +35,10 @@ impl Gate for WorkspaceExistsGate {
             Ok(ticker) if ticker == ctx.ticker() => GateResult::pass(self.name()),
             Ok(ticker) => GateResult::reject(
                 self.name(),
-                format!("run_metadata ticker mismatch: expected {}, found {ticker}", ctx.ticker()),
+                format!(
+                    "run_metadata ticker mismatch: expected {}, found {ticker}",
+                    ctx.ticker()
+                ),
             ),
             Err(err) => GateResult::reject(self.name(), format!("workspace not readable: {err}")),
         }
@@ -64,7 +67,10 @@ impl Gate for SecProvenanceGate {
         let count = match count {
             Ok(count) => count,
             Err(err) => {
-                return GateResult::reject(self.name(), format!("failed to count sec_raw_facts: {err}"))
+                return GateResult::reject(
+                    self.name(),
+                    format!("failed to count sec_raw_facts: {err}"),
+                )
             }
         };
 
@@ -119,7 +125,9 @@ impl Gate for FetchFailuresRecordedGate {
                 Ok(status) if status == "open" => GateResult::pass(self.name()),
                 Ok(status) => GateResult::warn(
                     self.name(),
-                    format!("expected open starter_financials gap for skipped fetch, found {status}"),
+                    format!(
+                        "expected open starter_financials gap for skipped fetch, found {status}"
+                    ),
                 ),
                 Err(err) => GateResult::reject(self.name(), format!("gap check failed: {err}")),
             };
@@ -133,7 +141,10 @@ impl Gate for FetchFailuresRecordedGate {
         {
             Ok(status) => status,
             Err(err) => {
-                return GateResult::reject(self.name(), format!("failed to read fetch status: {err}"))
+                return GateResult::reject(
+                    self.name(),
+                    format!("failed to read fetch status: {err}"),
+                )
             }
         };
 
@@ -166,7 +177,10 @@ impl Gate for FetchFailuresRecordedGate {
 
 async fn scalar_string(db: &impl ConnectionTrait, sql: &str) -> Result<String> {
     let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
+        .query_one(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
         .await
         .map_err(|err| Error::string(&format!("query failed: {err}")))?
         .ok_or_else(|| Error::string("query returned no row"))?;
@@ -178,7 +192,10 @@ async fn scalar_string(db: &impl ConnectionTrait, sql: &str) -> Result<String> {
 
 async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
     let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
+        .query_one(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
         .await
         .map_err(|err| Error::string(&format!("query failed: {err}")))?
         .ok_or_else(|| Error::string("query returned no row"))?;
@@ -254,10 +271,7 @@ mod tests {
         }
 
         db.close().await.expect("close");
-        let workspace = WorkspaceStore
-            .open_workspace(&path)
-            .await
-            .expect("open");
+        let workspace = WorkspaceStore.open_workspace(&path).await.expect("open");
         LaneContext::new(workspace, LaneConfig::new("EXMP"))
     }
 
@@ -266,7 +280,10 @@ mod tests {
         let ctx = gate_context_with_facts(false).await;
         let result = LaneResult::success("init_workspace", LaneWritesSummary::default());
         let gate = WorkspaceExistsGate;
-        assert_eq!(gate.check(&ctx, &result).await.status, crate::lanes::gate::GateStatus::Pass);
+        assert_eq!(
+            gate.check(&ctx, &result).await.status,
+            crate::lanes::gate::GateStatus::Pass
+        );
         ctx.workspace.close().await.ok();
     }
 
@@ -275,7 +292,10 @@ mod tests {
         let ctx = gate_context_with_facts(true).await;
         let result = LaneResult::success("init_workspace", LaneWritesSummary::default());
         let gate = SecProvenanceGate;
-        assert_eq!(gate.check(&ctx, &result).await.status, crate::lanes::gate::GateStatus::Pass);
+        assert_eq!(
+            gate.check(&ctx, &result).await.status,
+            crate::lanes::gate::GateStatus::Pass
+        );
         ctx.workspace.close().await.ok();
     }
 

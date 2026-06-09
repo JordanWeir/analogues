@@ -49,7 +49,9 @@ impl Gate for CatalogMaterializedGate {
         )
         .await
         {
-            Ok(0) => GateResult::reject(self.name(), "concept catalog is empty after build_catalog"),
+            Ok(0) => {
+                GateResult::reject(self.name(), "concept catalog is empty after build_catalog")
+            }
             Ok(_) => GateResult::pass(self.name()),
             Err(err) => GateResult::reject(self.name(), format!("catalog count failed: {err}")),
         }
@@ -78,10 +80,15 @@ impl Gate for CoreFundamentalsTraceableGate {
         };
 
         if mappings.is_empty() {
-            return GateResult::reject(self.name(), "no active canonical mappings after build_catalog");
+            return GateResult::reject(
+                self.name(),
+                "no active canonical mappings after build_catalog",
+            );
         }
 
-        let revenue = mappings.iter().find(|mapping| mapping.canonical_key == "revenue");
+        let revenue = mappings
+            .iter()
+            .find(|mapping| mapping.canonical_key == "revenue");
         let Some(revenue) = revenue else {
             return GateResult::reject(self.name(), "revenue canonical mapping is missing");
         };
@@ -123,11 +130,17 @@ impl Gate for CoreFundamentalsTraceableGate {
             }
             Ok(_) => {}
             Err(err) => {
-                return GateResult::reject(self.name(), format!("traceability check failed: {err}"));
+                return GateResult::reject(
+                    self.name(),
+                    format!("traceability check failed: {err}"),
+                );
             }
         }
 
-        if !mappings.iter().any(|mapping| mapping.canonical_key == "net_income") {
+        if !mappings
+            .iter()
+            .any(|mapping| mapping.canonical_key == "net_income")
+        {
             return GateResult::warn(self.name(), "net_income canonical mapping is missing");
         }
 
@@ -191,7 +204,10 @@ impl Gate for FlowMetricsPeriodLabeledGate {
         let observations = match store.load_fundamental_observations().await {
             Ok(observations) => observations,
             Err(err) => {
-                return GateResult::reject(self.name(), format!("failed to load observations: {err}"))
+                return GateResult::reject(
+                    self.name(),
+                    format!("failed to load observations: {err}"),
+                )
             }
         };
 
@@ -211,7 +227,10 @@ impl Gate for FlowMetricsPeriodLabeledGate {
             .into_iter()
             .filter(|(_, period_types)| period_types.len() > 1)
             .map(|(metric_key, period_types)| {
-                format!("{metric_key} ({})", period_types.into_iter().collect::<Vec<_>>().join(", "))
+                format!(
+                    "{metric_key} ({})",
+                    period_types.into_iter().collect::<Vec<_>>().join(", ")
+                )
             })
             .collect();
 
@@ -241,7 +260,10 @@ impl Gate for FlowMetricsPeriodLabeledGate {
 
 async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
     let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
+        .query_one(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
         .await
         .map_err(|err| Error::string(&format!("query failed: {err}")))?
         .ok_or_else(|| Error::string("query returned no row"))?;
@@ -339,10 +361,7 @@ mod tests {
             .expect("persist");
 
         db.close().await.expect("close");
-        let workspace = WorkspaceStore
-            .open_workspace(&path)
-            .await
-            .expect("open");
+        let workspace = WorkspaceStore.open_workspace(&path).await.expect("open");
 
         if materialized {
             materialize_catalog_on_workspace(&workspace)

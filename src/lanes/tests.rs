@@ -145,9 +145,7 @@ async fn linear_runner_executes_all_lanes_when_gates_pass() {
 async fn linear_runner_continues_on_gate_warn() {
     let (mut ctx, _path) = test_lane_context().await;
     let runner = LinearRunner::new(vec![
-        Arc::new(
-            StubLane::new("lane_warn", LaneStatus::Success).with_gate(Arc::new(WarnGate)),
-        ),
+        Arc::new(StubLane::new("lane_warn", LaneStatus::Success).with_gate(Arc::new(WarnGate))),
         Arc::new(StubLane::new("lane_after_warn", LaneStatus::Success)),
     ]);
 
@@ -165,9 +163,7 @@ async fn linear_runner_continues_on_gate_warn() {
 async fn linear_runner_stops_on_gate_reject() {
     let (mut ctx, path) = test_lane_context().await;
     let runner = LinearRunner::new(vec![
-        Arc::new(
-            StubLane::new("lane_reject", LaneStatus::Success).with_gate(Arc::new(RejectGate)),
-        ),
+        Arc::new(StubLane::new("lane_reject", LaneStatus::Success).with_gate(Arc::new(RejectGate))),
         Arc::new(StubLane::new("lane_never_runs", LaneStatus::Success)),
     ]);
 
@@ -178,12 +174,10 @@ async fn linear_runner_stops_on_gate_reject() {
     assert_eq!(report.lane_results[0].lane_name, "lane_reject");
     assert!(report.lane_results[0].has_blocking_gate_failure());
 
-    let count = crate::services::quality_gate_store::QualityGateStore::count_for_lane(
-        &path,
-        "lane_reject",
-    )
-    .await
-    .expect("count");
+    let count =
+        crate::services::quality_gate_store::QualityGateStore::count_for_lane(&path, "lane_reject")
+            .await
+            .expect("count");
     assert_eq!(count, 1);
 }
 

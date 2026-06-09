@@ -1,9 +1,9 @@
 pub mod agents;
-pub mod lanes;
 pub mod app;
 pub mod controllers;
 pub mod data;
 pub mod initializers;
+pub mod lanes;
 pub mod mailers;
 pub mod models;
 pub mod services;

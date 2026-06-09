@@ -99,11 +99,9 @@ impl ModelClient for OpenRouterModelClient {
                 metadata: request.metadata.clone(),
                 workspace_sqlite: request.workspace_sqlite.clone(),
                 client_tools: request.client_tools.clone(),
-                max_agent_rounds: is_concept_review.then_some(
-                    crate::services::openrouter_chat::CONCEPT_REVIEW_MAX_AGENT_ROUNDS,
-                ),
-                submit_tool_name: is_concept_review
-                    .then_some("submit_concept_review".to_string()),
+                max_agent_rounds: is_concept_review
+                    .then_some(crate::services::openrouter_chat::CONCEPT_REVIEW_MAX_AGENT_ROUNDS),
+                submit_tool_name: is_concept_review.then_some("submit_concept_review".to_string()),
             })
             .await?;
 

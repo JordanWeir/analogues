@@ -1,7 +1,10 @@
 mod gate;
 mod writes;
 
-use super::{context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus, result::LaneWritesSummary};
+use super::{
+    context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus,
+    result::LaneWritesSummary,
+};
 use crate::{
     services::workspace_ingest::{record_financial_fetch_status, run_workspace_ingest},
     workspace::InitWorkspaceRequest,
@@ -47,7 +50,9 @@ impl Lane for InitWorkspaceLane {
             .wrote("run_metadata");
 
         if outcome.skipped {
-            writes = writes.wrote("data_gaps").note("financial fetch skipped by request");
+            writes = writes
+                .wrote("data_gaps")
+                .note("financial fetch skipped by request");
             return Ok(LaneResult {
                 lane_name: self.name().to_string(),
                 status: LaneStatus::Skipped,

@@ -5,6 +5,7 @@ use crate::{
             ConceptMappingStrategy,
         },
         concept_catalog::ConceptCatalog,
+        financial_run::FinancialRun,
         fundamental_deriver::FundamentalDeriver,
         workspace_financial_store::{
             DerivedPersist, ResolutionPersist, WorkspaceFinancialStore, WorkspaceStockInfo,
@@ -12,12 +13,10 @@ use crate::{
         workspace_ingest::{
             close_data_gap, record_financial_fetch_gap, record_financial_fetch_status,
         },
-        financial_run::FinancialRun,
         workspace_store::WorkspaceHandle,
     },
     workspace::{
-        seed_database, ConceptCatalogEntry, DerivedFundamentals,
-        SecIngestionResult, SecRawFact,
+        seed_database, ConceptCatalogEntry, DerivedFundamentals, SecIngestionResult, SecRawFact,
     },
 };
 use chrono::Utc;

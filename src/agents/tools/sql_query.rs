@@ -40,9 +40,8 @@ pub fn openrouter_tool() -> Tool {
 }
 
 pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<String> {
-    let args: Value = serde_json::from_str(arguments).map_err(|err| {
-        Error::string(&format!("workspace_sql arguments were not JSON: {err}"))
-    })?;
+    let args: Value = serde_json::from_str(arguments)
+        .map_err(|err| Error::string(&format!("workspace_sql arguments were not JSON: {err}")))?;
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -68,9 +67,7 @@ impl ClientToolHandler for SqlQueryHandler {
         match tool_name {
             TOOL_NAME => {
                 let result = execute(&self.sqlite_path, arguments).await?;
-                Ok(crate::services::openrouter_chat::ClientToolExecuteResult::Response(
-                    result,
-                ))
+                Ok(crate::services::openrouter_chat::ClientToolExecuteResult::Response(result))
             }
             other => Err(Error::string(&format!("unknown client tool: {other}"))),
         }

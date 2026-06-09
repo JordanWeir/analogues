@@ -126,7 +126,8 @@ pub async fn run_workspace_ingest(
                 })
                 .await?;
 
-            let market_persisted = persist_market_if_available(&store, market_snapshot.as_ref()).await?;
+            let market_persisted =
+                persist_market_if_available(&store, market_snapshot.as_ref()).await?;
 
             record_financial_fetch_status(db, "ingested", None).await?;
 
@@ -142,7 +143,9 @@ pub async fn run_workspace_ingest(
         }
         Err(err) => {
             let message = err.to_string();
-            source_notes.push(format!("SEC Company Facts unavailable or failed: {message}"));
+            source_notes.push(format!(
+                "SEC Company Facts unavailable or failed: {message}"
+            ));
 
             let store = WorkspaceFinancialStore::new(db);
             if market_snapshot.is_some() {
@@ -158,7 +161,8 @@ pub async fn run_workspace_ingest(
                     .await?;
             }
 
-            let market_persisted = persist_market_if_available(&store, market_snapshot.as_ref()).await?;
+            let market_persisted =
+                persist_market_if_available(&store, market_snapshot.as_ref()).await?;
 
             record_financial_fetch_gap(db, "failed", Some(&message), &[message.clone()]).await?;
 
@@ -269,8 +273,7 @@ mod tests {
     use super::*;
     use crate::{
         services::{
-            sec_facts_provider::extract_raw_facts_from_root,
-            workspace_store::execute_schema,
+            sec_facts_provider::extract_raw_facts_from_root, workspace_store::execute_schema,
         },
         workspace::{seed_database, InitWorkspaceRequest, MarketHeadlines, WorkspacePaths},
     };
@@ -349,13 +352,11 @@ mod tests {
             store.load_sec_raw_facts().await.expect("facts").len(),
             raw_facts.len()
         );
-        assert!(
-            store
-                .load_concept_catalog_entries()
-                .await
-                .expect("catalog")
-                .is_empty()
-        );
+        assert!(store
+            .load_concept_catalog_entries()
+            .await
+            .expect("catalog")
+            .is_empty());
         db.close().await.ok();
     }
 

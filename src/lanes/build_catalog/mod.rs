@@ -37,12 +37,13 @@ impl Lane for BuildCatalogLane {
     }
 
     async fn run(&self, ctx: &mut LaneContext) -> Result<LaneResult> {
-        let raw_fact_count = crate::services::workspace_financial_store::WorkspaceFinancialStore::new(
-            ctx.workspace.connection(),
-        )
-        .load_sec_raw_facts()
-        .await?
-        .len();
+        let raw_fact_count =
+            crate::services::workspace_financial_store::WorkspaceFinancialStore::new(
+                ctx.workspace.connection(),
+            )
+            .load_sec_raw_facts()
+            .await?
+            .len();
 
         if raw_fact_count == 0 {
             return Ok(LaneResult::skipped(
@@ -169,10 +170,7 @@ mod tests {
             .expect("persist");
         db.close().await.expect("close");
 
-        let workspace = WorkspaceStore
-            .open_workspace(&path)
-            .await
-            .expect("open");
+        let workspace = WorkspaceStore.open_workspace(&path).await.expect("open");
         LaneContext::new(workspace, LaneConfig::new("EXMP"))
     }
 

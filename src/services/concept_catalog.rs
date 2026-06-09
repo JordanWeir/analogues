@@ -891,7 +891,13 @@ mod tests {
         }
     }
 
-    fn sec_fact_json(form: &str, start: &str, end: &str, filed: &str, value: f64) -> serde_json::Value {
+    fn sec_fact_json(
+        form: &str,
+        start: &str,
+        end: &str,
+        filed: &str,
+        value: f64,
+    ) -> serde_json::Value {
         json!({
             "form": form,
             "start": start,

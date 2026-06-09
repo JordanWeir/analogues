@@ -145,10 +145,7 @@ pub async fn execute_workspace_query(
         .map_err(|err| Error::string(&format!("failed to open workspace sqlite: {err}")))?;
 
     let rows = db
-        .query_all(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            sql.clone(),
-        ))
+        .query_all(Statement::from_string(DatabaseBackend::Sqlite, sql.clone()))
         .await
         .map_err(|err| {
             tracing::warn!(

@@ -77,7 +77,9 @@ pub fn execute(arguments: &str) -> Result<ClientToolExecuteResult> {
     })?;
     ConceptReviewService::validate_output(&output)?;
     let text = serde_json::to_string(&output).map_err(|err| {
-        Error::string(&format!("failed to serialize accepted concept review output: {err}"))
+        Error::string(&format!(
+            "failed to serialize accepted concept review output: {err}"
+        ))
     })?;
     Ok(ClientToolExecuteResult::Complete(text))
 }

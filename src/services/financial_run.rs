@@ -1,7 +1,6 @@
 use crate::{
     services::{
-        canonical_mapping::CanonicalResolutionResult,
-        workspace_financial_store::FundamentalInsert,
+        canonical_mapping::CanonicalResolutionResult, workspace_financial_store::FundamentalInsert,
     },
     workspace::{
         DerivedFundamentals, FundamentalObservation, MarketHeadlines, MarketQuoteSnapshot,
@@ -88,10 +87,7 @@ impl FinancialRun {
         self.ingest = Some(ingest);
     }
 
-    pub(crate) fn apply_resolution(
-        &mut self,
-        resolution: CanonicalResolutionResult,
-    ) {
+    pub(crate) fn apply_resolution(&mut self, resolution: CanonicalResolutionResult) {
         extend_unique(&mut self.quality_flags, resolution.quality_flags.clone());
         self.resolution = Some(resolution);
     }
@@ -413,8 +409,7 @@ mod tests {
     use super::*;
     use crate::{
         services::{
-            canonical_mapping::CanonicalResolutionResult,
-            concept_catalog::ConceptCatalog,
+            canonical_mapping::CanonicalResolutionResult, concept_catalog::ConceptCatalog,
             sec_facts_provider::extract_raw_facts_from_root,
         },
         workspace::{DerivedFundamentals, SecIngestionResult},
@@ -475,8 +470,7 @@ mod tests {
         let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
         let observations =
             crate::services::fundamental_deriver::FundamentalDeriver::build_observations(
-                &raw_facts,
-                &mappings,
+                &raw_facts, &mappings,
             );
         let mut base = FinancialRun::new("TEST");
         let mut update = FinancialRun::new("TEST");
@@ -518,7 +512,13 @@ mod tests {
             .any(|fact| fact.concept_name == "CloudRemainingPerformanceObligation"));
     }
 
-    fn sec_fact_json(form: &str, start: &str, end: &str, filed: &str, value: f64) -> serde_json::Value {
+    fn sec_fact_json(
+        form: &str,
+        start: &str,
+        end: &str,
+        filed: &str,
+        value: f64,
+    ) -> serde_json::Value {
         json!({
             "form": form,
             "start": start,
