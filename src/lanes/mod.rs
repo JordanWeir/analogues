@@ -1,3 +1,4 @@
+pub mod build_catalog;
 pub mod context;
 pub mod gate;
 pub mod init_workspace;

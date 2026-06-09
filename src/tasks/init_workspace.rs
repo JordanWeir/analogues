@@ -1,7 +1,9 @@
 use crate::{
     lanes::{
+        build_catalog::BuildCatalogLane,
         context::{LaneConfig, LaneContext},
         init_workspace::InitWorkspaceLane,
+        lane::Lane,
         runner::LinearRunner,
     },
     services::{
@@ -11,11 +13,7 @@ use crate::{
         market_quote_provider::YahooChartMarketDataAdapter,
         sec_facts_provider::SecFactsProvider,
         workspace_financial_store::{IngestPersist, SnapshotPersist, WorkspaceFinancialStore},
-        workspace_ingest::{close_data_gap, record_financial_fetch_gap, record_financial_fetch_status},
-        workspace_phases::{
-            derive_starter_fundamentals_on_workspace, materialize_catalog_on_workspace,
-            resolve_canonical_mappings_on_workspace,
-        },
+        workspace_ingest::record_financial_fetch_status,
         workspace_store::{
             normalize_ticker, validate_date, WorkspaceStore, DEFAULT_REPORT_ROOT,
         },
@@ -111,70 +109,37 @@ pub async fn initialize_workspace(request: &InitWorkspaceRequest) -> Result<Work
     let store = WorkspaceStore;
     let handle = store.create_workspace(&normalized_request).await?;
     let mut ctx = LaneContext::new(handle, LaneConfig::new(&normalized_request.ticker));
-    let runner = LinearRunner::new(vec![Arc::new(InitWorkspaceLane::new(
+    let mut lanes: Vec<Arc<dyn Lane>> = vec![Arc::new(InitWorkspaceLane::new(
         normalized_request.fetch_financials,
-    ))]);
+    ))];
+    if normalized_request.fetch_financials {
+        if let Some(strategy) = normalized_request.mapping_strategy {
+            lanes.push(Arc::new(BuildCatalogLane::new(strategy)));
+        }
+    }
 
-    let report = runner.run(&mut ctx).await?;
+    let report = LinearRunner::new(lanes).run(&mut ctx).await?;
     if report.stopped_early {
         let reason = report
             .stop_reason
-            .unwrap_or_else(|| "init_workspace lane stopped early".to_string());
+            .unwrap_or_else(|| "linear research pipeline stopped early".to_string());
         let _ = ctx.workspace.close().await;
         return Err(Error::string(&reason));
     }
 
-    if normalized_request.fetch_financials {
-        if let Some(strategy) = normalized_request.mapping_strategy {
-            run_catalog_pipeline(&mut ctx, strategy).await?;
-        } else {
-            record_financial_fetch_status(
-                ctx.workspace.connection(),
-                "ingested",
-                Some("canonical mapping and starter fundamentals deferred"),
-            )
-            .await?;
-        }
+    if normalized_request.fetch_financials && normalized_request.mapping_strategy.is_none() {
+        record_financial_fetch_status(
+            ctx.workspace.connection(),
+            "ingested",
+            Some("canonical mapping and starter fundamentals deferred"),
+        )
+        .await?;
     }
 
     let paths = ctx.workspace.paths.clone();
     ctx.workspace.close().await?;
 
     Ok(paths)
-}
-
-async fn run_catalog_pipeline(
-    ctx: &mut LaneContext,
-    strategy: ConceptMappingStrategy,
-) -> Result<()> {
-    materialize_catalog_on_workspace(&ctx.workspace).await?;
-    resolve_canonical_mappings_on_workspace(&ctx.workspace, strategy).await?;
-    let run = derive_starter_fundamentals_on_workspace(&ctx.workspace).await?;
-
-    let status = if run.gaps.is_empty() {
-        "succeeded"
-    } else {
-        "partial"
-    };
-    let error = if run.gaps.is_empty() {
-        None
-    } else {
-        Some(format!("missing fields: {}", run.gaps.join(", ")))
-    };
-
-    if run.gaps.is_empty() {
-        close_data_gap(ctx.workspace.connection(), "starter_financials").await?;
-    } else {
-        record_financial_fetch_gap(
-            ctx.workspace.connection(),
-            status,
-            error.as_deref(),
-            &run.gaps,
-        )
-        .await?;
-    }
-
-    Ok(())
 }
 
 pub async fn fetch_financial_run(ticker: &str) -> Result<FinancialRun> {
