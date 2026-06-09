@@ -407,3 +407,127 @@ fn ratio(numerator: Option<f64>, denominator: Option<f64>) -> Option<f64> {
 fn multiply(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     Some(left? * right?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        services::{
+            canonical_mapping::CanonicalResolutionResult,
+            concept_catalog::ConceptCatalog,
+            sec_facts_provider::extract_raw_facts_from_root,
+        },
+        workspace::{DerivedFundamentals, SecIngestionResult},
+    };
+    use serde_json::json;
+
+    #[test]
+    fn ingest_only_populates_catalog_without_canonical_layers() {
+        let facts_root = json!({
+            "us-gaap": {
+                "Revenues": {
+                    "label": "Revenues",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0)
+                    ]}
+                }
+            }
+        });
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-07T00:00:00Z");
+        let ingest = SecIngestionResult {
+            company_name: Some("Example Corp".to_string()),
+            fetched_at: "2026-06-07T00:00:00Z".to_string(),
+            raw_facts: raw_facts.clone(),
+            catalog_entries: ConceptCatalog::materialize_catalog_entries(&raw_facts),
+            source_provider: "SEC Company Facts".to_string(),
+        };
+        let mut run = FinancialRun::new("EXMP");
+        run.apply_ingest(ingest);
+
+        assert!(!run.ingest.as_ref().unwrap().raw_facts.is_empty());
+        assert!(!run.ingest.as_ref().unwrap().catalog_entries.is_empty());
+        assert!(run.resolution.is_none());
+        assert!(run.all_observations().is_empty());
+        assert!(run.starter().revenue_ttm.is_none());
+    }
+
+    #[test]
+    fn merge_preserves_raw_sec_facts_and_canonical_mappings() {
+        let facts_root = json!({
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "label": "Revenue",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0)
+                    ]}
+                },
+                "CloudRemainingPerformanceObligation": {
+                    "label": "Cloud RPO",
+                    "description": "Company-specific cloud backlog metric.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 42.0)
+                    ]}
+                }
+            }
+        });
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+        let observations =
+            crate::services::fundamental_deriver::FundamentalDeriver::build_observations(
+                &raw_facts,
+                &mappings,
+            );
+        let mut base = FinancialRun::new("TEST");
+        let mut update = FinancialRun::new("TEST");
+        update.ingest = Some(SecIngestionResult {
+            company_name: None,
+            fetched_at: "2026-06-04T00:00:00Z".to_string(),
+            raw_facts: raw_facts.clone(),
+            catalog_entries: ConceptCatalog::materialize_catalog_entries(&raw_facts),
+            source_provider: "SEC Company Facts".to_string(),
+        });
+        update.resolution = Some(CanonicalResolutionResult {
+            mappings: mappings.clone(),
+            review_decisions: Vec::new(),
+            quality_flags: Vec::new(),
+            strategy_id: "candidate_scoring".to_string(),
+        });
+        update.derived = Some(DerivedFundamentals {
+            observations: observations.clone(),
+            ..DerivedFundamentals::default()
+        });
+
+        base.merge_sec_layers(update, true);
+
+        assert_eq!(
+            base.ingest.as_ref().unwrap().raw_facts.len(),
+            raw_facts.len()
+        );
+        assert_eq!(
+            base.resolution.as_ref().unwrap().mappings.len(),
+            mappings.len()
+        );
+        assert_eq!(base.all_observations().len(), observations.len());
+        assert!(base
+            .ingest
+            .as_ref()
+            .unwrap()
+            .raw_facts
+            .iter()
+            .any(|fact| fact.concept_name == "CloudRemainingPerformanceObligation"));
+    }
+
+    fn sec_fact_json(form: &str, start: &str, end: &str, filed: &str, value: f64) -> serde_json::Value {
+        json!({
+            "form": form,
+            "start": start,
+            "end": end,
+            "filed": filed,
+            "fy": 2026,
+            "fp": "Q1",
+            "accn": "test",
+            "val": value
+        })
+    }
+}

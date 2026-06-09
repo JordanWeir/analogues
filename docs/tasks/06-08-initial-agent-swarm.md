@@ -1,7 +1,7 @@
 # Build Initial Agent Swarm
 
 **Date:** 2026-06-08  
-**Status:** Draft task  
+**Status:** In progress (steps 1–6 complete)  
 **Scope:** Agent runtime foundation, shared tool loop, and initial worker lanes behind a linear orchestrator (v0).
 
 ## Summary
@@ -157,17 +157,23 @@ Setup a simple linear track, see where agents break down, iterate.
    - Gate statuses: pass / warn / reject / quarantine; runner stops on reject/quarantine or failed lane
    - `quality_gate_results` table + `QualityGateStore::persist_batch` after each lane
 
-3. **`init_workspace` lane (ingest only)** — existing `initWorkspace` task delegates here
-   - Phase 1 only: fetch + persist raw facts, stock info, gaps
-   - Gates: workspace exists; raw SEC facts have provenance; fetch failures recorded as gaps
+3. **`init_workspace` lane (ingest only)** ✅
+   - `InitWorkspaceLane` in `src/lanes/init_workspace/`; phase 1 fetch + persist via `workspace_ingest` and `RawIngestPersist`
+   - Phase 1 only: fetch + persist raw facts, stock info, gaps (`sec_raw_facts`, `stock_info`, `run_metadata`, `data_gaps`)
+   - `initWorkspace` delegates ingest through `LinearRunner`
 
-4. **`init_workspace` gates** (if not fully covered in step 3)
+4. **`init_workspace` gates** ✅
+   - `workspace_exists`, `sec_provenance`, `fetch_failures_recorded` in `src/lanes/init_workspace/gate.rs`
+   - Workspace readable with matching ticker; SEC facts carry required provenance fields; skipped/failed fetches recorded as gaps
 
-5. **`build_catalog` lane (deterministic path first)**
-   - Phases 2–4: catalog materialize, heuristic canonical resolve, derive starter fundamentals
-   - Gates: core fundamentals traceable; flow metrics not mixed without labels
+5. **`build_catalog` lane (deterministic path first)** ✅
+   - `BuildCatalogLane` in `src/lanes/build_catalog/`; phases 2–4 via `workspace_phases`
+   - Catalog materialize, heuristic canonical resolve (`CandidateScoring` default), derive starter fundamentals
+   - `initWorkspace` chains `init_workspace` + `build_catalog` when `mapping_strategy` is set; ingest-only path (`mapping_strategy:none`) still defers catalog
 
-6. **`build_catalog` gates** (if not fully covered in step 5)
+6. **`build_catalog` gates** ✅
+   - `catalog_materialized`, `core_fundamentals_traceable`, `flow_metrics_period_labeled` in `src/lanes/build_catalog/gate.rs`
+   - Catalog non-empty; revenue mapping traceable to `sec_raw_facts`; flow observations do not mix quarter/ytd/annual period types without normalization
 
 7. **`fundamental_catalog_manager` agent** wired into `build_catalog` as optional strategy
    - Thin move of `concept_review` into `src/agents/fundamental_catalog_manager/`

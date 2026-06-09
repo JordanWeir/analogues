@@ -4,9 +4,13 @@ use crate::{
             resolve_canonical_mappings, CanonicalResolutionContext, CanonicalResolutionResult,
             ConceptMappingStrategy,
         },
+        concept_catalog::ConceptCatalog,
         fundamental_deriver::FundamentalDeriver,
         workspace_financial_store::{
             DerivedPersist, ResolutionPersist, WorkspaceFinancialStore, WorkspaceStockInfo,
+        },
+        workspace_ingest::{
+            close_data_gap, record_financial_fetch_gap, record_financial_fetch_status,
         },
         financial_run::FinancialRun,
         workspace_store::WorkspaceHandle,
@@ -18,7 +22,6 @@ use crate::{
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::path::PathBuf;
 
 pub struct WorkspaceIngestLayers {
@@ -54,6 +57,27 @@ pub fn mapping_strategy_from_vars(vars: &task::Vars) -> Result<ConceptMappingStr
             "resolveCanonicalMappings requires mapping_strategy:candidate_scoring or mapping_strategy:llm_reviewed",
         )
     })
+}
+
+pub async fn materialize_catalog_on_workspace(handle: &WorkspaceHandle) -> Result<()> {
+    let store = WorkspaceFinancialStore::new(handle.connection());
+    let raw_facts = store.load_sec_raw_facts().await?;
+    if raw_facts.is_empty() {
+        return Err(Error::string(
+            "workspace has no sec_raw_facts; run init_workspace ingest first",
+        ));
+    }
+    let catalog_entries = ConceptCatalog::materialize_catalog_entries(&raw_facts);
+    let fetched_at = raw_facts
+        .iter()
+        .map(|fact| fact.fetched_at.as_str())
+        .max()
+        .map(str::to_string)
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    store
+        .persist_catalog_entries(&catalog_entries, &fetched_at)
+        .await?;
+    Ok(())
 }
 
 pub async fn load_ingest_layers(
@@ -146,7 +170,7 @@ pub async fn derive_starter_fundamentals_on_workspace(
         .await?;
 
     let gap_message = format!("missing fields: {}", run.gaps.join(", "));
-    update_financial_fetch_status(
+    record_financial_fetch_status(
         handle.connection(),
         if run.gaps.is_empty() {
             "succeeded"
@@ -213,84 +237,6 @@ fn financial_run_from_layers(
     });
     run.apply_derived(derived);
     run
-}
-
-async fn update_financial_fetch_status(
-    db: &impl ConnectionTrait,
-    status: &str,
-    error: Option<&str>,
-) -> Result<()> {
-    execute_sql(
-        db,
-        &format!(
-            "UPDATE run_metadata
-             SET financial_fetch_status = '{}', financial_fetch_error = {}
-             WHERE id = 1",
-            sql_quote(status),
-            sql_value(error),
-        ),
-    )
-    .await
-}
-
-async fn close_data_gap(db: &impl ConnectionTrait, gap_key: &str) -> Result<()> {
-    execute_sql(
-        db,
-        &format!(
-            "UPDATE data_gaps SET status = 'closed' WHERE gap_key = '{}'",
-            sql_quote(gap_key),
-        ),
-    )
-    .await
-}
-
-async fn record_financial_fetch_gap(
-    db: &impl ConnectionTrait,
-    status: &str,
-    error: Option<&str>,
-    gaps: &[String],
-) -> Result<()> {
-    update_financial_fetch_status(db, status, error).await?;
-    let now = Utc::now().to_rfc3339();
-    let description = if gaps.is_empty() {
-        "Starter financial fetch did not return all required fields.".to_string()
-    } else {
-        format!("Starter financial fetch gaps: {}", gaps.join(", "))
-    };
-    execute_sql(
-        db,
-        &format!(
-            "INSERT INTO data_gaps (gap_key, description, status, created_at)
-             VALUES ('starter_financials', '{}', 'open', '{}')
-             ON CONFLICT(gap_key) DO UPDATE SET
-                description = excluded.description,
-                status = 'open'",
-            sql_quote(&description),
-            sql_quote(&now),
-        ),
-    )
-    .await
-}
-
-async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
-    Ok(())
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn sql_value(value: Option<&str>) -> String {
-    value.map_or_else(
-        || "NULL".to_string(),
-        |value| format!("'{}'", sql_quote(value)),
-    )
 }
 
 #[cfg(test)]
