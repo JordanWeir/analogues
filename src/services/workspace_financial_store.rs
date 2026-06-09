@@ -3,7 +3,10 @@ use crate::{
         concept_catalog::ConceptCatalog, concept_review::ConceptReviewDecisionRecord,
         workspace_store::execute_schema,
     },
-    workspace::{CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, SecRawFact},
+    workspace::{
+        CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, MarketQuoteSnapshot,
+        SecRawFact,
+    },
 };
 use loco_rs::prelude::*;
 use sea_orm::{
@@ -189,6 +192,31 @@ impl<'a> WorkspaceFinancialStore<'a> {
         updated_at: &str,
     ) -> Result<()> {
         Self::insert_concept_catalog_entries(self.db, entries, updated_at).await
+    }
+
+    /// Phase-1 market quote persistence: observations and headline current price.
+    pub async fn persist_market_snapshot(&self, market: &MarketQuoteSnapshot) -> Result<()> {
+        let fetched_at = market.fetched_at.as_str();
+        if !market.observations.is_empty() {
+            Self::insert_observations(self.db, &market.observations, fetched_at).await?;
+        }
+        if let Some(price) = market.headlines.current_price {
+            Self::insert_fundamental(
+                self.db,
+                &FundamentalInsert {
+                    key: "current_price",
+                    label: "Current price",
+                    value: Some(price),
+                    text: None,
+                    unit: market.currency.as_deref(),
+                    period: None,
+                    source_note: Some("Yahoo chart endpoint".to_string()),
+                },
+                fetched_at,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn persist_ingestion(&self, input: &IngestPersist<'_>) -> Result<()> {

@@ -713,3 +713,138 @@ impl From<&SecRawFact> for SecFact {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        services::{
+            concept_catalog::ConceptCatalog,
+            sec_facts_provider::extract_raw_facts_from_root,
+        },
+    };
+    use serde_json::json;
+
+    #[test]
+    fn builds_ttm_from_four_contiguous_quarters() {
+        let facts = vec![
+            sec_test_fact("Revenue", "2026-01-01", "2026-03-31", 10.0),
+            sec_test_fact("Revenue", "2025-10-01", "2025-12-31", 20.0),
+            sec_test_fact("Revenue", "2025-07-01", "2025-09-30", 30.0),
+            sec_test_fact("Revenue", "2025-04-01", "2025-06-30", 40.0),
+        ];
+
+        let windows = ttm_windows("revenue_ttm", &facts);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].period_end, "2026-03-31");
+        assert_eq!(windows[0].value, 100.0);
+    }
+
+    #[test]
+    fn coherent_bundle_excludes_stale_mismatched_margin_inputs() {
+        let facts_root = json!({
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "label": "Revenue",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 10.0),
+                        sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 20.0),
+                        sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 30.0),
+                        sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 40.0)
+                    ]}
+                },
+                "NetIncomeLoss": {
+                    "label": "Net income",
+                    "description": "Net income or loss.",
+                    "units": { "USD": [
+                        sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 1.0),
+                        sec_fact_json("10-Q", "2025-10-01", "2025-12-31", "2026-02-15", 2.0),
+                        sec_fact_json("10-Q", "2025-07-01", "2025-09-30", "2025-10-30", 3.0),
+                        sec_fact_json("10-Q", "2025-04-01", "2025-06-30", "2025-07-30", 4.0)
+                    ]}
+                },
+                "GrossProfit": {
+                    "label": "Gross profit",
+                    "description": "Gross profit.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2016-01-01", "2016-12-31", "2017-02-15", 50.0)
+                    ]}
+                }
+            }
+        });
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+
+        let bundle = FundamentalDeriver::select_latest_baseline_bundle(&raw_facts, &mappings)
+            .expect("coherent revenue/net income");
+
+        assert_eq!(bundle.period_end, "2026-03-31");
+        assert!(bundle.gross_profit.is_none());
+        assert!(bundle
+            .quality_flags
+            .iter()
+            .any(|flag| flag.starts_with("gross_profit_ttm_excluded_because_no_fact_matched")));
+    }
+
+    #[test]
+    fn captures_unmapped_sec_facts_without_canonicalizing_them() {
+        let facts_root = json!({
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "label": "Revenue",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0)
+                    ]}
+                },
+                "CloudRemainingPerformanceObligation": {
+                    "label": "Cloud RPO",
+                    "description": "Company-specific cloud backlog metric.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 42.0)
+                    ]}
+                }
+            }
+        });
+
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+        let observations = FundamentalDeriver::build_observations(&raw_facts, &mappings);
+
+        assert!(raw_facts
+            .iter()
+            .any(|fact| fact.concept_name == "CloudRemainingPerformanceObligation"));
+        assert!(!mappings
+            .iter()
+            .any(|mapping| mapping.concept_name == "CloudRemainingPerformanceObligation"));
+        assert!(!observations.iter().any(|observation| {
+            observation.concept_name.as_deref() == Some("CloudRemainingPerformanceObligation")
+        }));
+    }
+
+    fn sec_test_fact(concept: &str, start: &str, end: &str, value: f64) -> SecFact {
+        SecFact {
+            concept: concept.to_string(),
+            form: Some("10-Q".to_string()),
+            start: Some(start.to_string()),
+            end: Some(end.to_string()),
+            filed: Some(end.to_string()),
+            value,
+        }
+    }
+
+    fn sec_fact_json(form: &str, start: &str, end: &str, filed: &str, value: f64) -> serde_json::Value {
+        json!({
+            "form": form,
+            "start": start,
+            "end": end,
+            "filed": filed,
+            "fy": 2026,
+            "fp": "Q1",
+            "accn": "test",
+            "val": value
+        })
+    }
+}

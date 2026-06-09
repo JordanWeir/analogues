@@ -4,7 +4,7 @@ use crate::{
         sec_facts_provider::SecFactsProvider,
         workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
     },
-    workspace::SecRawFact,
+    workspace::{MarketQuoteSnapshot, SecRawFact},
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
@@ -25,11 +25,19 @@ pub struct RawSecIngestResult {
 pub struct WorkspaceIngestOutcome {
     pub skipped: bool,
     pub sec_ingested: bool,
-    pub market_fetched: bool,
+    pub market_persisted: bool,
     pub fetch_status: String,
     pub fetch_error: Option<String>,
     pub source_notes: Vec<String>,
     pub raw_fact_count: usize,
+}
+
+pub fn build_financial_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent("Mozilla/5.0")
+        .build()
+        .map_err(|err| Error::string(&format!("failed to build HTTP client: {err}")))
 }
 
 pub async fn fetch_raw_sec_facts(
@@ -63,7 +71,7 @@ pub async fn run_workspace_ingest(
         return Ok(WorkspaceIngestOutcome {
             skipped: true,
             sec_ingested: false,
-            market_fetched: false,
+            market_persisted: false,
             fetch_status: "skipped".to_string(),
             fetch_error: Some("financial fetch was skipped by request".to_string()),
             source_notes: vec!["starter financial fetch skipped".to_string()],
@@ -71,11 +79,7 @@ pub async fn run_workspace_ingest(
         });
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent("Mozilla/5.0")
-        .build()
-        .map_err(|err| Error::string(&format!("failed to build HTTP client: {err}")))?;
+    let client = build_financial_http_client()?;
     let market_data = YahooChartMarketDataAdapter::new(client.clone());
     let sec_provider = SecFactsProvider::new(client);
 
@@ -83,7 +87,7 @@ pub async fn run_workspace_ingest(
     let mut currency: Option<String> = None;
     let mut source_notes = Vec::new();
     let mut fetched_at = Utc::now().to_rfc3339();
-    let mut market_fetched = false;
+    let mut market_snapshot: Option<MarketQuoteSnapshot> = None;
 
     match market_data.fetch_snapshot(ticker).await {
         Ok(market) => {
@@ -91,7 +95,7 @@ pub async fn run_workspace_ingest(
             company_name = market.company_name.clone();
             currency = market.currency.clone();
             source_notes.extend(market.source_notes.clone());
-            market_fetched = true;
+            market_snapshot = Some(market);
         }
         Err(err) => {
             source_notes.push(format!("Yahoo chart fallback failed: {err}"));
@@ -111,7 +115,8 @@ pub async fn run_workspace_ingest(
             ));
 
             let source_note = source_notes.join(" ");
-            WorkspaceFinancialStore::new(db)
+            let store = WorkspaceFinancialStore::new(db);
+            store
                 .persist_raw_ingest(&RawIngestPersist {
                     fetched_at: &fetched_at,
                     company_name: company_name.as_deref(),
@@ -121,12 +126,14 @@ pub async fn run_workspace_ingest(
                 })
                 .await?;
 
+            let market_persisted = persist_market_if_available(&store, market_snapshot.as_ref()).await?;
+
             record_financial_fetch_status(db, "ingested", None).await?;
 
             Ok(WorkspaceIngestOutcome {
                 skipped: false,
                 sec_ingested: true,
-                market_fetched,
+                market_persisted,
                 fetch_status: "ingested".to_string(),
                 fetch_error: None,
                 source_notes,
@@ -137,9 +144,10 @@ pub async fn run_workspace_ingest(
             let message = err.to_string();
             source_notes.push(format!("SEC Company Facts unavailable or failed: {message}"));
 
-            if market_fetched {
+            let store = WorkspaceFinancialStore::new(db);
+            if market_snapshot.is_some() {
                 let source_note = source_notes.join(" ");
-                WorkspaceFinancialStore::new(db)
+                store
                     .persist_raw_ingest(&RawIngestPersist {
                         fetched_at: &fetched_at,
                         company_name: company_name.as_deref(),
@@ -150,12 +158,14 @@ pub async fn run_workspace_ingest(
                     .await?;
             }
 
+            let market_persisted = persist_market_if_available(&store, market_snapshot.as_ref()).await?;
+
             record_financial_fetch_gap(db, "failed", Some(&message), &[message.clone()]).await?;
 
             Ok(WorkspaceIngestOutcome {
                 skipped: false,
                 sec_ingested: false,
-                market_fetched,
+                market_persisted,
                 fetch_status: "failed".to_string(),
                 fetch_error: Some(message),
                 source_notes,
@@ -163,6 +173,17 @@ pub async fn run_workspace_ingest(
             })
         }
     }
+}
+
+async fn persist_market_if_available(
+    store: &WorkspaceFinancialStore<'_>,
+    market: Option<&MarketQuoteSnapshot>,
+) -> Result<bool> {
+    if let Some(market) = market {
+        store.persist_market_snapshot(market).await?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub async fn record_financial_fetch_gap(
@@ -251,7 +272,7 @@ mod tests {
             sec_facts_provider::extract_raw_facts_from_root,
             workspace_store::execute_schema,
         },
-        workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths},
+        workspace::{seed_database, InitWorkspaceRequest, MarketHeadlines, WorkspacePaths},
     };
     use sea_orm::Database;
     use serde_json::json;
@@ -335,6 +356,72 @@ mod tests {
                 .expect("catalog")
                 .is_empty()
         );
+        db.close().await.ok();
+    }
+
+    #[tokio::test]
+    async fn persist_market_snapshot_writes_price_and_observations() {
+        let (db, _path) = seeded_workspace().await;
+        let market = MarketQuoteSnapshot {
+            ticker: "EXMP".to_string(),
+            fetched_at: "2026-06-09T00:00:00Z".to_string(),
+            currency: Some("USD".to_string()),
+            company_name: Some("Example Corp".to_string()),
+            headlines: MarketHeadlines {
+                current_price: Some(123.45),
+                ..MarketHeadlines::default()
+            },
+            observations: vec![crate::workspace::FundamentalObservation {
+                canonical_key: Some("current_price".to_string()),
+                metric_key: "current_price".to_string(),
+                metric_label: "Current price".to_string(),
+                statement_type: "market".to_string(),
+                period_type: "instant".to_string(),
+                period_start: None,
+                period_end: None,
+                as_of_date: Some("2026-06-09T00:00:00Z".to_string()),
+                filed_at: None,
+                fiscal_year: None,
+                fiscal_period: None,
+                value: 123.45,
+                unit: Some("USD".to_string()),
+                source_type: "Yahoo chart endpoint".to_string(),
+                source_note: Some("test".to_string()),
+                concept_name: None,
+                form: None,
+                accession: None,
+                quality: Some("market_quote".to_string()),
+                is_derived: false,
+            }],
+            data_sources: vec!["Yahoo chart endpoint".to_string()],
+            source_notes: vec!["test market fetch".to_string()],
+        };
+
+        WorkspaceFinancialStore::new(&db)
+            .persist_market_snapshot(&market)
+            .await
+            .expect("persist market");
+
+        let store = WorkspaceFinancialStore::new(&db);
+        let observations = store
+            .load_fundamental_observations()
+            .await
+            .expect("observations");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].metric_key, "current_price");
+
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT metric_value FROM fundamentals WHERE metric_key = 'current_price'"
+                    .to_string(),
+            ))
+            .await
+            .expect("query")
+            .expect("row");
+        let price: f64 = row.try_get("", "metric_value").expect("price");
+        assert_eq!(price, 123.45);
+
         db.close().await.ok();
     }
 }

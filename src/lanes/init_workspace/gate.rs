@@ -282,7 +282,13 @@ mod tests {
     #[tokio::test]
     async fn init_workspace_lane_registers_gates() {
         use crate::lanes::lane::Lane;
-        let lane = InitWorkspaceLane::new(true);
+        let lane = InitWorkspaceLane::new(&InitWorkspaceRequest {
+            ticker: "EXMP".to_string(),
+            date: "2026-06-09".to_string(),
+            base_dir: PathBuf::from("reports/stock-narrative-research"),
+            fetch_financials: true,
+            mapping_strategy: None,
+        });
         assert_eq!(Lane::gates(&lane).len(), 3);
     }
 }

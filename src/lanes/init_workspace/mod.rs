@@ -2,18 +2,25 @@ mod gate;
 mod writes;
 
 use super::{context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus, result::LaneWritesSummary};
-use crate::services::workspace_ingest::run_workspace_ingest;
+use crate::{
+    services::workspace_ingest::{record_financial_fetch_status, run_workspace_ingest},
+    workspace::InitWorkspaceRequest,
+};
 use async_trait::async_trait;
 use loco_rs::prelude::*;
 use std::sync::Arc;
 
 pub struct InitWorkspaceLane {
     fetch_financials: bool,
+    defer_catalog: bool,
 }
 
 impl InitWorkspaceLane {
-    pub fn new(fetch_financials: bool) -> Self {
-        Self { fetch_financials }
+    pub fn new(request: &InitWorkspaceRequest) -> Self {
+        Self {
+            fetch_financials: request.fetch_financials,
+            defer_catalog: request.fetch_financials && request.mapping_strategy.is_none(),
+        }
     }
 }
 
@@ -53,8 +60,22 @@ impl Lane for InitWorkspaceLane {
         if outcome.sec_ingested {
             writes = writes.wrote("sec_raw_facts");
         }
+        if outcome.market_persisted {
+            writes = writes
+                .wrote("fundamentals")
+                .wrote("fundamental_observations");
+        }
         if outcome.fetch_status == "failed" {
             writes = writes.wrote("data_gaps");
+        }
+
+        if self.defer_catalog && outcome.sec_ingested {
+            record_financial_fetch_status(
+                ctx.workspace.connection(),
+                "ingested",
+                Some("canonical mapping and starter fundamentals deferred"),
+            )
+            .await?;
         }
 
         for note in &outcome.source_notes {
