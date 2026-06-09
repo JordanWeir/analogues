@@ -129,8 +129,8 @@ fn tool_capture_sources() -> Tool {
     Tool::builder()
         .name(TOOL_CAPTURE_SOURCES)
         .description(
-            "Add 1–3 citeable sources after a web search or filing discovery round. \
-             Returns assigned source ids for capture_claims.",
+            "Add 1–3 NEW citeable sources after discovery. Duplicate url or title returns the \
+             existing source id with status already_exists. Returns ids for capture_claims.",
         )
         .parameters(json!({
             "type": "object",
@@ -162,7 +162,8 @@ fn tool_capture_claims() -> Tool {
     Tool::builder()
         .name(TOOL_CAPTURE_CLAIMS)
         .description(
-            "Add 1+ extracted claims linked to prior sources. Use source_id from capture_sources responses.",
+            "Add NEW extracted claims linked to sources. Reuse source_id from the existing board \
+             or prior capture_sources responses. Duplicate claim+source pairs are skipped.",
         )
         .parameters(json!({
             "type": "object",
@@ -195,8 +196,8 @@ fn tool_capture_narrative_side() -> Tool {
     Tool::builder()
         .name(TOOL_CAPTURE_NARRATIVE_SIDE)
         .description(
-            "Capture one narrative side at a time: bull, bear, dominant, consensus, or counter_narrative. \
-             Research the angle first, then call this tool for that side only.",
+            "Update one narrative side: bull, bear, dominant, consensus, or counter_narrative. \
+             Use to revise existing text or fill a missing side — does not wipe other sides.",
         )
         .parameters(json!({
             "type": "object",
@@ -217,7 +218,7 @@ fn tool_capture_narrative_items() -> Tool {
     Tool::builder()
         .name(TOOL_CAPTURE_NARRATIVE_ITEMS)
         .description(
-            "Add agreement points or cruxes. Call separately for item_type agreement and crux.",
+            "Add NEW agreement points or cruxes. Duplicate bodies for the same item_type are skipped.",
         )
         .parameters(json!({
             "type": "object",
@@ -305,7 +306,10 @@ fn tool_finalize() -> Tool {
 mod tests {
     use super::*;
     use crate::{
-        services::workspace_store::execute_schema,
+        services::{
+            narrative_research_store::NarrativeResearchStore,
+            workspace_store::{self, execute_schema},
+        },
         workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths},
     };
     use chrono::Utc;
@@ -443,5 +447,44 @@ mod tests {
             .await
             .expect("finalize");
         assert!(matches!(finalize, ClientToolExecuteResult::Complete(_)));
+    }
+
+    #[tokio::test]
+    async fn capture_sources_dedupes_by_url() {
+        let path = test_db().await;
+        let payload = json!({
+            "sources": [{
+                "title": "Example 10-K",
+                "url": "https://example.com/10k",
+                "source_type": "Filing",
+                "why_it_matters": "Primary audited financial disclosure for baseline facts."
+            }]
+        })
+        .to_string();
+
+        execute(&path, TOOL_CAPTURE_SOURCES, &payload)
+            .await
+            .expect("first insert");
+        let second = execute(&path, TOOL_CAPTURE_SOURCES, &payload)
+            .await
+            .expect("second insert");
+        let ClientToolExecuteResult::Response(text) = second else {
+            panic!("expected response");
+        };
+        assert!(text.contains("already_exists"));
+
+        let db = NarrativeResearchStore::connect(&path).await.expect("db");
+        let count = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT COUNT(*) AS count FROM sources".to_string(),
+            ))
+            .await
+            .expect("query")
+            .expect("row")
+            .try_get::<i64>("", "count")
+            .expect("count");
+        assert_eq!(count, 1);
+        db.close().await.ok();
     }
 }

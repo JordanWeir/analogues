@@ -24,33 +24,142 @@ impl NarrativeResearchStore {
             .map_err(|err| Error::string(&format!("failed to open workspace sqlite: {err}")))
     }
 
-    pub async fn clear_narrative_state(db: &impl ConnectionTrait) -> Result<()> {
-        for sql in [
-            "DELETE FROM claims",
-            "DELETE FROM sources",
-            "DELETE FROM narrative_map_items",
-            "DELETE FROM narrative_map",
-            "DELETE FROM data_gaps WHERE gap_key LIKE 'narrative_%'",
-        ] {
-            db.execute(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-                .await
-                .map_err(|err| Error::string(&format!("clear narrative state failed: {err}")))?;
+    /// Load durable narrative state already on the board for agent context (no deletes).
+    pub async fn load_existing_context(db: &impl ConnectionTrait) -> Result<serde_json::Value> {
+        let sources = db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT id, title, url, source_type, published_at, why_it_matters, notes
+                 FROM sources ORDER BY id"
+                    .to_string(),
+            ))
+            .await
+            .map_err(|err| Error::string(&format!("load sources failed: {err}")))?;
+        let source_rows: Vec<serde_json::Value> = sources
+            .into_iter()
+            .map(|row| {
+                Ok(json!({
+                    "id": row.try_get::<i64>("", "id")?,
+                    "title": row.try_get::<String>("", "title").ok(),
+                    "url": row.try_get::<String>("", "url").ok(),
+                    "source_type": row.try_get::<String>("", "source_type").ok(),
+                    "published_at": row.try_get::<String>("", "published_at").ok(),
+                    "why_it_matters": row.try_get::<String>("", "why_it_matters").ok(),
+                    "notes": row.try_get::<String>("", "notes").ok(),
+                }))
+            })
+            .collect::<Result<_>>()?;
+
+        let claims = db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT id, claim, source_id, claim_type, side, confidence, metric, notes
+                 FROM claims ORDER BY id"
+                    .to_string(),
+            ))
+            .await
+            .map_err(|err| Error::string(&format!("load claims failed: {err}")))?;
+        let claim_rows: Vec<serde_json::Value> = claims
+            .into_iter()
+            .map(|row| {
+                Ok(json!({
+                    "id": row.try_get::<i64>("", "id")?,
+                    "claim": row.try_get::<String>("", "claim")?,
+                    "source_id": row.try_get::<i64>("", "source_id").ok(),
+                    "claim_type": row.try_get::<String>("", "claim_type").ok(),
+                    "side": row.try_get::<String>("", "side").ok(),
+                    "confidence": row.try_get::<String>("", "confidence").ok(),
+                    "metric": row.try_get::<String>("", "metric").ok(),
+                    "notes": row.try_get::<String>("", "notes").ok(),
+                }))
+            })
+            .collect::<Result<_>>()?;
+
+        let map = load_narrative_map_fields(db).await?;
+        let item_rows = db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT id, item_type, item_order, body FROM narrative_map_items ORDER BY item_type, item_order"
+                    .to_string(),
+            ))
+            .await
+            .map_err(|err| Error::string(&format!("load narrative items failed: {err}")))?;
+        let mut agreements = Vec::new();
+        let mut cruxes = Vec::new();
+        for row in item_rows {
+            let item = json!({
+                "id": row.try_get::<i64>("", "id")?,
+                "item_order": row.try_get::<i64>("", "item_order")?,
+                "body": row.try_get::<String>("", "body")?,
+            });
+            match row.try_get::<String>("", "item_type").ok().as_deref() {
+                Some("agreement") => agreements.push(item),
+                Some("crux") => cruxes.push(item),
+                _ => {}
+            }
         }
 
-        let now = Utc::now().to_rfc3339();
+        let mut sections = serde_json::Map::new();
         for section_key in ["orientation", "business_model", "why_now", "narrative_map"] {
-            execute_sql(
-                db,
-                &format!(
-                    "UPDATE sections SET status = 'pending', title = NULL, body = NULL, updated_at = '{}'
-                     WHERE section_key = '{}'",
-                    sql_quote(&now),
-                    sql_quote(section_key),
-                ),
-            )
-            .await?;
+            let row = db
+                .query_one(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    format!(
+                        "SELECT status, title, body FROM sections WHERE section_key = '{}'",
+                        sql_quote(section_key),
+                    ),
+                ))
+                .await
+                .map_err(|err| Error::string(&format!("load section {section_key} failed: {err}")))?;
+            if let Some(row) = row {
+                sections.insert(
+                    section_key.to_string(),
+                    json!({
+                        "status": row.try_get::<String>("", "status").ok(),
+                        "title": row.try_get::<String>("", "title").ok(),
+                        "body": row.try_get::<String>("", "body").ok(),
+                    }),
+                );
+            }
         }
-        Ok(())
+
+        let gaps = db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT gap_key, description, status FROM data_gaps
+                 WHERE gap_key LIKE 'narrative_%' ORDER BY gap_key"
+                    .to_string(),
+            ))
+            .await
+            .map_err(|err| Error::string(&format!("load narrative gaps failed: {err}")))?;
+        let gap_rows: Vec<serde_json::Value> = gaps
+            .into_iter()
+            .map(|row| {
+                Ok(json!({
+                    "gap_key": row.try_get::<String>("", "gap_key")?,
+                    "description": row.try_get::<String>("", "description")?,
+                    "status": row.try_get::<String>("", "status").ok(),
+                }))
+            })
+            .collect::<Result<_>>()?;
+
+        Ok(json!({
+            "sources": source_rows,
+            "claims": claim_rows,
+            "narrative_map": {
+                "dominant": map.dominant,
+                "bull": map.bull,
+                "bear": map.bear,
+                "consensus": map.consensus,
+                "counter_narrative": map.counter_narrative,
+            },
+            "narrative_map_items": {
+                "agreements": agreements,
+                "cruxes": cruxes,
+            },
+            "sections": sections,
+            "research_gaps": gap_rows,
+        }))
     }
 
     pub async fn capture_sources(
@@ -65,8 +174,17 @@ impl NarrativeResearchStore {
         }
 
         let now = Utc::now().to_rfc3339();
-        let mut inserted = Vec::new();
+        let mut captured = Vec::new();
         for source in sources {
+            if let Some(existing_id) = find_existing_source_id(db, &source).await? {
+                captured.push(json!({
+                    "id": existing_id,
+                    "title": source.title,
+                    "status": "already_exists",
+                }));
+                continue;
+            }
+
             execute_sql(
                 db,
                 &format!(
@@ -83,15 +201,16 @@ impl NarrativeResearchStore {
             )
             .await?;
             let id = last_insert_rowid(db).await?;
-            inserted.push(json!({
+            captured.push(json!({
                 "id": id,
                 "title": source.title,
+                "status": "inserted",
             }));
         }
 
         let snapshot = Self::snapshot(db).await?;
         Ok(json!({
-            "captured": inserted,
+            "captured": captured,
             "workspace": snapshot,
         }))
     }
@@ -105,6 +224,7 @@ impl NarrativeResearchStore {
         }
 
         let mut inserted = 0_i64;
+        let mut skipped = 0_i64;
         for claim in claims {
             if claim.confidence == "inference" {
                 validate_claim_relaxed(&claim)?;
@@ -112,6 +232,10 @@ impl NarrativeResearchStore {
                 validate_claim(&claim)?;
             }
             let source_id = resolve_source_id(db, &claim).await?;
+            if claim_already_exists(db, &claim.claim, source_id).await? {
+                skipped += 1;
+                continue;
+            }
             execute_sql(
                 db,
                 &format!(
@@ -135,6 +259,7 @@ impl NarrativeResearchStore {
         let snapshot = Self::snapshot(db).await?;
         Ok(json!({
             "claims_added": inserted,
+            "claims_skipped_duplicate": skipped,
             "workspace": snapshot,
         }))
     }
@@ -190,25 +315,35 @@ impl NarrativeResearchStore {
         )
         .await?;
 
-        for (offset, item) in input.items.iter().enumerate() {
+        let mut items_added = 0_usize;
+        let mut items_skipped = 0_usize;
+        let mut next_order = start_order;
+        for item in &input.items {
+            if narrative_item_exists(db, &input.item_type, item).await? {
+                items_skipped += 1;
+                continue;
+            }
+            next_order += 1;
             execute_sql(
                 db,
                 &format!(
                     "INSERT INTO narrative_map_items (item_type, item_order, body)
                      VALUES ('{}', {}, '{}')",
                     sql_quote(&input.item_type),
-                    start_order + offset as i64 + 1,
+                    next_order,
                     sql_quote(item),
                 ),
             )
             .await?;
+            items_added += 1;
         }
 
         Self::sync_narrative_map_section(db).await?;
         let snapshot = Self::snapshot(db).await?;
         Ok(json!({
             "item_type": input.item_type,
-            "items_added": input.items.len(),
+            "items_added": items_added,
+            "items_skipped_duplicate": items_skipped,
             "workspace": snapshot,
         }))
     }
@@ -472,6 +607,92 @@ async fn load_narrative_map_fields(db: &impl ConnectionTrait) -> Result<Narrativ
         consensus: row.try_get::<String>("", "consensus").ok(),
         counter_narrative: row.try_get::<String>("", "counter_narrative").ok(),
     })
+}
+
+async fn find_existing_source_id(
+    db: &impl ConnectionTrait,
+    source: &CaptureSourceInput,
+) -> Result<Option<i64>> {
+    if let Some(url) = source.url.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        let row = db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT id FROM sources WHERE TRIM(url) = '{}' ORDER BY id LIMIT 1",
+                    sql_quote(url),
+                ),
+            ))
+            .await
+            .map_err(|err| Error::string(&format!("find source by url failed: {err}")))?;
+        if let Some(row) = row {
+            return row
+                .try_get::<i64>("", "id")
+                .map(Some)
+                .map_err(|err| Error::string(&format!("parse source id: {err}")));
+        }
+    }
+
+    let row = db
+        .query_one(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            format!(
+                "SELECT id FROM sources WHERE title = '{}' ORDER BY id LIMIT 1",
+                sql_quote(source.title.trim()),
+            ),
+        ))
+        .await
+        .map_err(|err| Error::string(&format!("find source by title failed: {err}")))?;
+    row.map(|row| row.try_get::<i64>("", "id"))
+        .transpose()
+        .map_err(|err| Error::string(&format!("parse source id: {err}")))
+}
+
+async fn claim_already_exists(
+    db: &impl ConnectionTrait,
+    claim: &str,
+    source_id: Option<i64>,
+) -> Result<bool> {
+    let count = if let Some(source_id) = source_id {
+        scalar_i64(
+            db,
+            &format!(
+                "SELECT COUNT(*) AS count FROM claims
+                 WHERE claim = '{}' AND source_id = {}",
+                sql_quote(claim.trim()),
+                source_id,
+            ),
+        )
+        .await?
+    } else {
+        scalar_i64(
+            db,
+            &format!(
+                "SELECT COUNT(*) AS count FROM claims
+                 WHERE claim = '{}' AND source_id IS NULL",
+                sql_quote(claim.trim()),
+            ),
+        )
+        .await?
+    };
+    Ok(count > 0)
+}
+
+async fn narrative_item_exists(
+    db: &impl ConnectionTrait,
+    item_type: &str,
+    body: &str,
+) -> Result<bool> {
+    let count = scalar_i64(
+        db,
+        &format!(
+            "SELECT COUNT(*) AS count FROM narrative_map_items
+             WHERE item_type = '{}' AND body = '{}'",
+            sql_quote(item_type),
+            sql_quote(body.trim()),
+        ),
+    )
+    .await?;
+    Ok(count > 0)
 }
 
 async fn resolve_source_id(db: &impl ConnectionTrait, claim: &CaptureClaimInput) -> Result<Option<i64>> {
