@@ -1,7 +1,8 @@
+mod gate;
 mod writes;
 
 use super::{
-    context::LaneContext, lane::Lane, result::LaneResult, result::LaneStatus,
+    context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus,
     result::LaneWritesSummary,
 };
 use crate::services::{
@@ -13,6 +14,7 @@ use crate::services::{
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
+use std::sync::Arc;
 
 pub struct BuildCatalogLane {
     mapping_strategy: ConceptMappingStrategy,
@@ -28,6 +30,10 @@ impl BuildCatalogLane {
 impl Lane for BuildCatalogLane {
     fn name(&self) -> &'static str {
         "build_catalog"
+    }
+
+    fn gates(&self) -> Vec<Arc<dyn Gate>> {
+        gate::build_catalog_gates()
     }
 
     async fn run(&self, ctx: &mut LaneContext) -> Result<LaneResult> {
