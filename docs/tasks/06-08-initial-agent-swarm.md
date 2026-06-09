@@ -1,7 +1,7 @@
 # Build Initial Agent Swarm
 
 **Date:** 2026-06-08  
-**Status:** In progress (steps 1–6 complete)  
+**Status:** In progress (steps 1–7 complete)  
 **Scope:** Agent runtime foundation, shared tool loop, and initial worker lanes behind a linear orchestrator (v0).
 
 ## Summary
@@ -175,9 +175,10 @@ Setup a simple linear track, see where agents break down, iterate.
    - `catalog_materialized`, `core_fundamentals_traceable`, `flow_metrics_period_labeled` in `src/lanes/build_catalog/gate.rs`
    - Catalog non-empty; revenue mapping traceable to `sec_raw_facts`; flow observations do not mix quarter/ytd/annual period types without normalization
 
-7. **`fundamental_catalog_manager` agent** wired into `build_catalog` as optional strategy
+7. **`fundamental_catalog_manager` agent** wired into `build_catalog` as optional strategy ✅
    - Thin move of `concept_review` into `src/agents/fundamental_catalog_manager/`
    - Workspace-native review (no throwaway DB); depends on steps 5–6
+   - `CatalogResolutionStrategy` (`Deterministic` | `Agent`) in `build_catalog/strategy.rs`; `mapping_strategy:llm_reviewed` invokes agent via `LlmReviewedResolver`
 
 8. **`narrative_researcher` agent**
 
