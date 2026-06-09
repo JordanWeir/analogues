@@ -422,4 +422,26 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
         created_at TEXT NOT NULL,
         notes TEXT
     )",
+    "CREATE TABLE IF NOT EXISTS worker_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        worker_name TEXT NOT NULL,
+        model TEXT NOT NULL,
+        status TEXT NOT NULL,
+        agent_rounds INTEGER NOT NULL DEFAULT 1,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cache_reads INTEGER,
+        cache_writes INTEGER,
+        web_search_requests INTEGER NOT NULL DEFAULT 0,
+        client_tool_calls INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL,
+        latency_ms INTEGER,
+        finish_reason TEXT,
+        error_message TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        CHECK (json_valid(metadata_json))
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_worker_runs_name_created
+        ON worker_runs(worker_name, created_at)",
 ];

@@ -2,17 +2,20 @@ use crate::{
     services::{
         concept_catalog::ConceptCatalog,
         model_client::{extract_json_blob, ModelClient, ModelRequest, WebSearchToolConfig},
-        review_workspace::workspace_schema_hint,
+        review_workspace::{concept_review_golden_path, workspace_schema_hint},
     },
     workspace::{CanonicalMapping, SecRawFact},
 };
 use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
 
 pub const DEFAULT_REVIEW_PREAMBLE: &str = "You review SEC Company Facts concept catalogs. Return only valid JSON. Prefer precise audited mappings over broad name matches. If a concept needs calculation from components, do not mark it as a direct mapping.";
 
-pub const AGENT_REVIEW_PREAMBLE: &str = "You are a financial data analyst agent reviewing SEC Company Facts for a public company. Use workspace_sql to investigate the workspace SQLite database. Use web search to validate that each selected SEC XBRL concept and its latest reported value align with public sources. Return only valid JSON as your final answer. Prefer precise audited balance-sheet and income-statement concepts over maturity schedules, rollforwards, or flow items when a balance is required.";
+pub const AGENT_REVIEW_PREAMBLE: &str = "You are the Fundamental Catalog Manager for a public company workspace. The database has raw SEC facts and a derived concept catalog, but no canonical metric mappings yet. Your job is to link each product metric in canonical_metric_definitions to the best company-specific SEC XBRL concept(s), or declare calculated_from_components / unavailable / review_required when appropriate. Use workspace_sql following the golden path: search concept_catalog_entries first (use latest_period_end, series_usability, dominant_period_shape), then spot-check sec_raw_facts. Issue multiple independent workspace_sql calls in one turn when exploring different metrics. Use web search to validate that promoted concepts and their latest values align with public filings or investor materials when web search is available. When finished exploring, call submit_concept_review with your final decisions — do not end with a plain assistant message. If submit_concept_review returns validation errors, fix the payload and call it again. Prefer precise audited balance-sheet concepts over maturity schedules, rollforwards, or flow items when a balance is required. You have a limited step budget; after each tool round the user message will report steps remaining. On the penultimate step, submit your final answer so the last step can repair validation errors.";
 
 #[derive(Debug, Clone)]
 pub struct ConceptReviewService {
@@ -171,15 +174,80 @@ impl ConceptReviewService {
     pub fn parse_output(text: &str) -> Result<ConceptReviewOutput> {
         let json_text = extract_json_blob(text).ok_or_else(|| {
             Error::string(
-                "concept review response did not contain a JSON object; the model may have stopped after tool calls or reasoning",
+                "concept review response did not contain a JSON object; call submit_concept_review or return valid JSON",
             )
         })?;
-        serde_json::from_str(json_text).map_err(|err| {
+        let output: ConceptReviewOutput = serde_json::from_str(json_text).map_err(|err| {
             let preview: String = json_text.chars().take(240).collect();
             Error::string(&format!(
                 "concept review response was not valid ConceptReviewOutput JSON: {err} (preview: {preview})"
             ))
-        })
+        })?;
+        Self::validate_output(&output)?;
+        Ok(output)
+    }
+
+    pub fn validate_output(output: &ConceptReviewOutput) -> Result<()> {
+        if output.decisions.is_empty() {
+            return Err(Error::string(
+                "submit_concept_review requires at least one decision",
+            ));
+        }
+
+        let mut seen_keys = HashSet::new();
+        for decision in &output.decisions {
+            if !ConceptCatalog::is_known_canonical_key(&decision.canonical_key) {
+                return Err(Error::string(&format!(
+                    "unknown canonical_key: {}",
+                    decision.canonical_key
+                )));
+            }
+            if !seen_keys.insert(decision.canonical_key.clone()) {
+                return Err(Error::string(&format!(
+                    "duplicate canonical_key: {}",
+                    decision.canonical_key
+                )));
+            }
+            match decision.decision_type.as_str() {
+                "direct_mapping"
+                | "calculated_from_components"
+                | "unavailable"
+                | "review_required" => {}
+                other => {
+                    return Err(Error::string(&format!(
+                        "invalid decision_type for {}: {other}",
+                        decision.canonical_key
+                    )));
+                }
+            }
+            match decision.confidence.as_str() {
+                "high" | "medium" | "low" | "review_required" => {}
+                other => {
+                    return Err(Error::string(&format!(
+                        "invalid confidence for {}: {other}",
+                        decision.canonical_key
+                    )));
+                }
+            }
+            if decision.rationale.trim().is_empty() {
+                return Err(Error::string(&format!(
+                    "{} requires a non-empty rationale",
+                    decision.canonical_key
+                )));
+            }
+            if decision.decision_type == "direct_mapping"
+                && (decision.taxonomy.as_deref().unwrap_or("").is_empty()
+                    || decision.concept_name.as_deref().unwrap_or("").is_empty()
+                    || decision.unit.as_deref().unwrap_or("").is_empty())
+            {
+                return Err(Error::string(&format!(
+                    "{} direct_mapping requires taxonomy, concept_name, and unit",
+                    decision.canonical_key
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn promote_reviewed_mappings(
@@ -277,16 +345,15 @@ impl ConceptReviewService {
         Ok(format!(
             r#"{company_context}{schema}
 
-Workflow:
-1. Use workspace_sql to read canonical_metric_definitions and discover candidate SEC concepts yourself from concept_catalog_entries, raw_fact_metric_catalog, and sec_raw_facts.
-2. For each canonical metric, choose direct_mapping, calculated_from_components, unavailable, or review_required.
-3. For each direct_mapping, query sec_raw_facts for the latest metric_value and period_end you selected.
-4. Use web search to validate both the concept choice and whether the latest workspace value is broadly consistent with public filings, investor materials, or financial data sources.
-5. Return JSON only as the final message with this shape:
+{golden_path}
+
+Output:
+When finished, call submit_concept_review with this shape:
 {{"decisions":[{{"canonical_key":"revenue","decision_type":"direct_mapping|calculated_from_components|unavailable|review_required","taxonomy":"us-gaap","concept_name":"Revenues","unit":"USD","confidence":"high|medium|low|review_required","rationale":"...","warnings":[],"online_validation":{{"status":"aligned|misaligned|inconclusive","summary":"...","sources":["https://..."],"search_queries":["..."],"db_latest_value":17190000000.0,"db_latest_period_end":"2026-02-28","online_value_note":"..."}}}}],"supporting_metrics":[]}}
 
-Do not expect pre-selected candidates. Investigate the database yourself before deciding."#,
+Emit one decision per row in canonical_metric_definitions. Validation errors from submit_concept_review should be corrected and resubmitted."#,
             schema = workspace_schema_hint(),
+            golden_path = concept_review_golden_path(),
         ))
     }
 }
@@ -315,6 +382,26 @@ mod tests {
             raw_json: "{}".to_string(),
             fetched_at: "2026-06-07".to_string(),
         }
+    }
+
+    #[test]
+    fn validate_output_requires_direct_mapping_fields() {
+        let output = ConceptReviewOutput {
+            decisions: vec![ConceptReviewDecision {
+                canonical_key: "revenue".to_string(),
+                decision_type: "direct_mapping".to_string(),
+                taxonomy: None,
+                concept_name: None,
+                unit: None,
+                confidence: "high".to_string(),
+                rationale: "Missing concept.".to_string(),
+                warnings: Vec::new(),
+                online_validation: None,
+            }],
+            supporting_metrics: Vec::new(),
+        };
+
+        assert!(ConceptReviewService::validate_output(&output).is_err());
     }
 
     #[test]

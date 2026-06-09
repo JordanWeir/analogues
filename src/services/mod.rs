@@ -1,4 +1,3 @@
-pub mod agent_tools;
 pub mod canonical_mapping;
 pub mod concept_catalog;
 pub mod concept_review;
@@ -10,7 +9,9 @@ pub mod model_client;
 pub(crate) mod openrouter_chat;
 pub mod review_workspace;
 pub mod sec_facts_provider;
+pub mod usage_snapshot;
 pub mod workspace_financial_store;
 pub mod workspace_phases;
 pub mod workspace_query;
+pub mod worker_run_store;
 pub mod workspace_store;

@@ -53,7 +53,7 @@ async fn main() -> loco_rs::Result<()> {
     let ticker = env::var("TICKER").unwrap_or_else(|_| DEFAULT_TICKER.to_string());
     let model = env::var("MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let skip_llm = env_bool("SKIP_LLM");
-    let enable_web_search = env_bool_default("WEB_SEARCH", true);
+    let enable_web_search = env_bool_default("WEB_SEARCH", false);
     let fetched_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let (raw_facts, catalog_entries, workspace_sqlite, cleanup_workspace) = if let Ok(sqlite) =
@@ -131,13 +131,16 @@ async fn main() -> loco_rs::Result<()> {
         Ok((output, response)) => {
             println!("Model latency: {} ms", response.latency_ms);
             println!(
-                "Agent rounds: {} | finish_reason: {:?} | workspace_sql calls: {} | web searches: {} | tokens: in={:?} out={:?}",
+                "Agent rounds: {} | finish_reason: {:?} | workspace_sql calls: {} | web searches: {:?} | tokens: in={:?} out={:?} cache_read={:?} cache_write={:?} cost={:?}",
                 response.agent_rounds,
                 response.finish_reason,
                 response.client_tool_calls,
-                response.web_search_requests,
-                response.input_tokens,
-                response.output_tokens,
+                response.usage.web_search_requests,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                response.usage.cache_reads,
+                response.usage.cache_writes,
+                response.usage.cost_usd,
             );
             println!();
             print_review_results(&output, &service, &heuristic, &raw_facts);

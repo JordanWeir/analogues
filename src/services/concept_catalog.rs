@@ -68,6 +68,12 @@ impl ConceptCatalog {
         seed_canonical_mappings(raw_facts)
     }
 
+    pub fn is_known_canonical_key(canonical_key: &str) -> bool {
+        CANONICAL_METRIC_SPECS
+            .iter()
+            .any(|spec| spec.canonical_key == canonical_key)
+    }
+
     pub fn mapping_from_review_decision(
         canonical_key: &str,
         taxonomy: &str,

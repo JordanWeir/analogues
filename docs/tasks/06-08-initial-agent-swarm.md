@@ -140,17 +140,17 @@ Aligns with [06-07-decompose-init-entanglement.md](./06-07-decompose-init-entang
 - Each step should leave existing Loco tasks working.
 - `initWorkspace` can call lane modules internally before separate task commands are exposed.
 - Ship ingest-only lane before peeling catalog off; avoid a big-bang cutover.
-- Defer `openrouter-rs` SDK migration to a spike; the current OpenRouter HTTP loop is the baseline.
+- OpenRouter transport uses `openrouter-rs` for completions; server tools still need a thin custom serde shim.
 
 ## Plan
 
 Setup a simple linear track, see where agents break down, iterate.
 
-1. **Tool loop + worker_runs + shared tools**
-   - Extract `ToolLoop` from `openrouter_chat` / `model_client`
-   - Persist every invocation to `worker_runs` (name, model, rounds, tokens, cost, status)
-   - Shared tool registry: `workspace_sql`, `web_search`
-   - Spike `openrouter-rs` later; not a blocker
+1. **Tool loop + worker_runs + shared tools** ✅
+   - `ToolLoopAgent` in `src/agents/tool_loop_agent.rs`; OpenRouter transport stays in `src/services/openrouter_chat.rs`
+   - `worker_runs` table + `WorkerRunStore` persist name, model, rounds, tokens, cost, status per invocation
+   - Shared tool registry in `src/agents/tools/`: `sql_query` (`workspace_sql`), `web_search`, `fundamentals_lookup` (stub)
+   - `ModelClient` delegates to `ToolLoopAgent`; existing concept review path unchanged
 
 2. **Lane + Gate traits + LinearRunner skeleton**
 

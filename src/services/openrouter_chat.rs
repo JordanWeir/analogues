@@ -1,3 +1,4 @@
+use crate::services::usage_snapshot::UsageSnapshot;
 use async_trait::async_trait;
 use loco_rs::prelude::*;
 use openrouter_rs::{
@@ -17,11 +18,21 @@ use std::{env, sync::Arc};
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const HTTP_REFERER: &str = "research@example.local";
 const X_TITLE: &str = "analogues";
-const MAX_AGENT_ROUNDS: usize = 16;
+pub const DEFAULT_MAX_AGENT_ROUNDS: usize = 16;
+pub const CONCEPT_REVIEW_MAX_AGENT_ROUNDS: usize = 20;
 
 #[async_trait]
 pub trait ClientToolHandler: Send + Sync {
-    async fn execute(&self, tool_name: &str, arguments: &str) -> Result<String>;
+    async fn execute(&self, tool_name: &str, arguments: &str) -> Result<ClientToolExecuteResult>;
+}
+
+/// Result of executing a client-side tool in the agent loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientToolExecuteResult {
+    /// Continue the loop and return this payload to the model.
+    Response(String),
+    /// End the loop successfully; `text` becomes the completion result.
+    Complete(String),
 }
 
 /// A chat completion tool: either a client-executed function or an OpenRouter server tool.
@@ -65,15 +76,17 @@ pub struct ChatCompletionOptions {
     /// Only safe to enable when no tools are attached; see OpenRouter json+tools conflicts.
     pub json_mode: bool,
     pub client_tools: Option<Arc<dyn ClientToolHandler>>,
+    /// Maximum model turns in the client tool loop. Defaults to [`DEFAULT_MAX_AGENT_ROUNDS`].
+    pub max_agent_rounds: Option<usize>,
+    /// When set, penultimate-step nudges tell the model to call this tool (e.g. submit_concept_review).
+    pub submit_tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ChatCompletionResult {
     pub text: String,
     pub finish_reason: Option<String>,
-    pub web_search_requests: u32,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
+    pub usage: UsageSnapshot,
     pub agent_rounds: usize,
     pub client_tool_calls: u32,
 }
@@ -86,6 +99,8 @@ struct AgentChatRequest {
     tools: Option<Vec<CompletionTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
 }
@@ -126,24 +141,25 @@ pub async fn run_single_shot_completion(
         .ok_or_else(|| Error::string("OpenRouter response contained no choices"))?;
 
     let text = choice.content().unwrap_or_default().to_string();
+    let mut usage = UsageSnapshot::from_response_payload(&raw_payload);
+    if let Some(typed_usage) = &response.usage {
+        usage.merge_typed_usage(typed_usage);
+    }
+
     if text.trim().is_empty() {
         return Err(empty_completion_error(
             &choice.finish_reason().map(finish_reason_label),
             &text,
-            web_search_requests_from_payload(&raw_payload),
+            usage.web_search_requests.unwrap_or(0),
             0,
+            1,
         ));
     }
 
     Ok(ChatCompletionResult {
         text,
         finish_reason: choice.finish_reason().map(finish_reason_label),
-        web_search_requests: web_search_requests_from_payload(&raw_payload),
-        input_tokens: response.usage.as_ref().map(|usage| usage.prompt_tokens as u64),
-        output_tokens: response
-            .usage
-            .as_ref()
-            .map(|usage| usage.completion_tokens as u64),
+        usage,
         agent_rounds: 1,
         client_tool_calls: 0,
     })
@@ -160,14 +176,16 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
 
     let client = build_openrouter_client()?;
     let mut messages = options.messages;
-    let mut total_web_search_requests = 0u32;
+    let max_agent_rounds = options
+        .max_agent_rounds
+        .unwrap_or(DEFAULT_MAX_AGENT_ROUNDS);
+    let submit_tool_name = options.submit_tool_name.as_deref();
+    let mut total_usage = UsageSnapshot::default();
     let mut total_client_tool_calls = 0u32;
-    let mut last_input_tokens = None;
-    let mut last_output_tokens = None;
     let mut last_finish_reason = None;
     let mut last_text = String::new();
 
-    for round in 0..MAX_AGENT_ROUNDS {
+    for round in 0..max_agent_rounds {
         let (response, raw_payload) = send_completion(
             &client,
             &options.model,
@@ -182,11 +200,11 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
             .first()
             .ok_or_else(|| Error::string("OpenRouter response contained no choices"))?;
 
-        total_web_search_requests += web_search_requests_from_payload(&raw_payload);
-        if let Some(usage) = &response.usage {
-            last_input_tokens = Some(usage.prompt_tokens as u64);
-            last_output_tokens = Some(usage.completion_tokens as u64);
+        let mut round_usage = UsageSnapshot::from_response_payload(&raw_payload);
+        if let Some(typed_usage) = &response.usage {
+            round_usage.merge_typed_usage(typed_usage);
         }
+        total_usage.absorb(&round_usage);
         last_finish_reason = choice.finish_reason().map(finish_reason_label);
 
         if let Some(tool_calls) = choice.tool_calls().filter(|calls| !calls.is_empty()) {
@@ -197,20 +215,58 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
             ));
 
             for tool_call in tool_calls {
-                let result = handler
+                match handler
                     .execute(tool_call.name(), tool_call.arguments_json())
-                    .await?;
-                total_client_tool_calls += 1;
-                messages.push(Message::tool_response_named(
-                    tool_call.id(),
-                    tool_call.name(),
-                    result,
-                ));
+                    .await
+                {
+                    Ok(ClientToolExecuteResult::Complete(text)) => {
+                        total_client_tool_calls += 1;
+                        messages.push(Message::tool_response_named(
+                            tool_call.id(),
+                            tool_call.name(),
+                            "Submission accepted.".to_string(),
+                        ));
+                        return Ok(ChatCompletionResult {
+                            text,
+                            finish_reason: Some("stop".to_string()),
+                            usage: total_usage,
+                            agent_rounds: round + 1,
+                            client_tool_calls: total_client_tool_calls,
+                        });
+                    }
+                    Ok(ClientToolExecuteResult::Response(result)) => {
+                        total_client_tool_calls += 1;
+                        messages.push(Message::tool_response_named(
+                            tool_call.id(),
+                            tool_call.name(),
+                            result,
+                        ));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            tool = tool_call.name(),
+                            error = %err,
+                            "client tool call failed; returning error to model"
+                        );
+                        total_client_tool_calls += 1;
+                        messages.push(Message::tool_response_named(
+                            tool_call.id(),
+                            tool_call.name(),
+                            client_tool_error_payload(tool_call.name(), &err),
+                        ));
+                    }
+                }
             }
 
             if !assistant_text.trim().is_empty() {
                 last_text = assistant_text.to_string();
             }
+            append_step_budget_message(
+                &mut messages,
+                round + 1,
+                max_agent_rounds,
+                submit_tool_name,
+            );
             continue;
         }
 
@@ -219,9 +275,7 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
             return Ok(ChatCompletionResult {
                 text: last_text,
                 finish_reason: last_finish_reason,
-                web_search_requests: total_web_search_requests,
-                input_tokens: last_input_tokens,
-                output_tokens: last_output_tokens,
+                usage: total_usage,
                 agent_rounds: round + 1,
                 client_tool_calls: total_client_tool_calls,
             });
@@ -235,9 +289,69 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
     Err(empty_completion_error(
         &last_finish_reason,
         &last_text,
-        total_web_search_requests,
+        total_usage.web_search_requests.unwrap_or(0),
         total_client_tool_calls,
+        max_agent_rounds,
     ))
+}
+
+fn append_step_budget_message(
+    messages: &mut Vec<Message>,
+    steps_used: usize,
+    max_rounds: usize,
+    submit_tool_name: Option<&str>,
+) {
+    if steps_used >= max_rounds {
+        return;
+    }
+    let steps_remaining = max_rounds - steps_used;
+    let content = agent_step_budget_message(steps_used, max_rounds, steps_remaining, submit_tool_name);
+    messages.push(Message::new(
+        openrouter_rs::types::Role::User,
+        content.as_str(),
+    ));
+}
+
+pub fn agent_step_budget_message(
+    steps_used: usize,
+    max_rounds: usize,
+    steps_remaining: usize,
+    submit_tool_name: Option<&str>,
+) -> String {
+    let submit_tool = submit_tool_name.unwrap_or("submit_concept_review");
+    match steps_remaining {
+        0 => format!(
+            "[Agent budget] Step {steps_used}/{max_rounds} complete. No steps remaining."
+        ),
+        1 => {
+            if submit_tool_name.is_some() {
+                format!(
+                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 1 (final turn). \
+                     Call {submit_tool} now with corrected decisions if your previous submission failed validation."
+                )
+            } else {
+                format!(
+                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 1 (final turn)."
+                )
+            }
+        }
+        2 => {
+            if submit_tool_name.is_some() {
+                format!(
+                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 2. \
+                     This is your penultimate turn — call {submit_tool} now with your final decisions. \
+                     Reserve the last turn to fix validation errors and resubmit if needed."
+                )
+            } else {
+                format!(
+                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 2 (penultimate turn)."
+                )
+            }
+        }
+        _ => format!(
+            "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: {steps_remaining}."
+        ),
+    }
 }
 
 pub async fn run_simple_chat_completion(
@@ -251,6 +365,8 @@ pub async fn run_simple_chat_completion(
         tools: None,
         json_mode,
         client_tools: None,
+        max_agent_rounds: None,
+        submit_tool_name: None,
     })
     .await
 }
@@ -270,6 +386,9 @@ async fn send_completion(
             tool_choice: tools
                 .filter(|items| !items.is_empty())
                 .map(|_| ToolChoice::auto()),
+            parallel_tool_calls: tools
+                .filter(|items| !items.is_empty())
+                .map(|_| true),
             response_format: (json_mode && tools.is_none())
                 .then_some(ResponseFormat::json_object()),
         };
@@ -297,6 +416,7 @@ async fn send_completion(
         builder.model(model);
         builder.messages(messages.to_vec());
         builder.tool_choice_auto();
+        builder.parallel_tool_calls(true);
         for tool in function_tools {
             builder.tool(tool);
         }
@@ -376,13 +496,6 @@ fn function_tools(tools: &[CompletionTool]) -> Vec<Tool> {
         .collect()
 }
 
-fn web_search_requests_from_payload(payload: &Value) -> u32 {
-    payload
-        .pointer("/usage/server_tool_use/web_search_requests")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32
-}
-
 fn finish_reason_label(reason: &FinishReason) -> String {
     match reason {
         FinishReason::ToolCalls => "tool_calls".to_string(),
@@ -447,11 +560,21 @@ pub fn extract_json_object(text: &str) -> Option<&str> {
     Some(&trimmed[start..=end])
 }
 
+fn client_tool_error_payload(tool_name: &str, err: &Error) -> String {
+    serde_json::json!({
+        "error": true,
+        "tool": tool_name,
+        "message": err.to_string(),
+    })
+    .to_string()
+}
+
 fn empty_completion_error(
     finish_reason: &Option<String>,
     text: &str,
     web_search_requests: u32,
     client_tool_calls: u32,
+    max_agent_rounds: usize,
 ) -> Error {
     let preview = if text.trim().is_empty() {
         "<empty>".to_string()
@@ -459,7 +582,7 @@ fn empty_completion_error(
         text.chars().take(240).collect()
     };
     Error::string(&format!(
-        "OpenRouter returned no assistant text (finish_reason={finish_reason:?}, web_search_requests={web_search_requests}, client_tool_calls={client_tool_calls}, preview={preview})"
+        "OpenRouter returned no assistant text after {max_agent_rounds} agent steps (finish_reason={finish_reason:?}, web_search_requests={web_search_requests}, client_tool_calls={client_tool_calls}, preview={preview})"
     ))
 }
 
@@ -515,6 +638,57 @@ mod tests {
         let tool = web_search_server_tool(json!({}));
         let value = serde_json::to_value(tool).expect("tool should serialize");
         assert_eq!(value, json!({"type": "openrouter:web_search"}));
+    }
+
+    #[test]
+    fn agent_step_budget_message_reports_remaining_steps() {
+        let message = agent_step_budget_message(5, 20, 15, Some("submit_concept_review"));
+        assert!(message.contains("Step 5/20"));
+        assert!(message.contains("Steps remaining: 15"));
+    }
+
+    #[test]
+    fn agent_step_budget_message_nudges_submit_on_penultimate_step() {
+        let message = agent_step_budget_message(18, 20, 2, Some("submit_concept_review"));
+        assert!(message.contains("Steps remaining: 2"));
+        assert!(message.contains("penultimate"));
+        assert!(message.contains("submit_concept_review"));
+    }
+
+    #[test]
+    fn agent_step_budget_message_nudges_repair_on_final_step() {
+        let message = agent_step_budget_message(19, 20, 1, Some("submit_concept_review"));
+        assert!(message.contains("final turn"));
+        assert!(message.contains("validation"));
+    }
+
+    #[test]
+    fn client_tool_error_payload_serializes_message() {
+        let payload = client_tool_error_payload(
+            "workspace_sql",
+            &Error::string("workspace_sql query cannot be empty"),
+        );
+        let value: Value = serde_json::from_str(&payload).expect("payload should be JSON");
+        assert_eq!(value["error"], true);
+        assert_eq!(value["tool"], "workspace_sql");
+        assert!(value["message"].as_str().unwrap().contains("empty"));
+    }
+
+    #[test]
+    fn agent_chat_request_enables_parallel_tool_calls_when_tools_present() {
+        let request = AgentChatRequest {
+            model: "test/model".to_string(),
+            messages: vec![Message::new(
+                openrouter_rs::types::Role::User,
+                "hello",
+            )],
+            tools: Some(vec![web_search_server_tool(serde_json::json!({}))]),
+            tool_choice: Some(ToolChoice::auto()),
+            parallel_tool_calls: Some(true),
+            response_format: None,
+        };
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(value["parallel_tool_calls"], true);
     }
 
     #[test]
