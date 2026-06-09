@@ -1,3 +1,4 @@
+pub mod financial_model_explorer;
 pub mod tool_loop_agent;
 pub mod tools;
 

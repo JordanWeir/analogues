@@ -1,14 +1,28 @@
+pub mod analysis_draft_run;
+pub mod analysis_finalize;
 pub mod concept_review_submit;
+pub mod crux_triage_submit;
+pub mod financial_explorer_handler;
 pub mod fundamentals_lookup;
+pub mod mechanics_complete;
 pub mod sql_query;
 pub mod web_search;
 
 use crate::services::openrouter_chat::{
     ClientToolExecuteResult, ClientToolHandler, CompletionTool,
 };
+use analysis_draft_run::TOOL_NAME as ANALYSIS_DRAFT_TOOL_NAME;
+use analysis_finalize::TOOL_NAME as ANALYSIS_FINALIZE_TOOL_NAME;
 use concept_review_submit::TOOL_NAME as CONCEPT_REVIEW_SUBMIT_TOOL_NAME;
+use crux_triage_submit::TOOL_NAME as CRUX_TRIAGE_SUBMIT_TOOL_NAME;
 use fundamentals_lookup::TOOL_NAME as FUNDAMENTALS_LOOKUP_TOOL_NAME;
+use mechanics_complete::TOOL_NAME as MECHANICS_COMPLETE_TOOL_NAME;
 use sql_query::TOOL_NAME as SQL_QUERY_TOOL_NAME;
+
+pub use analysis_draft_run::TOOL_NAME as ANALYSIS_DRAFT_TOOL;
+pub use analysis_finalize::TOOL_NAME as ANALYSIS_FINALIZE_TOOL;
+pub use crux_triage_submit::TOOL_NAME as CRUX_TRIAGE_SUBMIT_TOOL;
+pub use mechanics_complete::TOOL_NAME as MECHANICS_COMPLETE_TOOL;
 use std::{path::PathBuf, sync::Arc};
 pub use web_search::WebSearchConfig;
 
@@ -18,6 +32,10 @@ pub enum SharedTool {
     WebSearch(WebSearchConfig),
     FundamentalsLookup,
     ConceptReviewSubmit,
+    CruxTriageSubmit,
+    AnalysisDraft,
+    AnalysisFinalize,
+    MechanicsComplete,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -72,11 +90,59 @@ impl ToolRegistry {
         self
     }
 
+    pub fn with_crux_triage_submit(mut self) -> Self {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::CruxTriageSubmit))
+        {
+            self.tools.push(SharedTool::CruxTriageSubmit);
+        }
+        self
+    }
+
+    pub fn with_analysis_draft(mut self) -> Self {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::AnalysisDraft))
+        {
+            self.tools.push(SharedTool::AnalysisDraft);
+        }
+        self
+    }
+
+    pub fn with_analysis_finalize(mut self) -> Self {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::AnalysisFinalize))
+        {
+            self.tools.push(SharedTool::AnalysisFinalize);
+        }
+        self
+    }
+
+    pub fn with_mechanics_complete(mut self) -> Self {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::MechanicsComplete))
+        {
+            self.tools.push(SharedTool::MechanicsComplete);
+        }
+        self
+    }
+
     pub fn needs_client_loop(&self) -> bool {
         self.tools.iter().any(|tool| match tool {
             SharedTool::SqlQuery
             | SharedTool::FundamentalsLookup
-            | SharedTool::ConceptReviewSubmit => true,
+            | SharedTool::ConceptReviewSubmit
+            | SharedTool::CruxTriageSubmit
+            | SharedTool::AnalysisDraft
+            | SharedTool::AnalysisFinalize
+            | SharedTool::MechanicsComplete => true,
             SharedTool::WebSearch(_) => false,
         })
     }
@@ -92,6 +158,18 @@ impl ToolRegistry {
                 }
                 SharedTool::ConceptReviewSubmit => {
                     CompletionTool::Function(concept_review_submit::openrouter_tool())
+                }
+                SharedTool::CruxTriageSubmit => {
+                    CompletionTool::Function(crux_triage_submit::openrouter_tool())
+                }
+                SharedTool::AnalysisDraft => {
+                    CompletionTool::Function(analysis_draft_run::openrouter_tool())
+                }
+                SharedTool::AnalysisFinalize => {
+                    CompletionTool::Function(analysis_finalize::openrouter_tool())
+                }
+                SharedTool::MechanicsComplete => {
+                    CompletionTool::Function(mechanics_complete::openrouter_tool())
                 }
             })
             .collect()
@@ -211,5 +289,31 @@ mod tests {
             serde_json::to_value(&registry.completion_tools()[0]).expect("serialize"),
             json!({"type": "openrouter:web_search"})
         );
+    }
+
+    #[test]
+    fn financial_explorer_registry_includes_mode_tools() {
+        let registry = ToolRegistry::new()
+            .with_sql_query(PathBuf::from("/tmp/test.sqlite"))
+            .with_analysis_draft()
+            .with_analysis_finalize()
+            .with_mechanics_complete();
+
+        let names: Vec<_> = registry
+            .completion_tools()
+            .iter()
+            .map(|tool| {
+                serde_json::to_value(tool).expect("serialize")["function"]["name"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec![
+            "workspace_sql",
+            "run_analysis_draft",
+            "finalize_analysis",
+            "submit_mechanics_experiments"
+        ]);
     }
 }
