@@ -1,9 +1,11 @@
+mod gate;
 mod writes;
 
-use super::{context::LaneContext, lane::Lane, result::LaneResult, result::LaneStatus, result::LaneWritesSummary};
+use super::{context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus, result::LaneWritesSummary};
 use crate::services::workspace_ingest::run_workspace_ingest;
 use async_trait::async_trait;
 use loco_rs::prelude::*;
+use std::sync::Arc;
 
 pub struct InitWorkspaceLane {
     fetch_financials: bool,
@@ -19,6 +21,10 @@ impl InitWorkspaceLane {
 impl Lane for InitWorkspaceLane {
     fn name(&self) -> &'static str {
         "init_workspace"
+    }
+
+    fn gates(&self) -> Vec<Arc<dyn Gate>> {
+        gate::init_workspace_gates()
     }
 
     async fn run(&self, ctx: &mut LaneContext) -> Result<LaneResult> {
