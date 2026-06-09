@@ -152,7 +152,10 @@ Setup a simple linear track, see where agents break down, iterate.
    - Shared tool registry in `src/agents/tools/`: `sql_query` (`workspace_sql`), `web_search`, `fundamentals_lookup` (stub)
    - `ModelClient` delegates to `ToolLoopAgent`; existing concept review path unchanged
 
-2. **Lane + Gate traits + LinearRunner skeleton**
+2. **Lane + Gate traits + LinearRunner skeleton** ✅
+   - `src/lanes/`: `LaneContext`, `LaneResult`, `Lane` + `Gate` traits, `LinearRunner`
+   - Gate statuses: pass / warn / reject / quarantine; runner stops on reject/quarantine or failed lane
+   - `quality_gate_results` table + `QualityGateStore::persist_batch` after each lane
 
 3. **`init_workspace` lane (ingest only)** — existing `initWorkspace` task delegates here
    - Phase 1 only: fetch + persist raw facts, stock info, gaps

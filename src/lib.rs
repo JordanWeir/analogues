@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod lanes;
 pub mod app;
 pub mod controllers;
 pub mod data;

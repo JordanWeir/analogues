@@ -444,4 +444,14 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_worker_runs_name_created
         ON worker_runs(worker_name, created_at)",
+    "CREATE TABLE IF NOT EXISTS quality_gate_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lane_name TEXT NOT NULL,
+        gate_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        created_at TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_quality_gate_results_lane_created
+        ON quality_gate_results(lane_name, created_at)",
 ];
