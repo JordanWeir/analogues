@@ -1,19 +1,30 @@
-use crate::services::{
-    canonical_mapping::{resolve_canonical_mappings, CanonicalResolutionContext},
-    concept_catalog::ConceptCatalog,
-    fundamental_deriver::FundamentalDeriver,
-    market_quote_provider::YahooChartMarketDataAdapter,
-    sec_facts_provider::SecFactsProvider,
-    workspace_financial_store::{IngestPersist, SnapshotPersist, WorkspaceFinancialStore},
-    workspace_store::{
-        normalize_ticker, validate_date, WorkspaceStore, DEFAULT_REPORT_ROOT,
+use crate::{
+    lanes::{
+        context::{LaneConfig, LaneContext},
+        init_workspace::InitWorkspaceLane,
+        runner::LinearRunner,
     },
+    services::{
+        canonical_mapping::{resolve_canonical_mappings, CanonicalResolutionContext},
+        concept_catalog::ConceptCatalog,
+        fundamental_deriver::FundamentalDeriver,
+        market_quote_provider::YahooChartMarketDataAdapter,
+        sec_facts_provider::SecFactsProvider,
+        workspace_financial_store::{IngestPersist, SnapshotPersist, WorkspaceFinancialStore},
+        workspace_ingest::{close_data_gap, record_financial_fetch_gap, record_financial_fetch_status},
+        workspace_phases::{
+            derive_starter_fundamentals_on_workspace, materialize_catalog_on_workspace,
+            resolve_canonical_mappings_on_workspace,
+        },
+        workspace_store::{
+            normalize_ticker, validate_date, WorkspaceStore, DEFAULT_REPORT_ROOT,
+        },
+    },
+    workspace::{SecIngestionResult, WorkspacePaths},
 };
-use crate::workspace::{SecIngestionResult, WorkspacePaths};
 use chrono::Utc;
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
-use std::{path::Path, path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 pub use crate::{
     services::{
@@ -99,90 +110,68 @@ pub async fn initialize_workspace(request: &InitWorkspaceRequest) -> Result<Work
     let normalized_request = request.normalized()?;
     let store = WorkspaceStore;
     let handle = store.create_workspace(&normalized_request).await?;
-    let paths = handle.paths.clone();
+    let mut ctx = LaneContext::new(handle, LaneConfig::new(&normalized_request.ticker));
+    let runner = LinearRunner::new(vec![Arc::new(InitWorkspaceLane::new(
+        normalized_request.fetch_financials,
+    ))]);
 
-    let ingestion_result =
-        fetch_and_seed_financials(handle.connection(), &paths.sqlite_path, &normalized_request)
-            .await;
-    let close_result = handle.close().await;
+    let report = runner.run(&mut ctx).await?;
+    if report.stopped_early {
+        let reason = report
+            .stop_reason
+            .unwrap_or_else(|| "init_workspace lane stopped early".to_string());
+        let _ = ctx.workspace.close().await;
+        return Err(Error::string(&reason));
+    }
 
-    ingestion_result?;
-    close_result?;
+    if normalized_request.fetch_financials {
+        if let Some(strategy) = normalized_request.mapping_strategy {
+            run_catalog_pipeline(&mut ctx, strategy).await?;
+        } else {
+            record_financial_fetch_status(
+                ctx.workspace.connection(),
+                "ingested",
+                Some("canonical mapping and starter fundamentals deferred"),
+            )
+            .await?;
+        }
+    }
+
+    let paths = ctx.workspace.paths.clone();
+    ctx.workspace.close().await?;
 
     Ok(paths)
 }
 
-async fn fetch_and_seed_financials(
-    db: &sea_orm::DatabaseConnection,
-    sqlite_path: &Path,
-    request: &InitWorkspaceRequest,
+async fn run_catalog_pipeline(
+    ctx: &mut LaneContext,
+    strategy: ConceptMappingStrategy,
 ) -> Result<()> {
-    if !request.fetch_financials {
-        record_financial_fetch_gap(
-            db,
-            "skipped",
-            Some("financial fetch was skipped by request"),
-            &["starter financial fetch skipped".to_string()],
-        )
-        .await?;
-        return Ok(());
-    }
+    materialize_catalog_on_workspace(&ctx.workspace).await?;
+    resolve_canonical_mappings_on_workspace(&ctx.workspace, strategy).await?;
+    let run = derive_starter_fundamentals_on_workspace(&ctx.workspace).await?;
 
-    let llm_review = matches!(
-        request.mapping_strategy,
-        Some(ConceptMappingStrategy::LlmReviewed)
-    );
-    let fetch_strategy = if llm_review {
+    let status = if run.gaps.is_empty() {
+        "succeeded"
+    } else {
+        "partial"
+    };
+    let error = if run.gaps.is_empty() {
         None
     } else {
-        request.mapping_strategy
+        Some(format!("missing fields: {}", run.gaps.join(", ")))
     };
 
-    match fetch_financial_run_with_strategy(&request.ticker, fetch_strategy).await {
-        Ok(mut run) => {
-            if llm_review {
-                persist_sec_ingestion(db, &run).await?;
-                resolve_sec_canonical_layer(
-                    &mut run,
-                    &request.ticker,
-                    ConceptMappingStrategy::LlmReviewed,
-                    Some(sqlite_path.to_path_buf()),
-                )
-                .await;
-                run.compute_derived_metrics();
-                run.mark_gaps();
-                persist_financial_run(db, &run).await?;
-            } else if request.mapping_strategy.is_none() {
-                persist_sec_ingestion(db, &run).await?;
-            } else {
-                persist_financial_run(db, &run).await?;
-            }
-
-            let status = if request.mapping_strategy.is_none() {
-                "ingested"
-            } else if run.gaps.is_empty() {
-                "succeeded"
-            } else {
-                "partial"
-            };
-            let error = if request.mapping_strategy.is_none() {
-                Some("canonical mapping and starter fundamentals deferred".to_string())
-            } else if run.gaps.is_empty() {
-                None
-            } else {
-                Some(format!("missing fields: {}", run.gaps.join(", ")))
-            };
-            record_financial_fetch_status(db, status, error.as_deref()).await?;
-            if request.mapping_strategy.is_some() && run.gaps.is_empty() {
-                close_data_gap(db, "starter_financials").await?;
-            } else if request.mapping_strategy.is_some() {
-                record_financial_fetch_gap(db, status, error.as_deref(), &run.gaps).await?;
-            }
-        }
-        Err(err) => {
-            let message = err.to_string();
-            record_financial_fetch_gap(db, "failed", Some(&message), &[message.clone()]).await?;
-        }
+    if run.gaps.is_empty() {
+        close_data_gap(ctx.workspace.connection(), "starter_financials").await?;
+    } else {
+        record_financial_fetch_gap(
+            ctx.workspace.connection(),
+            status,
+            error.as_deref(),
+            &run.gaps,
+        )
+        .await?;
     }
 
     Ok(())
@@ -334,84 +323,6 @@ async fn persist_financial_run(db: &sea_orm::DatabaseConnection, run: &Financial
     WorkspaceFinancialStore::new(db)
         .persist_snapshot(&input)
         .await
-}
-
-async fn record_financial_fetch_gap(
-    db: &sea_orm::DatabaseConnection,
-    status: &str,
-    error: Option<&str>,
-    gaps: &[String],
-) -> Result<()> {
-    record_financial_fetch_status(db, status, error).await?;
-    let now = Utc::now().to_rfc3339();
-    let description = if gaps.is_empty() {
-        "Starter financial fetch did not return all required fields.".to_string()
-    } else {
-        format!("Starter financial fetch gaps: {}", gaps.join(", "))
-    };
-    execute_sql(
-        db,
-        &format!(
-            "INSERT INTO data_gaps (gap_key, description, status, created_at)
-             VALUES ('starter_financials', '{}', 'open', '{}')
-             ON CONFLICT(gap_key) DO UPDATE SET
-                description = excluded.description,
-                status = 'open'",
-            sql_quote(&description),
-            sql_quote(&now),
-        ),
-    )
-    .await
-}
-
-async fn record_financial_fetch_status(
-    db: &sea_orm::DatabaseConnection,
-    status: &str,
-    error: Option<&str>,
-) -> Result<()> {
-    execute_sql(
-        db,
-        &format!(
-            "UPDATE run_metadata
-             SET financial_fetch_status = '{}', financial_fetch_error = {}
-             WHERE id = 1",
-            sql_quote(status),
-            sql_value(error),
-        ),
-    )
-    .await
-}
-
-async fn close_data_gap(db: &sea_orm::DatabaseConnection, gap_key: &str) -> Result<()> {
-    execute_sql(
-        db,
-        &format!(
-            "UPDATE data_gaps SET status = 'closed' WHERE gap_key = '{}'",
-            sql_quote(gap_key),
-        ),
-    )
-    .await
-}
-async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
-
-    Ok(())
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn sql_value(value: Option<&str>) -> String {
-    value.map_or_else(
-        || "NULL".to_string(),
-        |value| format!("'{}'", sql_quote(value)),
-    )
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ pub mod review_workspace;
 pub mod sec_facts_provider;
 pub mod usage_snapshot;
 pub mod workspace_financial_store;
+pub mod workspace_ingest;
 pub mod workspace_phases;
 pub mod workspace_query;
 pub mod worker_run_store;

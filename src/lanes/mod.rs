@@ -1,5 +1,6 @@
 pub mod context;
 pub mod gate;
+pub mod init_workspace;
 pub mod lane;
 pub mod result;
 pub mod runner;

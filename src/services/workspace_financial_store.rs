@@ -29,6 +29,15 @@ pub struct FundamentalInsert<'a> {
     pub source_note: Option<String>,
 }
 
+/// Phase 1 persistence: raw SEC facts and stock metadata only.
+pub struct RawIngestPersist<'a> {
+    pub fetched_at: &'a str,
+    pub company_name: Option<&'a str>,
+    pub currency: Option<&'a str>,
+    pub source_note: &'a str,
+    pub raw_sec_facts: &'a [SecRawFact],
+}
+
 /// Phase 1–2 persistence: raw SEC facts and concept catalog only.
 pub struct IngestPersist<'a> {
     pub fetched_at: &'a str,
@@ -138,6 +147,48 @@ pub async fn materialize_standalone_ingest_workspace(
 impl<'a> WorkspaceFinancialStore<'a> {
     pub fn new(db: &'a DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    pub async fn persist_raw_ingest(&self, input: &RawIngestPersist<'_>) -> Result<()> {
+        let txn = self.db.begin().await.map_err(|err| {
+            Error::string(&format!("failed to begin raw ingest transaction: {err}"))
+        })?;
+        self.persist_raw_ingest_in(&txn, input).await?;
+        txn.commit().await.map_err(|err| {
+            Error::string(&format!("failed to commit raw ingest transaction: {err}"))
+        })?;
+        Ok(())
+    }
+
+    pub async fn persist_raw_ingest_in(
+        &self,
+        db: &impl ConnectionTrait,
+        input: &RawIngestPersist<'_>,
+    ) -> Result<()> {
+        execute_sql(
+            db,
+            &format!(
+                "UPDATE stock_info
+                 SET company_name = {}, currency = {}, source_note = {}, updated_at = '{}'
+                 WHERE id = 1",
+                sql_value(input.company_name),
+                sql_value(input.currency),
+                sql_value(Some(input.source_note)),
+                sql_quote(input.fetched_at),
+            ),
+        )
+        .await?;
+
+        Self::insert_raw_sec_facts(db, input.raw_sec_facts).await?;
+        Ok(())
+    }
+
+    pub async fn persist_catalog_entries(
+        &self,
+        entries: &[ConceptCatalogEntry],
+        updated_at: &str,
+    ) -> Result<()> {
+        Self::insert_concept_catalog_entries(self.db, entries, updated_at).await
     }
 
     pub async fn persist_ingestion(&self, input: &IngestPersist<'_>) -> Result<()> {
