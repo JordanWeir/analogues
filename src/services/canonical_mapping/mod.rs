@@ -2,6 +2,7 @@ mod candidate_scoring;
 mod llm_reviewed;
 
 use crate::{
+    agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig,
     services::concept_review::ConceptReviewDecisionRecord,
     workspace::{CanonicalMapping, ConceptCatalogEntry, SecRawFact},
 };
@@ -57,10 +58,17 @@ pub trait CanonicalMappingResolver {
 pub async fn resolve_canonical_mappings(
     strategy: ConceptMappingStrategy,
     ctx: &CanonicalResolutionContext<'_>,
+    agent_config: Option<FundamentalCatalogManagerConfig>,
 ) -> CanonicalResolutionResult {
     match strategy {
         ConceptMappingStrategy::CandidateScoring => CandidateScoringResolver.resolve(ctx).await,
-        ConceptMappingStrategy::LlmReviewed => LlmReviewedResolver::default().resolve(ctx).await,
+        ConceptMappingStrategy::LlmReviewed => {
+            let resolver = match agent_config {
+                Some(config) => LlmReviewedResolver { agent_config: config },
+                None => LlmReviewedResolver::default(),
+            };
+            resolver.resolve(ctx).await
+        }
     }
 }
 

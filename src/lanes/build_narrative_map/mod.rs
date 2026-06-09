@@ -8,7 +8,7 @@ use super::{
     context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus,
     result::LaneWritesSummary,
 };
-use crate::services::model_client::OpenRouterModelClient;
+use crate::agents::narrative_researcher::NarrativeResearcherAgent;
 use async_trait::async_trait;
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
@@ -59,11 +59,9 @@ impl Lane for BuildNarrativeMapLane {
         }
 
         match &self.strategy {
-            NarrativeMapStrategy::Agent(service) => {
-                let mut service = service.clone();
-                service.workspace_sqlite = ctx.workspace.paths.sqlite_path.clone();
-                service
-                    .run_on_workspace(&OpenRouterModelClient, &ctx.workspace)
+            NarrativeMapStrategy::Agent(config) => {
+                NarrativeResearcherAgent::new(config.clone())
+                    .run_on_workspace(&ctx.workspace)
                     .await?;
             }
             #[cfg(test)]

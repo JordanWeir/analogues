@@ -94,6 +94,29 @@ Phase 5 — Submit:
 Call submit_concept_review with decisions and supporting_metrics. Fix validation errors and resubmit if needed."#
 }
 
+pub const PREAMBLE: &str = "You are the Fundamental Catalog Manager for a public company workspace. The database has raw SEC facts and a derived concept catalog, but no canonical metric mappings yet. Your job is to link each product metric in canonical_metric_definitions to the best company-specific SEC XBRL concept(s), or declare calculated_from_components / unavailable / review_required when appropriate. Use workspace_sql following the golden path: search concept_catalog_entries first (use latest_period_end, series_usability, dominant_period_shape), then spot-check sec_raw_facts. Issue multiple independent workspace_sql calls in one turn when exploring different metrics. Use web search to validate that promoted concepts and their latest values align with public filings or investor materials when web search is available. When finished exploring, call submit_concept_review with your final decisions — do not end with a plain assistant message. If submit_concept_review returns validation errors, fix the payload and call it again. Prefer precise audited balance-sheet concepts over maturity schedules, rollforwards, or flow items when a balance is required. You have a limited step budget; after each tool round the user message will report steps remaining. On the penultimate step, submit your final answer so the last step can repair validation errors.";
+
+pub fn build_user_prompt(ticker: &str, prompt_suffix: &str) -> String {
+    let company_context = format!("Company: {ticker}\n\n");
+    let mut prompt = format!(
+        r#"{company_context}{schema}
+
+{golden_path}
+
+Output:
+When finished, call submit_concept_review with this shape:
+{{"decisions":[{{"canonical_key":"revenue","decision_type":"direct_mapping|calculated_from_components|unavailable|review_required","taxonomy":"us-gaap","concept_name":"Revenues","unit":"USD","confidence":"high|medium|low|review_required","rationale":"...","warnings":[],"online_validation":{{"status":"aligned|misaligned|inconclusive","summary":"...","sources":["https://..."],"search_queries":["..."],"db_latest_value":17190000000.0,"db_latest_period_end":"2026-02-28","online_value_note":"..."}}}}],"supporting_metrics":[]}}
+
+Emit one decision per row in canonical_metric_definitions. Validation errors from submit_concept_review should be corrected and resubmitted."#,
+        schema = workspace_schema_hint(),
+        golden_path = concept_review_golden_path(),
+    );
+    if !prompt_suffix.is_empty() {
+        prompt.push_str(prompt_suffix);
+    }
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +137,13 @@ mod tests {
         assert!(path.contains("canonical_metric_definitions"));
         assert!(path.contains("latest_period_end DESC"));
         assert!(path.contains("calculated_from_components"));
+    }
+
+    #[test]
+    fn user_prompt_includes_company_and_schema() {
+        let prompt = build_user_prompt("MSFT", "");
+        assert!(prompt.contains("Company: MSFT"));
+        assert!(prompt.contains("canonical_metric_definitions"));
+        assert!(prompt.contains("submit_concept_review"));
     }
 }

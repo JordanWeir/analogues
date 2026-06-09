@@ -1,6 +1,6 @@
 use crate::agents::{
     tool_loop_agent::{ToolLoopAgent, ToolLoopRequest},
-    tools::{ToolRegistry, WebSearchConfig},
+    tools::ToolRegistry,
 };
 use crate::services::usage_snapshot::UsageSnapshot;
 use async_trait::async_trait;
@@ -8,7 +8,7 @@ use loco_rs::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
-pub type WebSearchToolConfig = WebSearchConfig;
+pub type WebSearchToolConfig = crate::agents::tools::WebSearchConfig;
 
 #[derive(Clone)]
 pub struct ModelRequest {
@@ -73,28 +73,12 @@ impl ModelClient for OpenRouterModelClient {
         if let Some(web_search) = &request.web_search {
             tools = tools.with_web_search(web_search.clone());
         }
-        if request
-            .metadata
-            .get("worker_lane")
-            .is_some_and(|lane| lane == "concept_catalog_review")
-        {
-            tools = tools.with_concept_review_submit();
-        }
-        if request
-            .metadata
-            .get("worker_lane")
-            .is_some_and(|lane| lane == "narrative_research")
-        {
-            tools = tools.with_narrative_research();
-        }
 
         let worker_name = request
             .metadata
             .get("worker_lane")
             .cloned()
             .unwrap_or_else(|| "model_completion".to_string());
-        let is_concept_review = worker_name == "concept_catalog_review";
-        let is_narrative_research = worker_name == "narrative_research";
 
         let response = ToolLoopAgent::default()
             .run(ToolLoopRequest {
@@ -107,20 +91,8 @@ impl ModelClient for OpenRouterModelClient {
                 metadata: request.metadata.clone(),
                 workspace_sqlite: request.workspace_sqlite.clone(),
                 client_tools: request.client_tools.clone(),
-                max_agent_rounds: if is_concept_review {
-                    Some(crate::services::openrouter_chat::CONCEPT_REVIEW_MAX_AGENT_ROUNDS)
-                } else if is_narrative_research {
-                    Some(crate::services::openrouter_chat::NARRATIVE_RESEARCH_MAX_AGENT_ROUNDS)
-                } else {
-                    None
-                },
-                submit_tool_name: if is_concept_review {
-                    Some("submit_concept_review".to_string())
-                } else if is_narrative_research {
-                    Some("finalize_narrative_research".to_string())
-                } else {
-                    None
-                },
+                max_agent_rounds: None,
+                submit_tool_name: None,
             })
             .await?;
 

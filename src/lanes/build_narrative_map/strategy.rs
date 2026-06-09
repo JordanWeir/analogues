@@ -1,14 +1,14 @@
-use crate::services::narrative_research::NarrativeResearchService;
+use crate::agents::narrative_researcher::NarrativeResearcherConfig;
 
 #[derive(Debug, Clone)]
 pub enum NarrativeMapStrategy {
-    Agent(NarrativeResearchService),
+    Agent(NarrativeResearcherConfig),
     #[cfg(test)]
     Fixture,
 }
 
 impl NarrativeMapStrategy {
-    pub fn agent_defaults(workspace_sqlite: std::path::PathBuf) -> Self {
-        Self::Agent(NarrativeResearchService::agent_defaults(workspace_sqlite))
+    pub fn agent_defaults(_workspace_sqlite: std::path::PathBuf) -> Self {
+        Self::Agent(NarrativeResearcherConfig::default())
     }
 }

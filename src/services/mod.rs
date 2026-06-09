@@ -10,7 +10,6 @@ pub mod narrative_research;
 pub mod narrative_research_store;
 pub(crate) mod openrouter_chat;
 pub mod quality_gate_store;
-pub mod review_workspace;
 pub mod sec_facts_provider;
 pub mod usage_snapshot;
 pub mod worker_run_store;
