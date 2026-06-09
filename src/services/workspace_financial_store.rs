@@ -997,6 +997,7 @@ mod tests {
                 mapping_strategy: Some(
                     crate::services::canonical_mapping::ConceptMappingStrategy::CandidateScoring,
                 ),
+                build_narrative_map: false,
             },
             &WorkspacePaths {
                 run_slug: "MSFT-2026-06-07-1".to_string(),

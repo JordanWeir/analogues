@@ -304,6 +304,7 @@ mod tests {
                 base_dir: dir.parent().unwrap_or(dir).to_path_buf(),
                 fetch_financials: false,
                 mapping_strategy: None,
+                build_narrative_map: false,
             },
             &paths,
         )

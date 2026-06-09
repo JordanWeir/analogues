@@ -1,4 +1,5 @@
 pub mod build_catalog;
+pub mod build_narrative_map;
 pub mod context;
 pub mod gate;
 pub mod init_pipeline;

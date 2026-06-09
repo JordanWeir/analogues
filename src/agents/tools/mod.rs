@@ -1,5 +1,6 @@
 pub mod concept_review_submit;
 pub mod fundamentals_lookup;
+pub mod narrative_research;
 pub mod sql_query;
 pub mod web_search;
 
@@ -8,6 +9,7 @@ use crate::services::openrouter_chat::{
 };
 use concept_review_submit::TOOL_NAME as CONCEPT_REVIEW_SUBMIT_TOOL_NAME;
 use fundamentals_lookup::TOOL_NAME as FUNDAMENTALS_LOOKUP_TOOL_NAME;
+use narrative_research::NARRATIVE_TOOL_NAMES;
 use sql_query::TOOL_NAME as SQL_QUERY_TOOL_NAME;
 use std::{path::PathBuf, sync::Arc};
 pub use web_search::WebSearchConfig;
@@ -18,6 +20,7 @@ pub enum SharedTool {
     WebSearch(WebSearchConfig),
     FundamentalsLookup,
     ConceptReviewSubmit,
+    NarrativeResearch,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -50,6 +53,17 @@ impl ToolRegistry {
         self
     }
 
+    pub fn with_narrative_research(mut self) -> Self {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::NarrativeResearch))
+        {
+            self.tools.push(SharedTool::NarrativeResearch);
+        }
+        self
+    }
+
     pub fn with_concept_review_submit(mut self) -> Self {
         if !self
             .tools
@@ -76,12 +90,31 @@ impl ToolRegistry {
         self.tools.iter().any(|tool| match tool {
             SharedTool::SqlQuery
             | SharedTool::FundamentalsLookup
-            | SharedTool::ConceptReviewSubmit => true,
+            | SharedTool::ConceptReviewSubmit
+            | SharedTool::NarrativeResearch => true,
             SharedTool::WebSearch(_) => false,
         })
     }
 
     pub fn completion_tools(&self) -> Vec<CompletionTool> {
+        if self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::NarrativeResearch))
+        {
+            let mut tools: Vec<CompletionTool> = self
+                .narrative_completion_tools()
+                .into_iter()
+                .map(CompletionTool::Function)
+                .collect();
+            for tool in &self.tools {
+                if let SharedTool::WebSearch(config) = tool {
+                    tools.push(config.completion_tool());
+                }
+            }
+            return tools;
+        }
+
         self.tools
             .iter()
             .map(|tool| match tool {
@@ -93,8 +126,21 @@ impl ToolRegistry {
                 SharedTool::ConceptReviewSubmit => {
                     CompletionTool::Function(concept_review_submit::openrouter_tool())
                 }
+                SharedTool::NarrativeResearch => unreachable!("handled above"),
             })
             .collect()
+    }
+
+    fn narrative_completion_tools(&self) -> Vec<openrouter_rs::types::Tool> {
+        let mut tools = narrative_research::completion_tools();
+        if self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::SqlQuery))
+        {
+            tools.insert(0, sql_query::openrouter_tool());
+        }
+        tools
     }
 
     pub fn client_handler(&self) -> Option<Arc<dyn ClientToolHandler>> {
@@ -104,6 +150,7 @@ impl ToolRegistry {
                 SharedTool::SqlQuery
                     | SharedTool::FundamentalsLookup
                     | SharedTool::ConceptReviewSubmit
+                    | SharedTool::NarrativeResearch
             )
         }) {
             return None;
@@ -152,6 +199,19 @@ impl ClientToolHandler for RegistryClientHandler {
         {
             let result = fundamentals_lookup::execute(arguments).await?;
             return Ok(ClientToolExecuteResult::Response(result));
+        }
+        if self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::NarrativeResearch))
+            && NARRATIVE_TOOL_NAMES.contains(&tool_name)
+        {
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "narrative capture tools require a workspace sqlite path to be configured",
+                )
+            })?;
+            return narrative_research::execute(path, tool_name, arguments).await;
         }
 
         Err(loco_rs::prelude::Error::string(&format!(

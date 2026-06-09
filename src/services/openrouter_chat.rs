@@ -20,6 +20,7 @@ const HTTP_REFERER: &str = "research@example.local";
 const X_TITLE: &str = "analogues";
 pub const DEFAULT_MAX_AGENT_ROUNDS: usize = 16;
 pub const CONCEPT_REVIEW_MAX_AGENT_ROUNDS: usize = 20;
+pub const NARRATIVE_RESEARCH_MAX_AGENT_ROUNDS: usize = 28;
 
 #[async_trait]
 pub trait ClientToolHandler: Send + Sync {

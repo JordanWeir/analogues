@@ -80,6 +80,13 @@ impl ModelClient for OpenRouterModelClient {
         {
             tools = tools.with_concept_review_submit();
         }
+        if request
+            .metadata
+            .get("worker_lane")
+            .is_some_and(|lane| lane == "narrative_research")
+        {
+            tools = tools.with_narrative_research();
+        }
 
         let worker_name = request
             .metadata
@@ -87,6 +94,7 @@ impl ModelClient for OpenRouterModelClient {
             .cloned()
             .unwrap_or_else(|| "model_completion".to_string());
         let is_concept_review = worker_name == "concept_catalog_review";
+        let is_narrative_research = worker_name == "narrative_research";
 
         let response = ToolLoopAgent::default()
             .run(ToolLoopRequest {
@@ -99,9 +107,20 @@ impl ModelClient for OpenRouterModelClient {
                 metadata: request.metadata.clone(),
                 workspace_sqlite: request.workspace_sqlite.clone(),
                 client_tools: request.client_tools.clone(),
-                max_agent_rounds: is_concept_review
-                    .then_some(crate::services::openrouter_chat::CONCEPT_REVIEW_MAX_AGENT_ROUNDS),
-                submit_tool_name: is_concept_review.then_some("submit_concept_review".to_string()),
+                max_agent_rounds: if is_concept_review {
+                    Some(crate::services::openrouter_chat::CONCEPT_REVIEW_MAX_AGENT_ROUNDS)
+                } else if is_narrative_research {
+                    Some(crate::services::openrouter_chat::NARRATIVE_RESEARCH_MAX_AGENT_ROUNDS)
+                } else {
+                    None
+                },
+                submit_tool_name: if is_concept_review {
+                    Some("submit_concept_review".to_string())
+                } else if is_narrative_research {
+                    Some("finalize_narrative_research".to_string())
+                } else {
+                    None
+                },
             })
             .await?;
 

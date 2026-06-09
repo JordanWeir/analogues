@@ -1,3 +1,4 @@
+pub mod narrative_researcher;
 pub mod tool_loop_agent;
 pub mod tools;
 

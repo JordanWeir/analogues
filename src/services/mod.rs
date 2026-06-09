@@ -6,6 +6,8 @@ pub mod fundamental_deriver;
 pub(crate) mod http_json;
 pub mod market_quote_provider;
 pub mod model_client;
+pub mod narrative_research;
+pub mod narrative_research_store;
 pub(crate) mod openrouter_chat;
 pub mod quality_gate_store;
 pub mod review_workspace;
