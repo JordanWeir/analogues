@@ -3,6 +3,7 @@ use crate::services::{
     workspace_query::{execute_workspace_query_json, workspace_sql_tool_definition},
 };
 use loco_rs::prelude::*;
+use openrouter_rs::types::Tool;
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
@@ -33,6 +34,32 @@ pub fn workspace_agent_tools(sqlite_path: PathBuf) -> Arc<dyn ClientToolHandler>
     Arc::new(WorkspaceAgentTools { sqlite_path })
 }
 
-pub fn workspace_sql_openrouter_tool() -> Value {
-    workspace_sql_tool_definition()
+pub fn workspace_sql_tool() -> Tool {
+    let definition = workspace_sql_tool_definition();
+    let function = definition
+        .get("function")
+        .cloned()
+        .expect("workspace_sql tool definition should include function metadata");
+
+    Tool::builder()
+        .name(
+            function
+                .get("name")
+                .and_then(Value::as_str)
+                .expect("workspace_sql tool should have a name"),
+        )
+        .description(
+            function
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
+        .parameters(
+            function
+                .get("parameters")
+                .cloned()
+                .expect("workspace_sql tool should have parameters"),
+        )
+        .build()
+        .expect("workspace_sql tool definition should be valid")
 }

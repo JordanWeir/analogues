@@ -1,18 +1,17 @@
 use crate::services::{
-    agent_tools::{workspace_agent_tools, workspace_sql_openrouter_tool},
+    agent_tools::{workspace_agent_tools, workspace_sql_tool},
     openrouter_chat::{
-        run_chat_completion, ChatCompletionOptions, ChatCompletionResult, ClientToolHandler,
+        run_client_tool_loop, run_single_shot_completion, run_simple_chat_completion,
+        web_search_server_tool, ChatCompletionOptions, ChatCompletionResult, ClientToolHandler,
+        CompletionTool,
     },
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
-use rig::{
-    client::{CompletionClient, ProviderClient},
-    completion::Prompt,
-    providers::openrouter,
-};
+use openrouter_rs::api::chat::Message;
+use openrouter_rs::types::Role;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -43,8 +42,8 @@ impl WebSearchToolConfig {
         }
     }
 
-    fn as_openrouter_tool(&self) -> serde_json::Value {
-        let mut parameters = serde_json::Map::new();
+    fn to_completion_tool(&self) -> CompletionTool {
+        let mut parameters = Map::new();
         if let Some(engine) = &self.engine {
             parameters.insert("engine".to_string(), json!(engine));
         }
@@ -67,10 +66,7 @@ impl WebSearchToolConfig {
             parameters.insert("excluded_domains".to_string(), json!(excluded_domains));
         }
 
-        json!({
-            "type": "openrouter:web_search",
-            "parameters": serde_json::Value::Object(parameters),
-        })
+        web_search_server_tool(Value::Object(parameters))
     }
 }
 
@@ -116,44 +112,60 @@ pub struct OpenRouterModelClient;
 #[async_trait]
 impl ModelClient for OpenRouterModelClient {
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
-        if request.uses_agent_loop() {
-            return complete_with_openrouter_agent(&request).await;
-        }
-
-        let client = openrouter::Client::from_env()
-            .map_err(|err| Error::string(&format!("failed to create OpenRouter client: {err}")))?;
-        let agent = client
-            .agent(&request.model)
-            .preamble(&request.preamble)
-            .build();
         let started_at = Instant::now();
-        let text = agent
-            .prompt(&request.prompt)
-            .await
-            .map_err(|err| Error::string(&format!("model completion failed: {err}")))?;
+        let result = if request.uses_client_tool_loop() {
+            complete_with_client_tools(&request).await?
+        } else if request.web_search.is_some() {
+            complete_with_web_search(&request).await?
+        } else {
+            run_simple_chat_completion(
+                &request.model,
+                vec![
+                    Message::new(Role::System, request.preamble.as_str()),
+                    Message::new(Role::User, request.prompt.as_str()),
+                ],
+                request.json_mode,
+            )
+            .await?
+        };
 
-        Ok(ModelResponse {
-            text,
-            model: request.model,
-            latency_ms: started_at.elapsed().as_millis(),
-            ..ModelResponse::default()
-        })
+        Ok(chat_result_to_model_response(
+            &request,
+            result,
+            started_at.elapsed().as_millis(),
+        ))
     }
 }
 
 impl ModelRequest {
-    pub fn uses_agent_loop(&self) -> bool {
-        self.web_search.is_some() || self.workspace_sqlite.is_some()
+    pub fn uses_client_tool_loop(&self) -> bool {
+        self.workspace_sqlite.is_some()
     }
 }
 
-async fn complete_with_openrouter_agent(request: &ModelRequest) -> Result<ModelResponse> {
-    let mut tools = Vec::new();
-    if request.workspace_sqlite.is_some() {
-        tools.push(workspace_sql_openrouter_tool());
-    }
+async fn complete_with_web_search(request: &ModelRequest) -> Result<ChatCompletionResult> {
+    let tools = request
+        .web_search
+        .as_ref()
+        .map(|config| vec![config.to_completion_tool()]);
+
+    run_single_shot_completion(ChatCompletionOptions {
+        model: request.model.clone(),
+        messages: vec![
+            Message::new(Role::System, request.preamble.as_str()),
+            Message::new(Role::User, request.prompt.as_str()),
+        ],
+        tools,
+        json_mode: false,
+        client_tools: None,
+    })
+    .await
+}
+
+async fn complete_with_client_tools(request: &ModelRequest) -> Result<ChatCompletionResult> {
+    let mut tools = vec![CompletionTool::Function(workspace_sql_tool())];
     if let Some(web_search) = &request.web_search {
-        tools.push(web_search.as_openrouter_tool());
+        tools.push(web_search.to_completion_tool());
     }
 
     let client_tools = request.client_tools.clone().or_else(|| {
@@ -163,24 +175,17 @@ async fn complete_with_openrouter_agent(request: &ModelRequest) -> Result<ModelR
             .map(|path| workspace_agent_tools(path.clone()))
     });
 
-    let started_at = Instant::now();
-    let result = run_chat_completion(ChatCompletionOptions {
+    run_client_tool_loop(ChatCompletionOptions {
         model: request.model.clone(),
         messages: vec![
-            json!({"role": "system", "content": request.preamble}),
-            json!({"role": "user", "content": request.prompt}),
+            Message::new(Role::System, request.preamble.as_str()),
+            Message::new(Role::User, request.prompt.as_str()),
         ],
-        tools: (!tools.is_empty()).then_some(tools),
+        tools: Some(tools),
         json_mode: false,
         client_tools,
     })
-    .await?;
-
-    Ok(chat_result_to_model_response(
-        request,
-        result,
-        started_at.elapsed().as_millis(),
-    ))
+    .await
 }
 
 fn chat_result_to_model_response(
@@ -217,14 +222,15 @@ mod tests {
 
     #[test]
     fn serializes_web_search_tool_for_openrouter() {
-        let tool = WebSearchToolConfig::concept_validation_defaults().as_openrouter_tool();
-        assert_eq!(tool["type"], "openrouter:web_search");
-        assert_eq!(tool["parameters"]["engine"], "exa");
-        assert_eq!(tool["parameters"]["max_results"], 5);
+        let tool = WebSearchToolConfig::concept_validation_defaults().to_completion_tool();
+        let value = serde_json::to_value(tool).expect("tool should serialize");
+        assert_eq!(value["type"], "openrouter:web_search");
+        assert_eq!(value["parameters"]["engine"], "exa");
+        assert_eq!(value["parameters"]["max_results"], 5);
     }
 
     #[test]
-    fn agent_loop_when_workspace_attached() {
+    fn client_tool_loop_when_workspace_attached() {
         let request = ModelRequest {
             model: "test".to_string(),
             preamble: String::new(),
@@ -235,6 +241,21 @@ mod tests {
             workspace_sqlite: Some(PathBuf::from("/tmp/test.sqlite")),
             client_tools: None,
         };
-        assert!(request.uses_agent_loop());
+        assert!(request.uses_client_tool_loop());
+    }
+
+    #[test]
+    fn web_search_alone_does_not_use_client_tool_loop() {
+        let request = ModelRequest {
+            model: "test".to_string(),
+            preamble: String::new(),
+            prompt: String::new(),
+            json_mode: false,
+            metadata: BTreeMap::new(),
+            web_search: Some(WebSearchToolConfig::concept_validation_defaults()),
+            workspace_sqlite: None,
+            client_tools: None,
+        };
+        assert!(!request.uses_client_tool_loop());
     }
 }
