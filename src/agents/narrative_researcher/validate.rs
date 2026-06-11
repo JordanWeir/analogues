@@ -4,19 +4,33 @@ use super::types::{
     CLAIM_CONFIDENCES, CLAIM_SIDES, CLAIM_TYPES, MIN_CLAIMS, MIN_CRUXES, MIN_NARRATIVE_BODY_LEN,
     MIN_SOURCES, NARRATIVE_ITEM_TYPES, NARRATIVE_SIDES, SECTION_KEYS, SOURCE_TYPES,
 };
-use loco_rs::prelude::*;
+use thiserror::Error;
 
-pub fn validate_source(input: &CaptureSourceInput) -> Result<()> {
+#[derive(Debug, Error)]
+pub enum ValidationError {
+    #[error("{0}")]
+    Invalid(String),
+}
+
+impl ValidationError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::Invalid(message.into())
+    }
+}
+
+pub type Result<T = ()> = std::result::Result<T, ValidationError>;
+
+pub fn validate_source(input: &CaptureSourceInput) -> Result {
     if input.title.trim().is_empty() {
-        return Err(Error::string("source title cannot be empty"));
+        return Err(ValidationError::invalid("source title cannot be empty"));
     }
     if input.why_it_matters.trim().len() < 20 {
-        return Err(Error::string(
+        return Err(ValidationError::invalid(
             "why_it_matters must be at least 20 characters",
         ));
     }
     if !SOURCE_TYPES.contains(&input.source_type.as_str()) {
-        return Err(Error::string(&format!(
+        return Err(ValidationError::invalid(format!(
             "invalid source_type '{}'; expected one of: {}",
             input.source_type,
             SOURCE_TYPES.join(", ")
@@ -25,29 +39,29 @@ pub fn validate_source(input: &CaptureSourceInput) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_claim(input: &CaptureClaimInput) -> Result<()> {
+pub fn validate_claim(input: &CaptureClaimInput) -> Result {
     if input.claim.trim().is_empty() {
-        return Err(Error::string("claim cannot be empty"));
+        return Err(ValidationError::invalid("claim cannot be empty"));
     }
     if input.confidence != "inference"
         && input.source_id.is_none()
         && input.source_title.as_deref().unwrap_or("").trim().is_empty()
     {
-        return Err(Error::string(
+        return Err(ValidationError::invalid(
             "non-inference claims require source_id or source_title",
         ));
     }
     if !CLAIM_TYPES.contains(&input.claim_type.as_str()) {
-        return Err(Error::string(&format!(
+        return Err(ValidationError::invalid(format!(
             "invalid claim_type '{}'",
             input.claim_type
         )));
     }
     if !CLAIM_SIDES.contains(&input.side.as_str()) {
-        return Err(Error::string(&format!("invalid side '{}'", input.side)));
+        return Err(ValidationError::invalid(format!("invalid side '{}'", input.side)));
     }
     if !CLAIM_CONFIDENCES.contains(&input.confidence.as_str()) {
-        return Err(Error::string(&format!(
+        return Err(ValidationError::invalid(format!(
             "invalid confidence '{}'",
             input.confidence
         )));
@@ -55,9 +69,9 @@ pub fn validate_claim(input: &CaptureClaimInput) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_narrative_side(input: &CaptureNarrativeSideInput) -> Result<()> {
+pub fn validate_narrative_side(input: &CaptureNarrativeSideInput) -> Result {
     if !NARRATIVE_SIDES.contains(&input.side.as_str()) {
-        return Err(Error::string(&format!(
+        return Err(ValidationError::invalid(format!(
             "invalid narrative side '{}'; expected one of: {}",
             input.side,
             NARRATIVE_SIDES.join(", ")
@@ -69,7 +83,7 @@ pub fn validate_narrative_side(input: &CaptureNarrativeSideInput) -> Result<()> 
         MIN_NARRATIVE_BODY_LEN
     };
     if input.body.trim().len() < min_len {
-        return Err(Error::string(&format!(
+        return Err(ValidationError::invalid(format!(
             "{} narrative body must be at least {min_len} characters",
             input.side
         )));
@@ -77,19 +91,19 @@ pub fn validate_narrative_side(input: &CaptureNarrativeSideInput) -> Result<()> 
     Ok(())
 }
 
-pub fn validate_narrative_items(input: &CaptureNarrativeItemsInput) -> Result<()> {
+pub fn validate_narrative_items(input: &CaptureNarrativeItemsInput) -> Result {
     if !NARRATIVE_ITEM_TYPES.contains(&input.item_type.as_str()) {
-        return Err(Error::string(&format!(
+        return Err(ValidationError::invalid(format!(
             "invalid item_type '{}'; expected agreement or crux",
             input.item_type
         )));
     }
     if input.items.is_empty() {
-        return Err(Error::string("items array cannot be empty"));
+        return Err(ValidationError::invalid("items array cannot be empty"));
     }
     for item in &input.items {
         if item.trim().len() < 15 {
-            return Err(Error::string(
+            return Err(ValidationError::invalid(
                 "each narrative item must be at least 15 characters",
             ));
         }
@@ -97,35 +111,39 @@ pub fn validate_narrative_items(input: &CaptureNarrativeItemsInput) -> Result<()
     Ok(())
 }
 
-pub fn validate_orientation(input: &CaptureOrientationInput) -> Result<()> {
+pub fn validate_orientation(input: &CaptureOrientationInput) -> Result {
     for (field, value) in [
         ("dominant_question", &input.dominant_question),
         ("current_setup", &input.current_setup),
         ("time_horizon", &input.time_horizon),
     ] {
         if value.trim().is_empty() {
-            return Err(Error::string(&format!("{field} cannot be empty")));
+            return Err(ValidationError::invalid(format!("{field} cannot be empty")));
         }
     }
     Ok(())
 }
 
-pub fn validate_section(input: &CaptureSectionInput) -> Result<()> {
+pub fn validate_section(input: &CaptureSectionInput) -> Result {
     if !SECTION_KEYS.contains(&input.section_key.as_str()) {
-        return Err(Error::string(&format!(
+        return Err(ValidationError::invalid(format!(
             "invalid section_key '{}'; expected business_model or why_now",
             input.section_key
         )));
     }
     if input.body.trim().len() < 40 {
-        return Err(Error::string("section body must be at least 40 characters"));
+        return Err(ValidationError::invalid(
+            "section body must be at least 40 characters",
+        ));
     }
     Ok(())
 }
 
-pub fn validate_research_gap(input: &CaptureResearchGapInput) -> Result<()> {
+pub fn validate_research_gap(input: &CaptureResearchGapInput) -> Result {
     if input.gap_key.trim().is_empty() || input.description.trim().is_empty() {
-        return Err(Error::string("gap_key and description are required"));
+        return Err(ValidationError::invalid(
+            "gap_key and description are required",
+        ));
     }
     Ok(())
 }
@@ -142,7 +160,7 @@ pub fn validate_workspace_ready(
     orientation_captured: bool,
     business_model_captured: bool,
     why_now_captured: bool,
-) -> Result<()> {
+) -> Result {
     let mut errors = Vec::new();
 
     if source_count < MIN_SOURCES as i64 {
@@ -186,7 +204,7 @@ pub fn validate_workspace_ready(
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(Error::string(&format!(
+        Err(ValidationError::invalid(format!(
             "narrative research is incomplete:\n- {}",
             errors.join("\n- ")
         )))

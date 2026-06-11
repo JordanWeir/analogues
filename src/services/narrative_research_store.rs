@@ -7,6 +7,7 @@ use crate::agents::narrative_researcher::{
     validate::{
         validate_claim, validate_narrative_items, validate_narrative_side, validate_orientation,
         validate_research_gap, validate_section, validate_source, validate_workspace_ready,
+        ValidationError,
     },
 };
 use chrono::Utc;
@@ -170,7 +171,7 @@ impl NarrativeResearchStore {
             return Err(Error::string("capture_sources requires at least one source"));
         }
         for source in &sources {
-            validate_source(source)?;
+            validate_source(source).map_err(validation_error)?;
         }
 
         let now = Utc::now().to_rfc3339();
@@ -229,7 +230,7 @@ impl NarrativeResearchStore {
             if claim.confidence == "inference" {
                 validate_claim_relaxed(&claim)?;
             } else {
-                validate_claim(&claim)?;
+                validate_claim(&claim).map_err(validation_error)?;
             }
             let source_id = resolve_source_id(db, &claim).await?;
             if claim_already_exists(db, &claim.claim, source_id).await? {
@@ -268,7 +269,7 @@ impl NarrativeResearchStore {
         db: &impl ConnectionTrait,
         input: CaptureNarrativeSideInput,
     ) -> Result<serde_json::Value> {
-        validate_narrative_side(&input)?;
+        validate_narrative_side(&input).map_err(validation_error)?;
         ensure_narrative_map_row(db).await?;
 
         let column = match input.side.as_str() {
@@ -303,7 +304,7 @@ impl NarrativeResearchStore {
         db: &impl ConnectionTrait,
         input: CaptureNarrativeItemsInput,
     ) -> Result<serde_json::Value> {
-        validate_narrative_items(&input)?;
+        validate_narrative_items(&input).map_err(validation_error)?;
         ensure_narrative_map_row(db).await?;
 
         let start_order = scalar_i64(
@@ -352,7 +353,7 @@ impl NarrativeResearchStore {
         db: &impl ConnectionTrait,
         input: CaptureOrientationInput,
     ) -> Result<serde_json::Value> {
-        validate_orientation(&input)?;
+        validate_orientation(&input).map_err(validation_error)?;
         let body = json!({
             "dominant_question": input.dominant_question,
             "current_setup": input.current_setup,
@@ -368,7 +369,7 @@ impl NarrativeResearchStore {
         db: &impl ConnectionTrait,
         input: CaptureSectionInput,
     ) -> Result<serde_json::Value> {
-        validate_section(&input)?;
+        validate_section(&input).map_err(validation_error)?;
         Self::upsert_section_body(
             db,
             &input.section_key,
@@ -388,7 +389,7 @@ impl NarrativeResearchStore {
         db: &impl ConnectionTrait,
         input: CaptureResearchGapInput,
     ) -> Result<serde_json::Value> {
-        validate_research_gap(&input)?;
+        validate_research_gap(&input).map_err(validation_error)?;
         let now = Utc::now().to_rfc3339();
         let gap_key = format!("narrative_{}", input.gap_key.trim());
         execute_sql(
@@ -423,7 +424,8 @@ impl NarrativeResearchStore {
             snapshot.orientation_captured,
             snapshot.sections_captured.iter().any(|k| k == "business_model"),
             snapshot.sections_captured.iter().any(|k| k == "why_now"),
-        )?;
+        )
+        .map_err(validation_error)?;
 
         let bull_claims = scalar_i64(
             db,
@@ -777,6 +779,10 @@ async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
         .await
         .map_err(|err| Error::string(&format!("SQL failed: {err}")))?;
     Ok(())
+}
+
+fn validation_error(err: ValidationError) -> Error {
+    Error::string(&err.to_string())
 }
 
 fn sql_quote(value: &str) -> String {
