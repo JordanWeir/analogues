@@ -69,6 +69,13 @@ pub fn validate_claim(input: &CaptureClaimInput) -> Result {
     Ok(())
 }
 
+pub fn validate_claim_relaxed(input: &CaptureClaimInput) -> Result {
+    if input.claim.trim().is_empty() {
+        return Err(ValidationError::invalid("claim cannot be empty"));
+    }
+    Ok(())
+}
+
 pub fn validate_narrative_side(input: &CaptureNarrativeSideInput) -> Result {
     if !NARRATIVE_SIDES.contains(&input.side.as_str()) {
         return Err(ValidationError::invalid(format!(

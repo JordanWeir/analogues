@@ -53,8 +53,8 @@ impl NarrativeResearcherAgent {
         workspace: &WorkspaceHandle,
     ) -> Result<(NarrativeResearchRunResult, ToolLoopResponse)> {
         let workspace_sqlite = workspace.paths.sqlite_path.clone();
-        let existing_context =
-            NarrativeResearchStore::load_existing_context(workspace.connection()).await?;
+        let store = NarrativeResearchStore::new(workspace.connection());
+        let existing_context = store.load_existing_context().await?;
 
         let ticker = scalar_ticker(workspace.connection()).await?;
         let company_name = load_company_name(workspace.connection()).await?;
@@ -95,7 +95,8 @@ impl NarrativeResearcherAgent {
             })
             .await?;
 
-        NarrativeResearchStore::finalize(workspace.connection())
+        let outcome = store
+            .finalize()
             .await
             .map_err(|err| {
                 let preview: String = response.text.chars().take(300).collect();
@@ -104,13 +105,12 @@ impl NarrativeResearcherAgent {
                 ))
             })?;
 
-        let snapshot = NarrativeResearchStore::snapshot(workspace.connection()).await?;
         Ok((
             NarrativeResearchRunResult {
                 worker_run_id: response.worker_run_id,
-                source_count: snapshot.source_count,
-                claim_count: snapshot.claim_count,
-                crux_count: snapshot.crux_count,
+                source_count: outcome.snapshot.source_count,
+                claim_count: outcome.snapshot.claim_count,
+                crux_count: outcome.snapshot.crux_count,
             },
             response,
         ))

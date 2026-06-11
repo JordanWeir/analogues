@@ -54,45 +54,46 @@ pub async fn execute(
     arguments: &str,
 ) -> Result<ClientToolExecuteResult> {
     let db = NarrativeResearchStore::connect(sqlite_path).await?;
+    let store = NarrativeResearchStore::new(&db);
     let payload = match tool_name {
         TOOL_CAPTURE_SOURCES => {
             let input: SourcesPayload = parse_args(arguments)?;
-            let result = NarrativeResearchStore::capture_sources(&db, input.sources).await?;
+            let result = store.capture_sources(input.sources).await?;
             serde_json::to_string(&result).map_err(map_serialize_err)?
         }
         TOOL_CAPTURE_CLAIMS => {
             let input: ClaimsPayload = parse_args(arguments)?;
-            let result = NarrativeResearchStore::capture_claims(&db, input.claims).await?;
+            let result = store.capture_claims(input.claims).await?;
             serde_json::to_string(&result).map_err(map_serialize_err)?
         }
         TOOL_CAPTURE_NARRATIVE_SIDE => {
             let input: CaptureNarrativeSideInput = parse_args(arguments)?;
-            let result = NarrativeResearchStore::capture_narrative_side(&db, input).await?;
+            let result = store.capture_narrative_side(input).await?;
             serde_json::to_string(&result).map_err(map_serialize_err)?
         }
         TOOL_CAPTURE_NARRATIVE_ITEMS => {
             let input: CaptureNarrativeItemsInput = parse_args(arguments)?;
-            let result = NarrativeResearchStore::capture_narrative_items(&db, input).await?;
+            let result = store.capture_narrative_items(input).await?;
             serde_json::to_string(&result).map_err(map_serialize_err)?
         }
         TOOL_CAPTURE_ORIENTATION => {
             let input: CaptureOrientationInput = parse_args(arguments)?;
-            let result = NarrativeResearchStore::capture_orientation(&db, input).await?;
+            let result = store.capture_orientation(input).await?;
             serde_json::to_string(&result).map_err(map_serialize_err)?
         }
         TOOL_CAPTURE_SECTION => {
             let input: CaptureSectionInput = parse_args(arguments)?;
-            let result = NarrativeResearchStore::capture_section(&db, input).await?;
+            let result = store.capture_section(input).await?;
             serde_json::to_string(&result).map_err(map_serialize_err)?
         }
         TOOL_CAPTURE_RESEARCH_GAP => {
             let input: CaptureResearchGapInput = parse_args(arguments)?;
-            let result = NarrativeResearchStore::capture_research_gap(&db, input).await?;
+            let result = store.capture_research_gap(input).await?;
             serde_json::to_string(&result).map_err(map_serialize_err)?
         }
         TOOL_FINALIZE => {
-            let result = NarrativeResearchStore::finalize(&db).await?;
-            let text = serde_json::to_string(&result).map_err(map_serialize_err)?;
+            let outcome = store.finalize().await?;
+            let text = serde_json::to_string(&outcome.into_response()).map_err(map_serialize_err)?;
             return Ok(ClientToolExecuteResult::Complete(text));
         }
         other => {
