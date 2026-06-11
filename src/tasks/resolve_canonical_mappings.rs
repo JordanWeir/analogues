@@ -1,8 +1,13 @@
-use crate::services::{
-    workspace_phases::{
-        mapping_strategy_from_vars, resolve_canonical_mappings_on_workspace, resolve_sqlite_path,
+use crate::{
+    agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig,
+    services::{
+        canonical_mapping::ConceptMappingStrategy,
+        workspace_phases::{
+            mapping_strategy_from_vars, resolve_canonical_mappings_on_workspace,
+            resolve_sqlite_path,
+        },
+        workspace_store::WorkspaceStore,
     },
-    workspace_store::WorkspaceStore,
 };
 use loco_rs::prelude::*;
 
@@ -22,7 +27,10 @@ impl Task for ResolveCanonicalMappings {
         let sqlite_path = resolve_sqlite_path(vars)?;
         let strategy = mapping_strategy_from_vars(vars)?;
         let handle = WorkspaceStore.open_workspace(&sqlite_path).await?;
-        let resolution = resolve_canonical_mappings_on_workspace(&handle, strategy).await?;
+        let agent_config = matches!(strategy, ConceptMappingStrategy::LlmReviewed)
+            .then(FundamentalCatalogManagerConfig::default);
+        let resolution =
+            resolve_canonical_mappings_on_workspace(&handle, strategy, agent_config).await?;
         handle.close().await?;
 
         println!(

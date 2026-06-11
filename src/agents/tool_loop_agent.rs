@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn request_metadata_includes_enabled_tools() {
         let request = ToolLoopRequest {
-            worker_name: "concept_catalog_review".to_string(),
+            worker_name: "fundamental_catalog_manager".to_string(),
             model: "test/model".to_string(),
             preamble: "system".to_string(),
             prompt: "user".to_string(),

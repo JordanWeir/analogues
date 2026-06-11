@@ -2,22 +2,25 @@ use super::{
     normalize_quality_flag, CandidateScoringResolver, CanonicalMappingResolver,
     CanonicalResolutionContext, CanonicalResolutionResult,
 };
-use crate::services::{
-    concept_review::{ConceptReviewService, AGENT_REVIEW_PREAMBLE},
-    model_client::OpenRouterModelClient,
+use crate::{
+    agents::fundamental_catalog_manager::FundamentalCatalogManagerAgent,
+    services::concept_review::ConceptReviewService,
 };
 use async_trait::async_trait;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LlmReviewedResolver {
-    pub enable_web_search: Option<bool>,
+    pub agent_config: crate::agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig,
 }
 
-impl LlmReviewedResolver {
-    fn web_search_enabled(&self) -> bool {
-        self.enable_web_search
-            .unwrap_or_else(concept_review_web_search_enabled)
+impl Default for LlmReviewedResolver {
+    fn default() -> Self {
+        Self {
+            agent_config:
+                crate::agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig::default(
+                ),
+        }
     }
 }
 
@@ -28,7 +31,7 @@ impl CanonicalMappingResolver for LlmReviewedResolver {
     }
 
     async fn resolve(&self, ctx: &CanonicalResolutionContext<'_>) -> CanonicalResolutionResult {
-        let Some(workspace_sqlite) = ctx.workspace_sqlite.clone() else {
+        if ctx.workspace_sqlite.is_none() {
             let fallback = CandidateScoringResolver.resolve(ctx).await;
             return CanonicalResolutionResult {
                 quality_flags: vec![
@@ -37,27 +40,27 @@ impl CanonicalMappingResolver for LlmReviewedResolver {
                 strategy_id: fallback.strategy_id,
                 ..fallback
             };
-        };
+        }
 
-        let service = ConceptReviewService {
-            enable_web_search: self.web_search_enabled(),
-            enable_workspace_sql: true,
-            company_label: Some(ctx.ticker.to_string()),
-            workspace_sqlite: Some(workspace_sqlite),
-            ..ConceptReviewService::default()
-        };
-        let client = OpenRouterModelClient;
-        let review_result = service
-            .review_workspace(&client, ctx.raw_sec_facts, AGENT_REVIEW_PREAMBLE, "")
-            .await;
+        let agent = FundamentalCatalogManagerAgent::new(self.agent_config.clone());
+        let review_result = agent.review_workspace_with_telemetry(ctx, "").await;
 
         match review_result {
             Ok((output, _response)) => {
+                let model = agent.config().model.clone();
                 let review_run_id = Uuid::new_v4().to_string();
-                let selected_by = format!("llm_agent_review:{}", service.model);
-                let decisions =
-                    service.decision_records(&output, &review_run_id, &selected_by, ctx.fetched_at);
-                let promoted = service.promote_reviewed_mappings(&output, ctx.raw_sec_facts);
+                let selected_by = format!("llm_agent_review:{model}");
+                let decisions = ConceptReviewService::decision_records(
+                    &output,
+                    &review_run_id,
+                    &selected_by,
+                    ctx.fetched_at,
+                );
+                let promoted = ConceptReviewService::promote_reviewed_mappings(
+                    &model,
+                    &output,
+                    ctx.raw_sec_facts,
+                );
                 let mut quality_flags = promoted
                     .warnings
                     .into_iter()
@@ -81,12 +84,11 @@ impl CanonicalMappingResolver for LlmReviewedResolver {
                     mappings,
                     review_decisions: decisions,
                     quality_flags,
-                    strategy_id: format!("llm_agent_review:{}", service.model),
+                    strategy_id: format!("llm_agent_review:{model}"),
                 }
             }
             Err(err) => {
                 let fallback = CandidateScoringResolver.resolve(ctx).await;
-                // @TODO: SHouldn't this merge any quality flags from both approaches? Currently passes llm flag, without the fallback flags.
                 CanonicalResolutionResult {
                     quality_flags: vec![format!(
                         "llm_concept_review_failed_used_candidate_scoring_{}",
@@ -99,11 +101,4 @@ impl CanonicalMappingResolver for LlmReviewedResolver {
             }
         }
     }
-}
-
-fn concept_review_web_search_enabled() -> bool {
-    // @TODO: This doesn't feel like it should be an env var.
-    std::env::var("CONCEPT_REVIEW_WEB_SEARCH")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }

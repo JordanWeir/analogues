@@ -13,6 +13,8 @@ pub struct InitWorkspaceRequest {
     pub fetch_financials: bool,
     /// `None` ingests SEC raw facts and concept catalog only (phases 1–2).
     pub mapping_strategy: Option<ConceptMappingStrategy>,
+    /// Run `build_narrative_map` after catalog when financial ingest is enabled.
+    pub build_narrative_map: bool,
 }
 
 impl InitWorkspaceRequest {
@@ -24,6 +26,7 @@ impl InitWorkspaceRequest {
             base_dir: self.base_dir.clone(),
             fetch_financials: self.fetch_financials,
             mapping_strategy: self.mapping_strategy,
+            build_narrative_map: self.build_narrative_map,
         })
     }
 }

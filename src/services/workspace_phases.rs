@@ -1,4 +1,5 @@
 use crate::{
+    agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig,
     services::{
         canonical_mapping::{
             resolve_canonical_mappings, CanonicalResolutionContext, CanonicalResolutionResult,
@@ -112,6 +113,7 @@ pub async fn load_ingest_layers(
 pub async fn resolve_canonical_mappings_on_workspace(
     handle: &WorkspaceHandle,
     strategy: ConceptMappingStrategy,
+    agent_config: Option<FundamentalCatalogManagerConfig>,
 ) -> Result<CanonicalResolutionResult> {
     let store = WorkspaceFinancialStore::new(handle.connection());
     let layers = load_ingest_layers(&store).await?;
@@ -125,6 +127,7 @@ pub async fn resolve_canonical_mappings_on_workspace(
             fetched_at: &layers.fetched_at,
             workspace_sqlite: Some(sqlite_path),
         },
+        agent_config,
     )
     .await;
     store
@@ -203,7 +206,7 @@ pub async fn resolve_and_derive_on_workspace(
     handle: &WorkspaceHandle,
     strategy: ConceptMappingStrategy,
 ) -> Result<FinancialRun> {
-    resolve_canonical_mappings_on_workspace(handle, strategy).await?;
+    resolve_canonical_mappings_on_workspace(handle, strategy, None).await?;
     derive_starter_fundamentals_on_workspace(handle).await
 }
 
@@ -304,6 +307,7 @@ mod tests {
                 base_dir: dir.parent().unwrap_or(dir).to_path_buf(),
                 fetch_financials: false,
                 mapping_strategy: None,
+                build_narrative_map: false,
             },
             &paths,
         )
@@ -342,9 +346,13 @@ mod tests {
             .expect("mappings")
             .is_empty());
 
-        resolve_canonical_mappings_on_workspace(&handle, ConceptMappingStrategy::CandidateScoring)
-            .await
-            .expect("resolve");
+        resolve_canonical_mappings_on_workspace(
+            &handle,
+            ConceptMappingStrategy::CandidateScoring,
+            None,
+        )
+        .await
+        .expect("resolve");
 
         let mappings = store
             .load_active_canonical_mappings()

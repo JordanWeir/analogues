@@ -5,6 +5,7 @@ pub mod crux_triage_submit;
 pub mod financial_explorer_handler;
 pub mod fundamentals_lookup;
 pub mod mechanics_complete;
+pub mod narrative_research;
 pub mod sql_query;
 pub mod web_search;
 
@@ -17,6 +18,7 @@ use concept_review_submit::TOOL_NAME as CONCEPT_REVIEW_SUBMIT_TOOL_NAME;
 use crux_triage_submit::TOOL_NAME as CRUX_TRIAGE_SUBMIT_TOOL_NAME;
 use fundamentals_lookup::TOOL_NAME as FUNDAMENTALS_LOOKUP_TOOL_NAME;
 use mechanics_complete::TOOL_NAME as MECHANICS_COMPLETE_TOOL_NAME;
+use narrative_research::NARRATIVE_TOOL_NAMES;
 use sql_query::TOOL_NAME as SQL_QUERY_TOOL_NAME;
 
 pub use analysis_draft_run::TOOL_NAME as ANALYSIS_DRAFT_TOOL;
@@ -32,6 +34,7 @@ pub enum SharedTool {
     WebSearch(WebSearchConfig),
     FundamentalsLookup,
     ConceptReviewSubmit,
+    NarrativeResearch,
     CruxTriageSubmit,
     AnalysisDraft,
     AnalysisFinalize,
@@ -65,6 +68,17 @@ impl ToolRegistry {
         self.tools
             .retain(|tool| !matches!(tool, SharedTool::WebSearch(_)));
         self.tools.push(SharedTool::WebSearch(config));
+        self
+    }
+
+    pub fn with_narrative_research(mut self) -> Self {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::NarrativeResearch))
+        {
+            self.tools.push(SharedTool::NarrativeResearch);
+        }
         self
     }
 
@@ -139,6 +153,7 @@ impl ToolRegistry {
             SharedTool::SqlQuery
             | SharedTool::FundamentalsLookup
             | SharedTool::ConceptReviewSubmit
+            | SharedTool::NarrativeResearch
             | SharedTool::CruxTriageSubmit
             | SharedTool::AnalysisDraft
             | SharedTool::AnalysisFinalize
@@ -148,6 +163,24 @@ impl ToolRegistry {
     }
 
     pub fn completion_tools(&self) -> Vec<CompletionTool> {
+        if self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::NarrativeResearch))
+        {
+            let mut tools: Vec<CompletionTool> = self
+                .narrative_completion_tools()
+                .into_iter()
+                .map(CompletionTool::Function)
+                .collect();
+            for tool in &self.tools {
+                if let SharedTool::WebSearch(config) = tool {
+                    tools.push(config.completion_tool());
+                }
+            }
+            return tools;
+        }
+
         self.tools
             .iter()
             .map(|tool| match tool {
@@ -171,8 +204,21 @@ impl ToolRegistry {
                 SharedTool::MechanicsComplete => {
                     CompletionTool::Function(mechanics_complete::openrouter_tool())
                 }
+                SharedTool::NarrativeResearch => unreachable!("handled above"),
             })
             .collect()
+    }
+
+    fn narrative_completion_tools(&self) -> Vec<openrouter_rs::types::Tool> {
+        let mut tools = narrative_research::completion_tools();
+        if self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::SqlQuery))
+        {
+            tools.insert(0, sql_query::openrouter_tool());
+        }
+        tools
     }
 
     pub fn client_handler(&self) -> Option<Arc<dyn ClientToolHandler>> {
@@ -182,6 +228,11 @@ impl ToolRegistry {
                 SharedTool::SqlQuery
                     | SharedTool::FundamentalsLookup
                     | SharedTool::ConceptReviewSubmit
+                    | SharedTool::NarrativeResearch
+                    | SharedTool::CruxTriageSubmit
+                    | SharedTool::AnalysisDraft
+                    | SharedTool::AnalysisFinalize
+                    | SharedTool::MechanicsComplete
             )
         }) {
             return None;
@@ -230,6 +281,19 @@ impl ClientToolHandler for RegistryClientHandler {
         {
             let result = fundamentals_lookup::execute(arguments).await?;
             return Ok(ClientToolExecuteResult::Response(result));
+        }
+        if self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::NarrativeResearch))
+            && NARRATIVE_TOOL_NAMES.contains(&tool_name)
+        {
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "narrative capture tools require a workspace sqlite path to be configured",
+                )
+            })?;
+            return narrative_research::execute(path, tool_name, arguments).await;
         }
 
         Err(loco_rs::prelude::Error::string(&format!(

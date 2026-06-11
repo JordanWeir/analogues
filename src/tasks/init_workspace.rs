@@ -79,12 +79,18 @@ impl InitWorkspaceRequest {
                 |value| crate::services::canonical_mapping::ConceptMappingStrategy::from_var(value),
             )?;
 
+        let build_narrative_map = vars
+            .cli
+            .get("build_narrative_map")
+            .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes"));
+
         Ok(Self {
             ticker: normalize_ticker(ticker)?,
             date,
             base_dir,
             fetch_financials,
             mapping_strategy,
+            build_narrative_map,
         })
     }
 }

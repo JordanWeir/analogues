@@ -111,6 +111,7 @@ async fn test_lane_context() -> (LaneContext, PathBuf) {
             base_dir: PathBuf::from("reports/stock-narrative-research"),
             fetch_financials: false,
             mapping_strategy: None,
+            build_narrative_map: false,
         },
         &paths,
     )

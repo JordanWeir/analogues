@@ -1,8 +1,11 @@
 use super::InitWorkspaceLane;
-use crate::lanes::{
-    context::LaneContext,
-    gate::{Gate, GateResult},
-    result::LaneResult,
+use crate::{
+    lanes::{
+        context::LaneContext,
+        gate::{Gate, GateResult},
+        result::LaneResult,
+    },
+    services::workspace_sql::scalar_i64,
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
@@ -190,19 +193,6 @@ async fn scalar_string(db: &impl ConnectionTrait, sql: &str) -> Result<String> {
         .map_err(|err| Error::string(&format!("failed to parse string column: {err}")))
 }
 
-async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
-    let row = db
-        .query_one(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            sql.to_string(),
-        ))
-        .await
-        .map_err(|err| Error::string(&format!("query failed: {err}")))?
-        .ok_or_else(|| Error::string("query returned no row"))?;
-    row.try_get::<i64>("", "count")
-        .map_err(|err| Error::string(&format!("failed to parse count: {err}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +232,7 @@ mod tests {
                 base_dir: PathBuf::from("reports/stock-narrative-research"),
                 fetch_financials: false,
                 mapping_strategy: None,
+                build_narrative_map: false,
             },
             &paths,
         )
@@ -308,6 +299,7 @@ mod tests {
             base_dir: PathBuf::from("reports/stock-narrative-research"),
             fetch_financials: true,
             mapping_strategy: None,
+            build_narrative_map: false,
         });
         assert_eq!(Lane::gates(&lane).len(), 3);
     }

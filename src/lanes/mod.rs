@@ -1,4 +1,5 @@
 pub mod build_catalog;
+pub mod build_narrative_map;
 pub mod context;
 pub mod financial_mechanics_experiments;
 pub mod gate;
