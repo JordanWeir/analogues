@@ -2,6 +2,20 @@ use crate::workspace::{CanonicalMapping, DerivedFundamentals, FundamentalObserva
 use chrono::NaiveDate;
 use std::collections::BTreeMap;
 
+const PERIOD_SUFFIXED_FLOW_TYPES: &[&str] = &["quarter", "ytd", "annual"];
+
+pub(crate) fn period_suffixed_metric_key(
+    base_metric_key: &str,
+    statement_type: &str,
+    period_type: &str,
+) -> String {
+    if statement_type == "income_statement" && PERIOD_SUFFIXED_FLOW_TYPES.contains(&period_type) {
+        format!("{base_metric_key}_{period_type}")
+    } else {
+        base_metric_key.to_string()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FundamentalDeriver;
 
@@ -219,12 +233,17 @@ fn canonical_sec_observations(
 }
 
 fn sec_observation(mapping: &CanonicalMapping, fact: &SecRawFact) -> FundamentalObservation {
+    let period_type = fact_period_type(fact).to_string();
     FundamentalObservation {
         canonical_key: Some(mapping.canonical_key.to_string()),
-        metric_key: mapping.metric_key.to_string(),
+        metric_key: period_suffixed_metric_key(
+            &mapping.metric_key,
+            &mapping.statement_type,
+            &period_type,
+        ),
         metric_label: mapping.metric_label.to_string(),
         statement_type: mapping.statement_type.to_string(),
-        period_type: fact_period_type(fact).to_string(),
+        period_type,
         period_start: fact.start.clone(),
         period_end: fact.end.clone(),
         as_of_date: fact.end.clone(),
@@ -723,6 +742,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn period_suffixed_metric_key_adds_suffix_for_income_statement_flows() {
+        assert_eq!(
+            period_suffixed_metric_key("revenue", "income_statement", "quarter"),
+            "revenue_quarter"
+        );
+        assert_eq!(
+            period_suffixed_metric_key("revenue", "income_statement", "annual"),
+            "revenue_annual"
+        );
+        assert_eq!(
+            period_suffixed_metric_key("cash", "balance_sheet", "instant"),
+            "cash"
+        );
+        assert_eq!(
+            period_suffixed_metric_key("revenue", "income_statement", "instant"),
+            "revenue"
+        );
+    }
+
+    #[test]
     fn builds_ttm_from_four_contiguous_quarters() {
         let facts = vec![
             sec_test_fact("Revenue", "2026-01-01", "2026-03-31", 10.0),
@@ -783,6 +822,43 @@ mod tests {
             .quality_flags
             .iter()
             .any(|flag| flag.starts_with("gross_profit_ttm_excluded_because_no_fact_matched")));
+    }
+
+    #[test]
+    fn income_statement_observations_use_period_suffix_metric_keys() {
+        let facts_root = json!({
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "label": "Revenue",
+                    "description": "Revenue from contracts with customers.",
+                    "units": { "USD": [
+                        sec_fact_json("10-K", "2025-01-01", "2025-12-31", "2026-02-15", 100.0),
+                        sec_fact_json("10-Q", "2026-01-01", "2026-03-31", "2026-04-30", 10.0),
+                        sec_fact_json("10-Q", "2025-10-01", "2026-03-31", "2026-04-30", 40.0)
+                    ]}
+                }
+            }
+        });
+        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-04T00:00:00Z");
+        let mappings = ConceptCatalog::seed_canonical_mappings(&raw_facts);
+        let observations = FundamentalDeriver::build_observations(&raw_facts, &mappings);
+
+        let revenue = observations
+            .iter()
+            .filter(|observation| observation.canonical_key.as_deref() == Some("revenue"))
+            .collect::<Vec<_>>();
+        assert!(revenue
+            .iter()
+            .any(|observation| observation.metric_key == "revenue_annual"));
+        assert!(revenue
+            .iter()
+            .any(|observation| observation.metric_key == "revenue_quarter"));
+        assert!(revenue
+            .iter()
+            .any(|observation| observation.metric_key == "revenue_ytd"));
+        assert!(!revenue
+            .iter()
+            .any(|observation| observation.metric_key == "revenue"));
     }
 
     #[test]

@@ -1420,14 +1420,14 @@ fn historical_growth_json(observations: &[FundamentalObservationRow]) -> Value {
         return Value::Null;
     }
     let tracked_metrics = [
-        "revenue",
+        "revenue_quarter",
         "revenue_ttm",
         "gross_margin",
         "operating_margin",
         "net_margin",
-        "eps",
+        "eps_quarter",
         "eps_ttm",
-        "diluted_shares",
+        "diluted_shares_quarter",
     ];
     let mut series = Map::new();
     for metric_key in tracked_metrics {

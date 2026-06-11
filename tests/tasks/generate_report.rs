@@ -114,8 +114,8 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
             canonical_key, metric_key, metric_label, statement_type, period_type, period_start, period_end,
             metric_value, unit, source_type, source_note, quality, is_derived, updated_at
          ) VALUES (
-            'revenue', 'revenue', 'Revenue', 'income_statement', 'annual', '2025-07-01', '2026-06-30',
-            1000000000.0, 'USD', 'SEC Company Facts', 'Seeded annual revenue.', 'reported', 0,
+            'revenue', 'revenue_quarter', 'Revenue', 'income_statement', 'quarter', '2026-04-01', '2026-06-30',
+            250000000.0, 'USD', 'SEC Company Facts', 'Seeded quarterly revenue.', 'reported', 0,
             '2026-06-04T00:00:00Z'
          )",
         "INSERT INTO fundamental_observations (
