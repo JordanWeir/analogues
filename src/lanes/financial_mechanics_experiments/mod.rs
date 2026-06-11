@@ -1,4 +1,7 @@
+#[cfg(test)]
+mod fixtures;
 mod gate;
+pub mod strategy;
 mod writes;
 
 use super::{
@@ -6,20 +9,37 @@ use super::{
     result::LaneWritesSummary,
 };
 use crate::{
-    agents::financial_model_explorer::FinancialModelExplorerService,
+    agents::financial_model_explorer::FinancialModelExplorerAgent,
     services::financial_analysis_store::FinancialAnalysisStore,
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
 use std::sync::Arc;
+use strategy::FinancialMechanicsExperimentsStrategy;
 
-#[derive(Debug, Clone, Default)]
-pub struct FinancialMechanicsExperimentsLane;
+pub struct FinancialMechanicsExperimentsLane {
+    strategy: FinancialMechanicsExperimentsStrategy,
+}
+
+impl FinancialMechanicsExperimentsLane {
+    pub fn new(strategy: FinancialMechanicsExperimentsStrategy) -> Self {
+        Self { strategy }
+    }
+
+    pub fn default_lane_name() -> &'static str {
+        "financial_mechanics_experiments"
+    }
+
+    #[cfg(test)]
+    pub fn fixture() -> Self {
+        Self::new(FinancialMechanicsExperimentsStrategy::Fixture)
+    }
+}
 
 #[async_trait]
 impl Lane for FinancialMechanicsExperimentsLane {
     fn name(&self) -> &'static str {
-        "financial_mechanics_experiments"
+        Self::default_lane_name()
     }
 
     fn gates(&self) -> Vec<Arc<dyn Gate>> {
@@ -35,10 +55,18 @@ impl Lane for FinancialMechanicsExperimentsLane {
             ));
         }
 
-        let sqlite_path = ctx.workspace.paths.sqlite_path.clone();
-        let service =
-            FinancialModelExplorerService::mechanics_experiments(sqlite_path, ctx.ticker());
-        service.run().await?;
+        match &self.strategy {
+            FinancialMechanicsExperimentsStrategy::Agent(config) => {
+                let sqlite_path = ctx.workspace.paths.sqlite_path.clone();
+                let agent = FinancialModelExplorerAgent::new(config.clone())
+                    .with_company_label(ctx.ticker());
+                agent.run(sqlite_path, ctx.ticker()).await?;
+            }
+            #[cfg(test)]
+            FinancialMechanicsExperimentsStrategy::Fixture => {
+                fixtures::persist_fixture_experiment(ctx).await?;
+            }
+        }
 
         if store.count_promoted_experiments().await? == 0 {
             return Err(Error::string(

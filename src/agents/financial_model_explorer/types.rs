@@ -20,6 +20,13 @@ impl ExplorerMode {
             Self::MechanicsExperiment => "submit_mechanics_experiments",
         }
     }
+
+    pub fn mode_label(self) -> &'static str {
+        match self {
+            Self::CruxTriage => "crux_triage",
+            Self::MechanicsExperiment => "mechanics_experiment",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

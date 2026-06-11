@@ -1,6 +1,6 @@
 use crate::{
     agents::financial_model_explorer::{
-        service::FinancialModelExplorerService, types::MechanicsExperimentsComplete,
+        FinancialModelExplorerAgent, types::MechanicsExperimentsComplete,
     },
     services::{financial_analysis_store::FinancialAnalysisStore, openrouter_chat::ClientToolExecuteResult},
 };
@@ -40,7 +40,7 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<ClientToo
             ))
         })?
     };
-    FinancialModelExplorerService::validate_mechanics_complete(&output)?;
+    FinancialModelExplorerAgent::validate_mechanics_complete(&output)?;
 
     let db = sea_orm::Database::connect(crate::services::workspace_store::sqlite_uri(
         sqlite_path,
@@ -62,13 +62,3 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<ClientToo
     Ok(ClientToolExecuteResult::Complete(text))
 }
 
-pub fn execute_sync_for_handler(
-    sqlite_path: &PathBuf,
-    arguments: &str,
-) -> Result<ClientToolExecuteResult> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| Error::string(&format!("failed to start tool runtime: {err}")))?;
-    runtime.block_on(execute(sqlite_path, arguments))
-}

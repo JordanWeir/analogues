@@ -1,5 +1,5 @@
 use crate::{
-    agents::financial_model_explorer::{service::FinancialModelExplorerService, types::CruxTriageOutput},
+    agents::financial_model_explorer::{FinancialModelExplorerAgent, types::CruxTriageOutput},
     services::openrouter_chat::ClientToolExecuteResult,
 };
 use loco_rs::prelude::*;
@@ -47,7 +47,7 @@ pub fn execute(arguments: &str) -> Result<ClientToolExecuteResult> {
             "submit_crux_triage arguments were not valid JSON: {err}"
         ))
     })?;
-    FinancialModelExplorerService::validate_crux_triage_output(&output)?;
+    FinancialModelExplorerAgent::validate_crux_triage_output(&output)?;
     let text = serde_json::to_string(&output).map_err(|err| {
         Error::string(&format!("failed to serialize accepted crux triage output: {err}"))
     })?;

@@ -4,7 +4,7 @@ use crate::{
         gate::{Gate, GateResult},
         result::{LaneResult, LaneStatus},
     },
-    services::financial_analysis_store::FinancialAnalysisStore,
+    services::{financial_analysis_store::FinancialAnalysisStore, workspace_sql::scalar_i64},
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
@@ -59,7 +59,7 @@ impl Gate for ExperimentsHaveQuestionsGate {
 
         let count = match scalar_i64(
             ctx.workspace.connection(),
-            "SELECT COUNT(*) FROM analysis_experiments WHERE TRIM(question) = ''",
+            "SELECT COUNT(*) AS count FROM analysis_experiments WHERE TRIM(question) = ''",
         )
         .await
         {
@@ -92,7 +92,7 @@ impl Gate for InputsAndUnitsRecordedGate {
 
         let count = match scalar_i64(
             ctx.workspace.connection(),
-            "SELECT COUNT(*) FROM analysis_experiments
+            "SELECT COUNT(*) AS count FROM analysis_experiments
              WHERE disposition IN ('promoted', 'candidate')
                AND (json_array_length(inputs_json) = 0 OR TRIM(period_basis) = '')",
         )
@@ -181,7 +181,7 @@ impl Gate for PromotedLinkedToSourcesGate {
 
         let count = match scalar_i64(
             ctx.workspace.connection(),
-            "SELECT COUNT(*) FROM analysis_experiments
+            "SELECT COUNT(*) AS count FROM analysis_experiments
              WHERE disposition = 'promoted'
                AND crux_id IS NULL
                AND (source_note IS NULL OR TRIM(source_note) = '')
@@ -221,7 +221,7 @@ impl Gate for RejectedExperimentsExplainedGate {
 
         let count = match scalar_i64(
             ctx.workspace.connection(),
-            "SELECT COUNT(*) FROM analysis_experiments
+            "SELECT COUNT(*) AS count FROM analysis_experiments
              WHERE disposition = 'rejected'
                AND (rejection_reason IS NULL OR TRIM(rejection_reason) = '')",
         )
@@ -275,14 +275,6 @@ fn outputs_json_contains_split(outputs_json: &str) -> bool {
     has_arithmetic && has_interpretation
 }
 
-async fn scalar_i64(db: &sea_orm::DatabaseConnection, sql: &str) -> Result<i64> {
-    let rows = query_all(db, sql).await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    row_i64(&rows[0], 0)
-}
-
 async fn query_all(
     db: &sea_orm::DatabaseConnection,
     sql: &str,
@@ -290,11 +282,6 @@ async fn query_all(
     db.query_all(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
         .await
         .map_err(|err| Error::string(&format!("query failed: {err}")))
-}
-
-fn row_i64(row: &sea_orm::QueryResult, index: usize) -> Result<i64> {
-    row.try_get_by_index::<i64>(index)
-        .map_err(|err| Error::string(&format!("expected integer column {index}: {err}")))
 }
 
 fn row_string(row: &sea_orm::QueryResult, index: usize) -> Result<String> {

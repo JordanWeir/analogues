@@ -4,7 +4,7 @@ use crate::{
         gate::{Gate, GateResult},
         result::{LaneResult, LaneStatus},
     },
-    services::financial_analysis_store::FinancialAnalysisStore,
+    services::{financial_analysis_store::FinancialAnalysisStore, workspace_sql::scalar_i64},
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
@@ -110,7 +110,7 @@ impl Gate for PromotedMetricsHaveRationaleGate {
 
         let count = match scalar_i64(
             ctx.workspace.connection(),
-            "SELECT COUNT(*) FROM supporting_metric_selections
+            "SELECT COUNT(*) AS count FROM supporting_metric_selections
              WHERE crux_id IS NOT NULL AND TRIM(rationale) = ''",
         )
         .await
@@ -147,7 +147,7 @@ impl Gate for PeriodShapeLabeledGate {
 
         let count = match scalar_i64(
             ctx.workspace.connection(),
-            "SELECT COUNT(*) FROM supporting_metric_selections
+            "SELECT COUNT(*) AS count FROM supporting_metric_selections
              WHERE crux_id IS NOT NULL
                AND quality_status IN ('period_mixed', 'quarantined')",
         )
@@ -170,14 +170,6 @@ impl Gate for PeriodShapeLabeledGate {
     }
 }
 
-async fn scalar_i64(db: &sea_orm::DatabaseConnection, sql: &str) -> Result<i64> {
-    let rows = query_all(db, sql).await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    row_i64(&rows[0], 0)
-}
-
 async fn query_all(
     db: &sea_orm::DatabaseConnection,
     sql: &str,
@@ -185,11 +177,6 @@ async fn query_all(
     db.query_all(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
         .await
         .map_err(|err| Error::string(&format!("query failed: {err}")))
-}
-
-fn row_i64(row: &sea_orm::QueryResult, index: usize) -> Result<i64> {
-    row.try_get_by_index::<i64>(index)
-        .map_err(|err| Error::string(&format!("expected integer column {index}: {err}")))
 }
 
 fn row_string(row: &sea_orm::QueryResult, index: usize) -> Result<String> {

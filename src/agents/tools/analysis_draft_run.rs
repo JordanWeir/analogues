@@ -2,7 +2,6 @@ use crate::{
     agents::financial_model_explorer::types::AnalysisDraftInput,
     services::{
         financial_analysis_store::FinancialAnalysisStore,
-        openrouter_chat::ClientToolExecuteResult,
         workspace_query::{execute_workspace_query, WorkspaceQueryResult},
     },
 };
@@ -98,18 +97,6 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<String> {
         &query_result,
         error_message.as_deref(),
     ))
-}
-
-pub fn execute_sync_for_handler(
-    sqlite_path: &PathBuf,
-    arguments: &str,
-) -> Result<ClientToolExecuteResult> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| Error::string(&format!("failed to start tool runtime: {err}")))?;
-    let payload = runtime.block_on(execute(sqlite_path, arguments))?;
-    Ok(ClientToolExecuteResult::Response(payload))
 }
 
 fn validate_draft_input(input: &AnalysisDraftInput) -> Result<()> {

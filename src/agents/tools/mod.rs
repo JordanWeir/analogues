@@ -2,7 +2,6 @@ pub mod analysis_draft_run;
 pub mod analysis_finalize;
 pub mod concept_review_submit;
 pub mod crux_triage_submit;
-pub mod financial_explorer_handler;
 pub mod fundamentals_lookup;
 pub mod mechanics_complete;
 pub mod narrative_research;
@@ -294,6 +293,55 @@ impl ClientToolHandler for RegistryClientHandler {
                 )
             })?;
             return narrative_research::execute(path, tool_name, arguments).await;
+        }
+        if tool_name == CRUX_TRIAGE_SUBMIT_TOOL_NAME
+            && self
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, SharedTool::CruxTriageSubmit))
+        {
+            return crux_triage_submit::execute(arguments);
+        }
+        if tool_name == ANALYSIS_DRAFT_TOOL_NAME
+            && self
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, SharedTool::AnalysisDraft))
+        {
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "run_analysis_draft requires a workspace sqlite path to be configured",
+                )
+            })?;
+            let result = analysis_draft_run::execute(path, arguments).await?;
+            return Ok(ClientToolExecuteResult::Response(result));
+        }
+        if tool_name == ANALYSIS_FINALIZE_TOOL_NAME
+            && self
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, SharedTool::AnalysisFinalize))
+        {
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "finalize_analysis requires a workspace sqlite path to be configured",
+                )
+            })?;
+            let result = analysis_finalize::execute(path, arguments).await?;
+            return Ok(ClientToolExecuteResult::Response(result));
+        }
+        if tool_name == MECHANICS_COMPLETE_TOOL_NAME
+            && self
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, SharedTool::MechanicsComplete))
+        {
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "submit_mechanics_experiments requires a workspace sqlite path to be configured",
+                )
+            })?;
+            return mechanics_complete::execute(path, arguments).await;
         }
 
         Err(loco_rs::prelude::Error::string(&format!(

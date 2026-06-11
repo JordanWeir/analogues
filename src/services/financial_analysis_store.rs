@@ -1,6 +1,9 @@
-use crate::agents::financial_model_explorer::types::{
-    AnalysisExperimentInput, AnalysisOutputRow, CruxCandidateInput, CruxTriageOutput,
-    DataGapInput, QualityFlagInput, SupportingMetricPromotion,
+use crate::{
+    agents::financial_model_explorer::types::{
+        AnalysisExperimentInput, AnalysisOutputRow, CruxCandidateInput, CruxTriageOutput,
+        DataGapInput, QualityFlagInput, SupportingMetricPromotion,
+    },
+    services::workspace_sql::{scalar_i64, sql_i64, sql_quote as escape_sql, sql_value},
 };
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
@@ -45,7 +48,7 @@ impl<'a> FinancialAnalysisStore<'a> {
     pub async fn count_promoted_cruxes(&self) -> Result<i64> {
         scalar_i64(
             self.db,
-            "SELECT COUNT(*) FROM crux_candidates WHERE disposition = 'promoted' AND status = 'active'",
+            "SELECT COUNT(*) AS count FROM crux_candidates WHERE disposition = 'promoted' AND status = 'active'",
         )
         .await
     }
@@ -53,7 +56,7 @@ impl<'a> FinancialAnalysisStore<'a> {
     pub async fn count_promoted_experiments(&self) -> Result<i64> {
         scalar_i64(
             self.db,
-            "SELECT COUNT(*) FROM analysis_experiments WHERE disposition = 'promoted'",
+            "SELECT COUNT(*) AS count FROM analysis_experiments WHERE disposition = 'promoted'",
         )
         .await
     }
@@ -87,7 +90,7 @@ impl<'a> FinancialAnalysisStore<'a> {
             self.db,
             &format!(
                 "SELECT id FROM crux_candidates WHERE crux_key = {} LIMIT 1",
-                sql_quote(crux_key)
+                sql_value(Some(crux_key))
             ),
         )
         .await?;
@@ -136,20 +139,20 @@ impl<'a> FinancialAnalysisStore<'a> {
                             rationale = excluded.rationale,
                             worker_run_id = excluded.worker_run_id,
                             payload_json = excluded.payload_json",
-                        key = sql_quote(&crux.crux_key),
-                        title = sql_quote(&crux.title),
-                        statement = sql_quote(&crux.statement),
-                        bridge = sql_quote_opt(crux.bridge_archetype.as_deref()),
-                        side = sql_quote_opt(crux.narrative_side.as_deref()),
-                        watch = sql_quote(&crux.watch_condition),
-                        confirm = sql_quote(&crux.confirming_signal),
-                        break_sig = sql_quote(&crux.breaking_signal),
-                        disposition = sql_quote(&crux.disposition),
-                        rationale = sql_quote(&crux.rationale),
-                        worker_run = sql_quote_opt(worker_run_id),
-                        created_by = sql_quote(selected_by),
-                        created_at = sql_quote(created_at),
-                        payload = sql_quote(&payload.to_string()),
+                        key = sql_str(&crux.crux_key),
+                        title = sql_str(&crux.title),
+                        statement = sql_str(&crux.statement),
+                        bridge = sql_value(crux.bridge_archetype.as_deref()),
+                        side = sql_value(crux.narrative_side.as_deref()),
+                        watch = sql_str(&crux.watch_condition),
+                        confirm = sql_str(&crux.confirming_signal),
+                        break_sig = sql_str(&crux.breaking_signal),
+                        disposition = sql_str(&crux.disposition),
+                        rationale = sql_str(&crux.rationale),
+                        worker_run = sql_value(worker_run_id),
+                        created_by = sql_str(selected_by),
+                        created_at = sql_str(created_at),
+                        payload = sql_str(&payload.to_string()),
                     ),
                 ))
                 .await
@@ -212,21 +215,19 @@ impl<'a> FinancialAnalysisStore<'a> {
                         {status}, {row_count}, {error}, {result},
                         {assumptions}, {inputs}, 'draft', {worker_run}, {created_at}
                     )",
-                    run_key = sql_quote(run_key),
-                    crux_id = crux_opt_i64(crux_id),
-                    question = sql_quote(question),
-                    sql = sql_quote(executed_sql),
-                    period_basis = sql_quote(period_basis),
-                    status = sql_quote(execution_status),
-                    row_count = row_count
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "NULL".to_string()),
-                    error = sql_quote_opt(error_message),
-                    result = sql_quote(result_json),
-                    assumptions = sql_quote(assumptions_json),
-                    inputs = sql_quote(inputs_json),
-                    worker_run = sql_quote_opt(worker_run_id),
-                    created_at = sql_quote(created_at),
+                    run_key = sql_str(run_key),
+                    crux_id = sql_i64(crux_id),
+                    question = sql_str(question),
+                    sql = sql_str(executed_sql),
+                    period_basis = sql_str(period_basis),
+                    status = sql_str(execution_status),
+                    row_count = sql_i64(row_count),
+                    error = sql_value(error_message),
+                    result = sql_str(result_json),
+                    assumptions = sql_str(assumptions_json),
+                    inputs = sql_str(inputs_json),
+                    worker_run = sql_value(worker_run_id),
+                    created_at = sql_str(created_at),
                 ),
             ))
             .await
@@ -290,26 +291,23 @@ impl<'a> FinancialAnalysisStore<'a> {
                         inputs_json = excluded.inputs_json,
                         outputs_json = excluded.outputs_json,
                         bridge_json = excluded.bridge_json",
-                    key = sql_quote(&experiment.experiment_key),
-                    crux_id = crux_opt_i64(crux_id),
-                    question = sql_quote(&experiment.question),
-                    purpose = sql_quote(&experiment.purpose),
-                    sql = sql_quote(&experiment.sql_body),
-                    period_basis = sql_quote(&experiment.period_basis),
-                    disposition = sql_quote(&experiment.disposition),
-                    rejection = sql_quote_opt(experiment.rejection_reason.as_deref()),
-                    source_note = sql_quote_opt(experiment.source_note.as_deref()),
-                    rationale = sql_quote_opt(experiment.rationale.as_deref()),
-                    worker_run = sql_quote_opt(worker_run_id),
-                    created_by = sql_quote(selected_by),
-                    created_at = sql_quote(created_at),
-                    assumptions = sql_quote(&assumptions_json),
-                    inputs = sql_quote(&inputs_json),
-                    outputs = sql_quote(&outputs_json),
-                    bridge = bridge_json
-                        .as_deref()
-                        .map(sql_quote)
-                        .unwrap_or_else(|| "NULL".to_string()),
+                    key = sql_str(&experiment.experiment_key),
+                    crux_id = sql_i64(crux_id),
+                    question = sql_str(&experiment.question),
+                    purpose = sql_str(&experiment.purpose),
+                    sql = sql_str(&experiment.sql_body),
+                    period_basis = sql_str(&experiment.period_basis),
+                    disposition = sql_str(&experiment.disposition),
+                    rejection = sql_value(experiment.rejection_reason.as_deref()),
+                    source_note = sql_value(experiment.source_note.as_deref()),
+                    rationale = sql_value(experiment.rationale.as_deref()),
+                    worker_run = sql_value(worker_run_id),
+                    created_by = sql_str(selected_by),
+                    created_at = sql_str(created_at),
+                    assumptions = sql_str(&assumptions_json),
+                    inputs = sql_str(&inputs_json),
+                    outputs = sql_str(&outputs_json),
+                    bridge = sql_value(bridge_json.as_deref()),
                 ),
             ))
             .await
@@ -324,9 +322,9 @@ impl<'a> FinancialAnalysisStore<'a> {
                          experiment_key = {experiment_key},
                          finalized_at = {created_at}
                      WHERE run_key = {run_key}",
-                    experiment_key = sql_quote(&experiment.experiment_key),
-                    created_at = sql_quote(created_at),
-                    run_key = sql_quote(run_key),
+                    experiment_key = sql_str(&experiment.experiment_key),
+                    created_at = sql_str(created_at),
+                    run_key = sql_str(run_key),
                 ),
             ))
             .await
@@ -343,8 +341,8 @@ impl<'a> FinancialAnalysisStore<'a> {
                     "UPDATE analysis_runs
                      SET status = 'discarded', finalized_at = {finalized_at}
                      WHERE run_key = {run_key}",
-                    finalized_at = sql_quote(finalized_at),
-                    run_key = sql_quote(run_key),
+                    finalized_at = sql_str(finalized_at),
+                    run_key = sql_str(run_key),
                 ),
             ))
             .await
@@ -358,7 +356,7 @@ impl<'a> FinancialAnalysisStore<'a> {
             &format!(
                 "SELECT run_key, status, execution_status
                  FROM analysis_runs WHERE run_key = {} LIMIT 1",
-                sql_quote(run_key)
+                sql_value(Some(run_key))
             ),
         )
         .await?;
@@ -375,7 +373,7 @@ impl<'a> FinancialAnalysisStore<'a> {
     pub async fn narrative_context_present(&self) -> Result<bool> {
         let map_rows = scalar_i64(
             self.db,
-            "SELECT COUNT(*) FROM narrative_map
+            "SELECT COUNT(*) AS count FROM narrative_map
              WHERE COALESCE(dominant, '') != ''
                 OR COALESCE(bull, '') != ''
                 OR COALESCE(bear, '') != ''",
@@ -386,13 +384,13 @@ impl<'a> FinancialAnalysisStore<'a> {
         }
         let item_rows = scalar_i64(
             self.db,
-            "SELECT COUNT(*) FROM narrative_map_items",
+            "SELECT COUNT(*) AS count FROM narrative_map_items",
         )
         .await?;
         if item_rows > 0 {
             return Ok(true);
         }
-        let claim_rows = scalar_i64(self.db, "SELECT COUNT(*) FROM claims").await?;
+        let claim_rows = scalar_i64(self.db, "SELECT COUNT(*) AS count FROM claims").await?;
         Ok(claim_rows > 0)
     }
 
@@ -414,19 +412,19 @@ impl<'a> FinancialAnalysisStore<'a> {
                         {scope}, {crux_id}, {taxonomy}, {concept}, {unit}, {label},
                         {rationale}, {period_basis}, {quality_status}, {selected_by}, {created_at}
                     )",
-                    scope = sql_quote(&metric.selection_scope),
-                    crux_id = crux_opt_i64(crux_id),
-                    taxonomy = sql_quote(&metric.taxonomy),
-                    concept = sql_quote(&metric.concept_name),
-                    unit = sql_quote(&metric.unit),
-                    label = sql_quote_opt(metric.label.as_deref()),
-                    rationale = sql_quote(&metric.rationale),
-                    period_basis = sql_quote_opt(metric.period_basis.as_deref()),
-                    quality_status = sql_quote(
+                    scope = sql_str(&metric.selection_scope),
+                    crux_id = sql_i64(crux_id),
+                    taxonomy = sql_str(&metric.taxonomy),
+                    concept = sql_str(&metric.concept_name),
+                    unit = sql_str(&metric.unit),
+                    label = sql_value(metric.label.as_deref()),
+                    rationale = sql_str(&metric.rationale),
+                    period_basis = sql_value(metric.period_basis.as_deref()),
+                    quality_status = sql_str(
                         metric.quality_status.as_deref().unwrap_or("ok"),
                     ),
-                    selected_by = sql_quote(selected_by),
-                    created_at = sql_quote(created_at),
+                    selected_by = sql_str(selected_by),
+                    created_at = sql_str(created_at),
                 ),
             ))
             .await
@@ -448,12 +446,12 @@ impl<'a> FinancialAnalysisStore<'a> {
                      ON CONFLICT(flag_key, metric_key, period) DO UPDATE SET
                         severity = excluded.severity,
                         description = excluded.description",
-                    key = sql_quote(&flag.flag_key),
-                    severity = sql_quote(&flag.severity),
-                    description = sql_quote(&flag.description),
-                    metric_key = sql_quote_opt(flag.metric_key.as_deref()),
-                    period = sql_quote_opt(flag.period.as_deref()),
-                    created_at = sql_quote(created_at),
+                    key = sql_str(&flag.flag_key),
+                    severity = sql_str(&flag.severity),
+                    description = sql_str(&flag.description),
+                    metric_key = sql_value(flag.metric_key.as_deref()),
+                    period = sql_value(flag.period.as_deref()),
+                    created_at = sql_str(created_at),
                 ),
             ))
             .await
@@ -469,9 +467,9 @@ impl<'a> FinancialAnalysisStore<'a> {
                     "INSERT INTO data_gaps (gap_key, description, status, created_at)
                      VALUES ({key}, {description}, 'open', {created_at})
                      ON CONFLICT(gap_key) DO UPDATE SET description = excluded.description",
-                    key = sql_quote(&gap.gap_key),
-                    description = sql_quote(&gap.description),
-                    created_at = sql_quote(created_at),
+                    key = sql_str(&gap.gap_key),
+                    description = sql_str(&gap.description),
+                    created_at = sql_str(created_at),
                 ),
             ))
             .await
@@ -493,12 +491,8 @@ pub fn outputs_include_arithmetic_and_interpretation(outputs: &[AnalysisOutputRo
     has_arithmetic && has_interpretation
 }
 
-async fn scalar_i64(db: &sea_orm::DatabaseConnection, sql: &str) -> Result<i64> {
-    let rows = query_all(db, sql).await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    row_i64(&rows[0], 0)
+fn sql_str(value: &str) -> String {
+    format!("'{}'", escape_sql(value))
 }
 
 async fn query_all(
@@ -518,20 +512,6 @@ fn row_i64(row: &sea_orm::QueryResult, index: usize) -> Result<i64> {
 fn row_string(row: &sea_orm::QueryResult, index: usize) -> Result<String> {
     row.try_get_by_index::<String>(index)
         .map_err(|err| Error::string(&format!("expected text column {index}: {err}")))
-}
-
-fn sql_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn sql_quote_opt(value: Option<&str>) -> String {
-    value.map(sql_quote).unwrap_or_else(|| "NULL".to_string())
-}
-
-fn crux_opt_i64(value: Option<i64>) -> String {
-    value
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "NULL".to_string())
 }
 
 #[cfg(test)]

@@ -1,9 +1,6 @@
 use crate::{
-    agents::financial_model_explorer::{
-        service::FinancialModelExplorerService,
-        types::AnalysisFinalizeInput,
-    },
-    services::{financial_analysis_store::FinancialAnalysisStore, openrouter_chat::ClientToolExecuteResult},
+    agents::financial_model_explorer::{FinancialModelExplorerAgent, types::AnalysisFinalizeInput},
+    services::financial_analysis_store::FinancialAnalysisStore,
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
@@ -39,7 +36,7 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<String> {
     if input.run_key.trim().is_empty() {
         return Err(Error::string("run_key cannot be empty"));
     }
-    FinancialModelExplorerService::validate_experiment_input(&input.experiment)?;
+    FinancialModelExplorerAgent::validate_experiment_input(&input.experiment)?;
 
     let db = sea_orm::Database::connect(crate::services::workspace_store::sqlite_uri(
         sqlite_path,
@@ -83,14 +80,3 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<String> {
     .to_string())
 }
 
-pub fn execute_sync_for_handler(
-    sqlite_path: &PathBuf,
-    arguments: &str,
-) -> Result<ClientToolExecuteResult> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| Error::string(&format!("failed to start tool runtime: {err}")))?;
-    let payload = runtime.block_on(execute(sqlite_path, arguments))?;
-    Ok(ClientToolExecuteResult::Response(payload))
-}
