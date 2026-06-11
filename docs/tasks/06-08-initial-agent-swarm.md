@@ -184,13 +184,18 @@ Setup a simple linear track, see where agents break down, iterate.
 
 9. **`build_narrative_map` lane + gates**
 
-10. **`financial_model_explorer` agent**
+10. **`financial_model_explorer` agent** ✅
+    - `src/agents/financial_model_explorer/` — crux-triage and mechanics-experiment modes
+    - Tools: `workspace_sql`, `submit_crux_triage`, `run_analysis_draft`, `finalize_analysis`, `submit_mechanics_experiments`
+    - Persistence via `financial_analysis_store` → `crux_candidates`, `analysis_runs`, `analysis_experiments`
 
-11. **`identify_crux_candidates` lane + gates**
+11. **`identify_crux_candidates` lane + gates** ✅
+    - `src/lanes/identify_crux_candidates/`; gates: narrative context, falsifiable cruxes, metric rationale, period-shape warn
 
-12. **`financial_mechanics_experiments` lane + gates**
+12. **`financial_mechanics_experiments` lane + gates** ✅
     - Same agent family as step 10; different golden path, reads/writes, and gates
     - More SQL/calculation-heavy than crux triage
+    - Draft → finalize tool flow; gates on promoted experiment structure
 
 13. **`scenario_builder` agent**
 
