@@ -14,10 +14,10 @@ Init Workspace Task Goals:
 
 */
 
-use analogues::app::App;
 use analogues::tasks::init_workspace::{
     initialize_workspace, ConceptMappingStrategy, InitWorkspaceRequest,
 };
+use analogues::{app::App, services::workspace_sql::scalar_i64};
 use loco_rs::{task, testing::prelude::*};
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use std::{fs, path::PathBuf};
@@ -60,6 +60,7 @@ async fn test_initializes_workspace_directories_and_database() {
         base_dir: base_dir.clone(),
         fetch_financials: false,
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
+        build_narrative_map: false,
     };
 
     let paths = initialize_workspace(&request).await.unwrap();
@@ -80,7 +81,9 @@ async fn test_initializes_workspace_directories_and_database() {
         "MSFT"
     );
     assert_eq!(
-        scalar_i64(&db, "SELECT COUNT(*) AS count FROM sections").await,
+        scalar_i64(&db, "SELECT COUNT(*) AS count FROM sections")
+            .await
+            .unwrap(),
         11
     );
     assert_eq!(
@@ -102,15 +105,16 @@ async fn test_initializes_workspace_directories_and_database() {
     assert_eq!(
         scalar_i64(
             &db,
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'scenario_outputs'"
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'scenario_outputs'"
         )
-        .await,
+        .await
+        .unwrap(),
         0
     );
     assert_eq!(
         scalar_i64(
             &db,
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (
                 'sec_raw_facts',
                 'concept_catalog_entries',
                 'concept_review_decisions',
@@ -128,31 +132,39 @@ async fn test_initializes_workspace_directories_and_database() {
                 'monte_carlo_scenario_probabilities'
             )"
         )
-        .await,
+        .await
+        .unwrap(),
         15
     );
     assert_eq!(
         scalar_i64(
             &db,
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name IN (
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'view' AND name IN (
                 'raw_fact_metric_catalog',
                 'canonical_fundamental_observations'
             )"
         )
-        .await,
+        .await
+        .unwrap(),
         2
     );
     assert_eq!(
-        scalar_i64(&db, "SELECT COUNT(*) FROM canonical_metric_definitions").await,
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) AS count FROM canonical_metric_definitions"
+        )
+        .await
+        .unwrap(),
         9
     );
     assert_eq!(
         scalar_i64(
             &db,
-            "SELECT COUNT(*) FROM monte_carlo_config
+            "SELECT COUNT(*) AS count FROM monte_carlo_config
              WHERE id = 1 AND iterations = 10000 AND seed = 42 AND bins = 30"
         )
-        .await,
+        .await
+        .unwrap(),
         1
     );
 
@@ -170,6 +182,7 @@ async fn test_allocates_next_index_without_overwriting() {
         base_dir: base_dir.clone(),
         fetch_financials: false,
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
+        build_narrative_map: false,
     };
 
     let first = initialize_workspace(&request).await.unwrap();
@@ -205,17 +218,5 @@ async fn scalar_string(db: &sea_orm::DatabaseConnection, sql: &str) -> String {
     .unwrap()
     .unwrap()
     .try_get_by_index::<String>(0)
-    .unwrap()
-}
-
-async fn scalar_i64(db: &sea_orm::DatabaseConnection, sql: &str) -> i64 {
-    db.query_one(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .unwrap()
-    .unwrap()
-    .try_get_by_index::<i64>(0)
     .unwrap()
 }

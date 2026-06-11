@@ -64,7 +64,9 @@ pub async fn resolve_canonical_mappings(
         ConceptMappingStrategy::CandidateScoring => CandidateScoringResolver.resolve(ctx).await,
         ConceptMappingStrategy::LlmReviewed => {
             let resolver = match agent_config {
-                Some(config) => LlmReviewedResolver { agent_config: config },
+                Some(config) => LlmReviewedResolver {
+                    agent_config: config,
+                },
                 None => LlmReviewedResolver::default(),
             };
             resolver.resolve(ctx).await

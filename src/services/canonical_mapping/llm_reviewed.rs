@@ -17,7 +17,9 @@ pub struct LlmReviewedResolver {
 impl Default for LlmReviewedResolver {
     fn default() -> Self {
         Self {
-            agent_config: crate::agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig::default(),
+            agent_config:
+                crate::agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig::default(
+                ),
         }
     }
 }
@@ -54,8 +56,11 @@ impl CanonicalMappingResolver for LlmReviewedResolver {
                     &selected_by,
                     ctx.fetched_at,
                 );
-                let promoted =
-                    ConceptReviewService::promote_reviewed_mappings(&model, &output, ctx.raw_sec_facts);
+                let promoted = ConceptReviewService::promote_reviewed_mappings(
+                    &model,
+                    &output,
+                    ctx.raw_sec_facts,
+                );
                 let mut quality_flags = promoted
                     .warnings
                     .into_iter()

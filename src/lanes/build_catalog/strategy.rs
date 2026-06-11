@@ -40,8 +40,9 @@ mod tests {
 
     #[test]
     fn maps_candidate_scoring_to_deterministic() {
-        let strategy =
-            CatalogResolutionStrategy::from_mapping_strategy(ConceptMappingStrategy::CandidateScoring);
+        let strategy = CatalogResolutionStrategy::from_mapping_strategy(
+            ConceptMappingStrategy::CandidateScoring,
+        );
         assert!(matches!(strategy, CatalogResolutionStrategy::Deterministic));
         assert_eq!(
             strategy.mapping_strategy(),

@@ -1,8 +1,5 @@
 use crate::{
-    services::{
-        concept_catalog::ConceptCatalog,
-        model_client::extract_json_blob,
-    },
+    services::{concept_catalog::ConceptCatalog, model_client::extract_json_blob},
     workspace::{CanonicalMapping, SecRawFact},
 };
 use loco_rs::prelude::*;
