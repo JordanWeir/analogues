@@ -1,4 +1,7 @@
-use crate::services::usage_snapshot::UsageSnapshot;
+use crate::services::{
+    usage_snapshot::UsageSnapshot,
+    workspace_sql::{last_insert_rowid, sql_quote},
+};
 use chrono::Utc;
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
@@ -65,23 +68,8 @@ impl WorkerRunStore {
             .await
             .map_err(|err| Error::string(&format!("failed to persist worker run: {err}")))?;
 
-        let row = db
-            .query_one(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                "SELECT last_insert_rowid() AS id".to_string(),
-            ))
-            .await
-            .map_err(|err| Error::string(&format!("failed to read worker run id: {err}")))?
-            .ok_or_else(|| Error::string("worker run insert did not return an id"))?;
-
-        Ok(row
-            .try_get::<i64>("", "id")
-            .map_err(|err| Error::string(&format!("failed to parse worker run id: {err}")))?)
+        last_insert_rowid(&db).await
     }
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 fn optional_i64(value: Option<u64>) -> String {

@@ -67,6 +67,10 @@ impl NarrativeResearcherAgent {
             tools = tools.with_web_search(WebSearchConfig::concept_validation_defaults());
         }
 
+        // @TODO: This agent would benefit a lot from us being able to insert a "Task Status" with the net-finished and still-to-be-done work lists
+        // @TODO: Lets update the ToolLoopAgent with preStep and postStep hooks, where these lifecycle hooks can be used to handle things like:
+        // 1. Emit a message at the Nth step, the penultimate step, even steps, etc.  Just need a step param to do this
+        // 2. Emit messages about the current job state.  eg: if 5 tool calls must be called in the overall loop, we should be able to emit a TODO list of finished and pending jobs.
         let response = ToolLoopAgent::default()
             .run(ToolLoopRequest {
                 worker_name: WORKER_NAME.to_string(),
@@ -200,6 +204,9 @@ async fn load_company_name(db: &sea_orm::DatabaseConnection) -> Result<Option<St
     Ok(row.and_then(|row| row.try_get::<String>("", "company_name").ok()))
 }
 
+// @TODO: This narrative reesarch runs after the fundamental_catalog_manager agent.  
+// Instead of getting fixed columns from fundamentals, we should instead query whatever selected fundamental columns that agent flagged
+// We should get something like the last 8 values from each of the targetted columns, so we have a recent time series + anything it thought was worth flagging.
 async fn fundamentals_summary(workspace: &WorkspaceHandle) -> Result<String> {
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
     let rows = workspace

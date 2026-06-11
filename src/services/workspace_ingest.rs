@@ -3,12 +3,13 @@ use crate::{
         market_quote_provider::YahooChartMarketDataAdapter,
         sec_facts_provider::SecFactsProvider,
         workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
+        workspace_sql::{execute_sql, sql_quote, sql_value},
     },
     workspace::{MarketQuoteSnapshot, SecRawFact},
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::ConnectionTrait;
 use std::time::Duration;
 
 /// Phase-1 SEC fetch result (raw facts only; catalog materialization is phase 2).
@@ -247,26 +248,6 @@ pub async fn close_data_gap(db: &impl ConnectionTrait, gap_key: &str) -> Result<
     .await
 }
 
-async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
-    Ok(())
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn sql_value(value: Option<&str>) -> String {
-    value.map_or_else(
-        || "NULL".to_string(),
-        |value| format!("'{}'", sql_quote(value)),
-    )
-}
 
 #[cfg(test)]
 mod tests {

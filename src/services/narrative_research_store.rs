@@ -1,3 +1,6 @@
+use crate::services::workspace_sql::{
+    execute_sql, last_insert_rowid, scalar_i64, sql_literal, sql_quote,
+};
 use crate::agents::narrative_researcher::{
     types::{
         CaptureClaimInput, CaptureNarrativeItemsInput, CaptureNarrativeSideInput,
@@ -192,12 +195,12 @@ impl NarrativeResearchStore {
                     "INSERT INTO sources (title, url, source_type, published_at, accessed_at, why_it_matters, notes)
                      VALUES ('{}', {}, {}, {}, {}, '{}', {})",
                     sql_quote(&source.title),
-                    sql_optional_str(source.url.as_deref()),
-                    sql_optional_str(Some(&source.source_type)),
-                    sql_optional_str(source.published_at.as_deref()),
-                    sql_optional_str(source.accessed_at.as_deref().or(Some(now.as_str()))),
+                    sql_literal(source.url.as_deref()),
+                    sql_literal(Some(&source.source_type)),
+                    sql_literal(source.published_at.as_deref()),
+                    sql_literal(source.accessed_at.as_deref().or(Some(now.as_str()))),
                     sql_quote(&source.why_it_matters),
-                    sql_optional_str(source.notes.as_deref()),
+                    sql_literal(source.notes.as_deref()),
                 ),
             )
             .await?;
@@ -246,11 +249,11 @@ impl NarrativeResearchStore {
                     source_id
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| "NULL".to_string()),
-                    sql_optional_str(Some(&claim.claim_type)),
-                    sql_optional_str(Some(&claim.side)),
-                    sql_optional_str(Some(&claim.confidence)),
-                    sql_optional_str(claim.metric.as_deref()),
-                    sql_optional_str(claim.notes.as_deref()),
+                    sql_literal(Some(&claim.claim_type)),
+                    sql_literal(Some(&claim.side)),
+                    sql_literal(Some(&claim.confidence)),
+                    sql_literal(claim.metric.as_deref()),
+                    sql_literal(claim.notes.as_deref()),
                 ),
             )
             .await?;
@@ -555,7 +558,7 @@ impl NarrativeResearchStore {
                 "UPDATE sections SET status = '{}', title = {}, body = '{}', updated_at = '{}'
                  WHERE section_key = '{}'",
                 sql_quote(status),
-                sql_optional_str(title),
+                sql_literal(title),
                 sql_quote(body),
                 sql_quote(&now),
                 sql_quote(section_key),
@@ -760,37 +763,6 @@ async fn query_strings(db: &impl ConnectionTrait, sql: &str) -> Result<Vec<Strin
         .collect()
 }
 
-async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
-    let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("query failed: {err}")))?
-        .ok_or_else(|| Error::string("query returned no row"))?;
-    row.try_get::<i64>("", "count")
-        .map_err(|err| Error::string(&format!("parse count: {err}")))
-}
-
-async fn last_insert_rowid(db: &impl ConnectionTrait) -> Result<i64> {
-    scalar_i64(db, "SELECT last_insert_rowid() AS count").await
-}
-
-async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("SQL failed: {err}")))?;
-    Ok(())
-}
-
 fn validation_error(err: ValidationError) -> Error {
     Error::string(&err.to_string())
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn sql_optional_str(value: Option<&str>) -> String {
-    value
-        .filter(|text| !text.is_empty())
-        .map_or_else(|| "NULL".to_string(), |text| format!("'{}'", sql_quote(text)))
 }

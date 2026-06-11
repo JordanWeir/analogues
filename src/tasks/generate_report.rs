@@ -1,3 +1,4 @@
+use crate::services::workspace_sql::{execute_sql, sql_number, sql_quote, sql_value};
 use chrono::{NaiveDate, Utc};
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, QueryResult, Statement};
@@ -1617,16 +1618,6 @@ async fn query_one_optional(
     .map_err(|err| Error::string(&format!("failed to execute SQL query: {err}\n{sql}")))
 }
 
-async fn execute_sql(db: &sea_orm::DatabaseConnection, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}\n{sql}")))?;
-    Ok(())
-}
-
 fn row_string(row: &QueryResult, index: usize) -> Result<String> {
     row.try_get_by_index::<String>(index)
         .map_err(|err| Error::string(&format!("failed to read string column {index}: {err}")))
@@ -1740,20 +1731,6 @@ fn sqlite_uri(path: &Path) -> String {
     format!("sqlite://{normalized_path}?mode=rw")
 }
 
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn sql_value(value: Option<&str>) -> String {
-    value.map_or_else(
-        || "NULL".to_string(),
-        |value| format!("'{}'", sql_quote(value)),
-    )
-}
-
-fn sql_number(value: Option<f64>) -> String {
-    value.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-}
 
 fn parse_body(body: Option<String>) -> Value {
     match body {

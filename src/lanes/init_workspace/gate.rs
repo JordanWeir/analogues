@@ -1,8 +1,11 @@
 use super::InitWorkspaceLane;
-use crate::lanes::{
-    context::LaneContext,
-    gate::{Gate, GateResult},
-    result::LaneResult,
+use crate::{
+    lanes::{
+        context::LaneContext,
+        gate::{Gate, GateResult},
+        result::LaneResult,
+    },
+    services::workspace_sql::scalar_i64,
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
@@ -188,19 +191,6 @@ async fn scalar_string(db: &impl ConnectionTrait, sql: &str) -> Result<String> {
         .or_else(|_| row.try_get::<String>("", "status"))
         .or_else(|_| row.try_get::<String>("", "financial_fetch_status"))
         .map_err(|err| Error::string(&format!("failed to parse string column: {err}")))
-}
-
-async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
-    let row = db
-        .query_one(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            sql.to_string(),
-        ))
-        .await
-        .map_err(|err| Error::string(&format!("query failed: {err}")))?
-        .ok_or_else(|| Error::string("query returned no row"))?;
-    row.try_get::<i64>("", "count")
-        .map_err(|err| Error::string(&format!("failed to parse count: {err}")))
 }
 
 #[cfg(test)]

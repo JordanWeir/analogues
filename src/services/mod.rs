@@ -17,4 +17,5 @@ pub mod workspace_financial_store;
 pub mod workspace_ingest;
 pub mod workspace_phases;
 pub mod workspace_query;
+pub mod workspace_sql;
 pub mod workspace_store;

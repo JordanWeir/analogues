@@ -1,6 +1,7 @@
 use crate::{
     services::{
         concept_catalog::ConceptCatalog, concept_review::ConceptReviewDecisionRecord,
+        workspace_sql::{execute_sql, sql_i64, sql_number, sql_quote, sql_value},
         workspace_store::execute_schema,
     },
     workspace::{
@@ -827,16 +828,6 @@ fn row_opt_f64(row: &QueryResult, column: &str) -> Result<Option<f64>> {
         .map_err(|err| Error::string(&format!("missing column {column}: {err}")))
 }
 
-async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
-    Ok(())
-}
-
 fn raw_sec_fact_values(fact: &SecRawFact) -> String {
     format!(
         "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', '{}')",
@@ -931,25 +922,6 @@ fn observation_values(observation: &FundamentalObservation, updated_at: &str) ->
         if observation.is_derived { 1 } else { 0 },
         sql_quote(updated_at),
     )
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn sql_value(value: Option<&str>) -> String {
-    value.map_or_else(
-        || "NULL".to_string(),
-        |value| format!("'{}'", sql_quote(value)),
-    )
-}
-
-fn sql_number(value: Option<f64>) -> String {
-    value.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-}
-
-fn sql_i64(value: Option<i64>) -> String {
-    value.map_or_else(|| "NULL".to_string(), |value| value.to_string())
 }
 
 #[cfg(test)]

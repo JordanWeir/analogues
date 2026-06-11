@@ -1,8 +1,11 @@
-use analogues::tasks::{
-    generate_report::{generate_report, GenerateReportRequest},
-    init_workspace::{initialize_workspace, ConceptMappingStrategy, InitWorkspaceRequest},
+use analogues::{
+    services::workspace_sql::{execute_sql, scalar_i64},
+    tasks::{
+        generate_report::{generate_report, GenerateReportRequest},
+        init_workspace::{initialize_workspace, ConceptMappingStrategy, InitWorkspaceRequest},
+    },
 };
-use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+use sea_orm::Database;
 use std::{fs, path::PathBuf};
 
 use serial_test::serial;
@@ -46,25 +49,31 @@ async fn test_can_run_generate_report() {
     assert_eq!(
         scalar_i64(
             &db,
-            "SELECT COUNT(*) FROM artifacts WHERE artifact_type = 'report_html'"
+            "SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'report_html'"
         )
-        .await,
+        .await
+        .unwrap(),
         1
     );
     assert_eq!(
-        scalar_i64(&db, "SELECT COUNT(*) FROM monte_carlo_summary").await,
+        scalar_i64(&db, "SELECT COUNT(*) AS count FROM monte_carlo_summary")
+            .await
+            .unwrap(),
         1
     );
     assert_eq!(
-        scalar_i64(&db, "SELECT COUNT(*) FROM monte_carlo_histogram_bins").await,
+        scalar_i64(&db, "SELECT COUNT(*) AS count FROM monte_carlo_histogram_bins")
+            .await
+            .unwrap(),
         5
     );
     assert_eq!(
         scalar_i64(
             &db,
-            "SELECT COUNT(*) FROM monte_carlo_scenario_probabilities"
+            "SELECT COUNT(*) AS count FROM monte_carlo_scenario_probabilities"
         )
-        .await,
+        .await
+        .unwrap(),
         1
     );
 
@@ -79,7 +88,8 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
          SET company_name = 'Microsoft Corp', currency = 'USD'
          WHERE id = 1",
     )
-    .await;
+    .await
+    .unwrap();
 
     for sql in [
         "INSERT INTO fundamentals (metric_key, metric_label, metric_value, unit, period, updated_at)
@@ -93,7 +103,7 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
         "INSERT INTO fundamentals (metric_key, metric_label, metric_value, unit, period, updated_at)
          VALUES ('eps_ttm', 'EPS TTM', 2.0, 'USD', '2026-06-30', '2026-06-04T00:00:00Z')",
     ] {
-        execute_sql(db, sql).await;
+        execute_sql(db, sql).await.unwrap();
     }
 
     for sql in [
@@ -114,7 +124,7 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
             '2026-06-04T00:00:00Z'
          )",
     ] {
-        execute_sql(db, sql).await;
+        execute_sql(db, sql).await.unwrap();
     }
 
     execute_sql(
@@ -122,13 +132,15 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
         "INSERT INTO sources (title, url, source_type, published_at, why_it_matters)
          VALUES ('FY 2026 filing', 'https://example.com/filing', 'Filing', '2026-06-01', 'Baseline financials')",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO claims (claim, source_id, claim_type, side, confidence, metric)
          VALUES ('Revenue can compound in the scenario window.', 1, 'revenue growth', 'bull', 'Medium', 'revenue')",
     )
-    .await;
+    .await
+    .unwrap();
 
     for (key, body) in [
         (
@@ -154,7 +166,8 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
                 key
             ),
         )
-        .await;
+        .await
+        .unwrap();
     }
 
     execute_sql(
@@ -162,25 +175,29 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
         "INSERT INTO narrative_map (id, dominant, bull, bear, consensus, counter_narrative)
          VALUES (1, 'AI growth', 'Growth accelerates', 'Multiple compresses', 'Durable compounder', 'Margins matter')",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO content_blocks (section_key, block_order, block_type, title, body)
          VALUES ('financial_math', 1, 'paragraph', 'Economic bridge', 'Revenue and margin drive the scenario math.')",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO watch_items (item_order, title, description, signal_type)
          VALUES (1, 'Growth durability', 'Revenue growth relative to expectations', 'Scenario One')",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO historical_analogues (analogue_order, analogue, setup, lesson, why_it_can_mislead)
          VALUES (1, 'Large-cap software transition', 'Durable growth narrative', 'Watch margin durability', 'Different market context')",
     )
-    .await;
+    .await
+    .unwrap();
 
     execute_sql(
         db,
@@ -190,25 +207,29 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
             1, 'Scenario One', 'bullish', 1.0, 'Growth improves modestly.', 'Revenue growth and margin are stable.'
          )",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO scenario_crux_assumptions (scenario_id, crux_order, crux, assumption, impact)
          VALUES (1, 1, 'Growth durability', 'Growth remains above baseline.', 'Revenue expands')",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO scenario_signals (scenario_id, signal_order, signal_type, body)
          VALUES (1, 1, 'confirming', 'Revenue guide rises')",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO scenario_signals (scenario_id, signal_order, signal_type, body)
          VALUES (1, 1, 'breaking', 'Margins compress')",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "INSERT INTO scenario_periods (
@@ -221,12 +242,14 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
             0.5, 0.5
          )",
     )
-    .await;
+    .await
+    .unwrap();
     execute_sql(
         db,
         "UPDATE monte_carlo_config SET iterations = 100, seed = 42, bins = 5 WHERE id = 1",
     )
-    .await;
+    .await
+    .unwrap();
 }
 
 async fn open_run_db_rw(path: &PathBuf) -> sea_orm::DatabaseConnection {
@@ -235,27 +258,6 @@ async fn open_run_db_rw(path: &PathBuf) -> sea_orm::DatabaseConnection {
         path.to_string_lossy().replace('\\', "/")
     ))
     .await
-    .unwrap()
-}
-
-async fn execute_sql(db: &sea_orm::DatabaseConnection, sql: &str) {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn scalar_i64(db: &sea_orm::DatabaseConnection, sql: &str) -> i64 {
-    db.query_one(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .unwrap()
-    .unwrap()
-    .try_get_by_index::<i64>(0)
     .unwrap()
 }
 

@@ -1,9 +1,11 @@
 use crate::{
-    services::fundamental_deriver::{classify_period as classify_fact_period, unit_matches},
+    services::{
+        fundamental_deriver::{classify_period as classify_fact_period, unit_matches},
+        workspace_sql::{execute_sql, sql_quote},
+    },
     workspace::{CanonicalMapping, ConceptCatalogEntry, SecRawFact},
 };
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default)]
@@ -762,21 +764,6 @@ fn update_max_number(target: &mut Option<f64>, candidate: f64) {
     if target.is_none_or(|existing| candidate > existing) {
         *target = Some(candidate);
     }
-}
-
-async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
-
-    Ok(())
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 #[cfg(test)]

@@ -8,10 +8,12 @@ use super::{
     context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus,
     result::LaneWritesSummary,
 };
-use crate::agents::narrative_researcher::NarrativeResearcherAgent;
+use crate::{
+    agents::narrative_researcher::NarrativeResearcherAgent,
+    services::workspace_sql::scalar_i64,
+};
 use async_trait::async_trait;
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::sync::Arc;
 use strategy::NarrativeMapStrategy;
 
@@ -111,16 +113,6 @@ impl Lane for BuildNarrativeMapLane {
             },
         })
     }
-}
-
-async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
-    let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("query failed: {err}")))?
-        .ok_or_else(|| Error::string("query returned no row"))?;
-    row.try_get::<i64>("", "count")
-        .map_err(|err| Error::string(&format!("parse count: {err}")))
 }
 
 #[cfg(test)]

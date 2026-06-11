@@ -1,11 +1,13 @@
 use crate::{
-    services::{concept_catalog::ConceptCatalog, workspace_store::SCHEMA_VERSION},
+    services::{
+        concept_catalog::ConceptCatalog,
+        workspace_sql::{execute_sql, sql_quote},
+        workspace_store::SCHEMA_VERSION,
+    },
     workspace::{InitWorkspaceRequest, WorkspacePaths},
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
-
 const REQUIRED_SECTIONS: &[&str] = &[
     "orientation",
     "business_model",
@@ -79,16 +81,3 @@ pub async fn seed_database(
     Ok(())
 }
 
-async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(
-        DatabaseBackend::Sqlite,
-        sql.to_string(),
-    ))
-    .await
-    .map_err(|err| Error::string(&format!("failed to execute SQL statement: {err}")))?;
-    Ok(())
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}

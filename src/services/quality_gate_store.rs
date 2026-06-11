@@ -1,7 +1,10 @@
-use crate::lanes::gate::GateResult;
+use crate::{
+    lanes::gate::GateResult,
+    services::workspace_sql::{scalar_i64_as, sql_quote},
+};
 use chrono::Utc;
 use loco_rs::prelude::*;
-use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+use sea_orm::{Database, DatabaseBackend, Statement};
 use std::path::Path;
 
 pub struct QualityGateStore;
@@ -56,26 +59,17 @@ impl QualityGateStore {
             .await
             .map_err(|err| Error::string(&format!("failed to open workspace db: {err}")))?;
 
-        let row = db
-            .query_one(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                format!(
-                    "SELECT COUNT(*) AS count FROM quality_gate_results WHERE lane_name = '{}'",
-                    sql_quote(lane_name)
-                ),
-            ))
-            .await
-            .map_err(|err| Error::string(&format!("failed to count quality gates: {err}")))?
-            .ok_or_else(|| Error::string("quality gate count query returned no row"))?;
-
-        row.try_get::<i64>("", "count")
-            .map(|count| count as u64)
-            .map_err(|err| Error::string(&format!("failed to parse quality gate count: {err}")))
+        scalar_i64_as(
+            &db,
+            &format!(
+                "SELECT COUNT(*) AS count FROM quality_gate_results WHERE lane_name = '{}'",
+                sql_quote(lane_name)
+            ),
+            "count",
+        )
+        .await
+        .map(|count| count as u64)
     }
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 #[cfg(test)]

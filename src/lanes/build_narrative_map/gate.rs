@@ -5,6 +5,7 @@ use crate::{
         gate::{Gate, GateResult},
         result::LaneResult,
     },
+    services::workspace_sql::{scalar_i64, sql_quote},
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
@@ -286,20 +287,6 @@ impl Gate for EarlySectionsDraftedGate {
 
         GateResult::pass(self.name())
     }
-}
-
-async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
-    let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("query failed: {err}")))?
-        .ok_or_else(|| Error::string("query returned no row"))?;
-    row.try_get::<i64>("", "count")
-        .map_err(|err| Error::string(&format!("parse count: {err}")))
-}
-
-fn sql_quote(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 #[cfg(test)]
