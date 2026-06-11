@@ -1731,7 +1731,6 @@ fn sqlite_uri(path: &Path) -> String {
     format!("sqlite://{normalized_path}?mode=rw")
 }
 
-
 fn parse_body(body: Option<String>) -> Value {
     match body {
         Some(body) if !body.trim().is_empty() => {

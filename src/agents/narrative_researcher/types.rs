@@ -5,13 +5,8 @@ pub const MIN_SOURCES: usize = 3;
 pub const MIN_CLAIMS: usize = 5;
 pub const MIN_CRUXES: usize = 2;
 
-pub const NARRATIVE_SIDES: &[&str] = &[
-    "dominant",
-    "bull",
-    "bear",
-    "consensus",
-    "counter_narrative",
-];
+pub const NARRATIVE_SIDES: &[&str] =
+    &["dominant", "bull", "bear", "consensus", "counter_narrative"];
 
 pub const NARRATIVE_ITEM_TYPES: &[&str] = &["agreement", "crux"];
 

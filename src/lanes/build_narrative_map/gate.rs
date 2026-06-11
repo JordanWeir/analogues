@@ -35,9 +35,11 @@ impl Gate for SourcePackPopulatedGate {
             return GateResult::pass(self.name());
         }
 
-        let source_count =
-            scalar_i64(ctx.workspace.connection(), "SELECT COUNT(*) AS count FROM sources")
-                .await;
+        let source_count = scalar_i64(
+            ctx.workspace.connection(),
+            "SELECT COUNT(*) AS count FROM sources",
+        )
+        .await;
         if let Err(err) = &source_count {
             return GateResult::reject(self.name(), format!("source count failed: {err}"));
         }
@@ -83,7 +85,9 @@ impl Gate for SourcePackPopulatedGate {
                 "no source has a substantive why_it_matters field",
             ),
             Ok(_) => GateResult::pass(self.name()),
-            Err(err) => GateResult::reject(self.name(), format!("source quality check failed: {err}")),
+            Err(err) => {
+                GateResult::reject(self.name(), format!("source quality check failed: {err}"))
+            }
         }
     }
 }
@@ -101,14 +105,21 @@ impl Gate for ClaimsSourceCustodyGate {
             return GateResult::pass(self.name());
         }
 
-        let claim_count =
-            scalar_i64(ctx.workspace.connection(), "SELECT COUNT(*) AS count FROM claims")
-                .await;
+        let claim_count = scalar_i64(
+            ctx.workspace.connection(),
+            "SELECT COUNT(*) AS count FROM claims",
+        )
+        .await;
         match claim_count {
             Ok(count) if count < 5 => {
-                return GateResult::reject(self.name(), format!("need at least 5 claims, found {count}"))
+                return GateResult::reject(
+                    self.name(),
+                    format!("need at least 5 claims, found {count}"),
+                )
             }
-            Err(err) => return GateResult::reject(self.name(), format!("claim count failed: {err}")),
+            Err(err) => {
+                return GateResult::reject(self.name(), format!("claim count failed: {err}"))
+            }
             _ => {}
         }
 
@@ -168,24 +179,24 @@ impl Gate for NarrativeDebatePresentGate {
             .connection()
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
-                "SELECT dominant, bull, bear, consensus FROM narrative_map WHERE id = 1".to_string(),
+                "SELECT dominant, bull, bear, consensus FROM narrative_map WHERE id = 1"
+                    .to_string(),
             ))
             .await;
 
         let row = match row {
             Ok(Some(row)) => row,
-            Ok(None) => {
-                return GateResult::reject(self.name(), "narrative_map row is missing")
-            }
+            Ok(None) => return GateResult::reject(self.name(), "narrative_map row is missing"),
             Err(err) => {
-                return GateResult::reject(self.name(), format!("narrative_map query failed: {err}"))
+                return GateResult::reject(
+                    self.name(),
+                    format!("narrative_map query failed: {err}"),
+                )
             }
         };
 
         for field in ["dominant", "bull", "bear", "consensus"] {
-            let value = row
-                .try_get::<String>("", field)
-                .unwrap_or_default();
+            let value = row.try_get::<String>("", field).unwrap_or_default();
             if value.trim().len() < MIN_NARRATIVE_BODY_LEN {
                 return GateResult::reject(
                     self.name(),
@@ -262,7 +273,10 @@ impl Gate for EarlySectionsDraftedGate {
             let row = match row {
                 Ok(Some(row)) => row,
                 Ok(None) => {
-                    return GateResult::reject(self.name(), format!("{section_key} section missing"))
+                    return GateResult::reject(
+                        self.name(),
+                        format!("{section_key} section missing"),
+                    )
                 }
                 Err(err) => {
                     return GateResult::reject(
@@ -275,7 +289,10 @@ impl Gate for EarlySectionsDraftedGate {
             let status = row.try_get::<String>("", "status").unwrap_or_default();
             let body = row.try_get::<String>("", "body").unwrap_or_default();
             if body.trim().is_empty() {
-                return GateResult::reject(self.name(), format!("{section_key} section body is empty"));
+                return GateResult::reject(
+                    self.name(),
+                    format!("{section_key} section body is empty"),
+                );
             }
             if !matches!(status.as_str(), "draft" | "complete") {
                 return GateResult::reject(
@@ -293,11 +310,8 @@ impl Gate for EarlySectionsDraftedGate {
 mod tests {
     use super::*;
     use crate::{
-        lanes::{
-            build_narrative_map::BuildNarrativeMapLane,
-            result::LaneWritesSummary,
-        },
         lanes::build_narrative_map::fixtures::{catalog_lane_context, populate_fixture_narrative},
+        lanes::{build_narrative_map::BuildNarrativeMapLane, result::LaneWritesSummary},
     };
 
     #[tokio::test]

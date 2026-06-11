@@ -1,6 +1,7 @@
 use crate::{
     services::{
-        concept_catalog::ConceptCatalog, concept_review::ConceptReviewDecisionRecord,
+        concept_catalog::ConceptCatalog,
+        concept_review::ConceptReviewDecisionRecord,
         workspace_sql::{execute_sql, sql_i64, sql_number, sql_quote, sql_value},
         workspace_store::execute_schema,
     },

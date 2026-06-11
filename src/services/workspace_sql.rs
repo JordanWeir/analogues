@@ -7,9 +7,10 @@ pub fn sql_quote(value: &str) -> String {
 
 /// Format an optional string as a SQL literal; `None` and empty strings become `NULL`.
 pub fn sql_literal(value: Option<&str>) -> String {
-    value
-        .filter(|text| !text.is_empty())
-        .map_or_else(|| "NULL".to_string(), |text| format!("'{}'", sql_quote(text)))
+    value.filter(|text| !text.is_empty()).map_or_else(
+        || "NULL".to_string(),
+        |text| format!("'{}'", sql_quote(text)),
+    )
 }
 
 /// Format an optional string as a SQL literal; only `None` becomes `NULL`.
@@ -34,7 +35,10 @@ pub async fn scalar_i64(db: &impl ConnectionTrait, sql: &str) -> Result<i64> {
 
 pub async fn scalar_i64_as(db: &impl ConnectionTrait, sql: &str, column: &str) -> Result<i64> {
     let row = db
-        .query_one(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
+        .query_one(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
         .await
         .map_err(|err| Error::string(&format!("query failed: {err}")))?
         .ok_or_else(|| Error::string("query returned no row"))?;
@@ -43,9 +47,12 @@ pub async fn scalar_i64_as(db: &impl ConnectionTrait, sql: &str, column: &str) -
 }
 
 pub async fn execute_sql(db: &impl ConnectionTrait, sql: &str) -> Result<()> {
-    db.execute(Statement::from_string(DatabaseBackend::Sqlite, sql.to_string()))
-        .await
-        .map_err(|err| Error::string(&format!("SQL failed: {err}")))?;
+    db.execute(Statement::from_string(
+        DatabaseBackend::Sqlite,
+        sql.to_string(),
+    ))
+    .await
+    .map_err(|err| Error::string(&format!("SQL failed: {err}")))?;
     Ok(())
 }
 

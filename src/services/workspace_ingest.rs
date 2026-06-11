@@ -248,7 +248,6 @@ pub async fn close_data_gap(db: &impl ConnectionTrait, gap_key: &str) -> Result<
     .await
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

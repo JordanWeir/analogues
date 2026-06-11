@@ -9,8 +9,7 @@ use super::{
     result::LaneWritesSummary,
 };
 use crate::{
-    agents::narrative_researcher::NarrativeResearcherAgent,
-    services::workspace_sql::scalar_i64,
+    agents::narrative_researcher::NarrativeResearcherAgent, services::workspace_sql::scalar_i64,
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;

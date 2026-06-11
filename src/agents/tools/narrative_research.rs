@@ -4,8 +4,7 @@ use crate::{
         CaptureOrientationInput, CaptureResearchGapInput, CaptureSectionInput, CaptureSourceInput,
     },
     services::{
-        narrative_research_store::NarrativeResearchStore,
-        openrouter_chat::ClientToolExecuteResult,
+        narrative_research_store::NarrativeResearchStore, openrouter_chat::ClientToolExecuteResult,
         workspace_store,
     },
 };
@@ -93,7 +92,8 @@ pub async fn execute(
         }
         TOOL_FINALIZE => {
             let outcome = store.finalize().await?;
-            let text = serde_json::to_string(&outcome.into_response()).map_err(map_serialize_err)?;
+            let text =
+                serde_json::to_string(&outcome.into_response()).map_err(map_serialize_err)?;
             return Ok(ClientToolExecuteResult::Complete(text));
         }
         other => {
@@ -382,7 +382,10 @@ mod tests {
         let source_result = execute(&path, TOOL_CAPTURE_SOURCES, &sources)
             .await
             .expect("sources");
-        assert!(matches!(source_result, ClientToolExecuteResult::Response(_)));
+        assert!(matches!(
+            source_result,
+            ClientToolExecuteResult::Response(_)
+        ));
 
         let claims = json!({
             "claims": [
@@ -400,10 +403,22 @@ mod tests {
 
         let long = long_text();
         for (side, body) in [
-            ("bull", format!("{long} Bull case emphasizes durable growth.")),
-            ("bear", format!("{long} Bear case emphasizes valuation and risk.")),
-            ("dominant", format!("{long} Market is debating growth durability.")),
-            ("consensus", format!("{long} Consensus expects steady execution.")),
+            (
+                "bull",
+                format!("{long} Bull case emphasizes durable growth."),
+            ),
+            (
+                "bear",
+                format!("{long} Bear case emphasizes valuation and risk."),
+            ),
+            (
+                "dominant",
+                format!("{long} Market is debating growth durability."),
+            ),
+            (
+                "consensus",
+                format!("{long} Consensus expects steady execution."),
+            ),
         ] {
             let args = json!({ "side": side, "body": body }).to_string();
             execute(&path, TOOL_CAPTURE_NARRATIVE_SIDE, &args)
@@ -444,9 +459,7 @@ mod tests {
                 .expect(section_key);
         }
 
-        let finalize = execute(&path, TOOL_FINALIZE, "{}")
-            .await
-            .expect("finalize");
+        let finalize = execute(&path, TOOL_FINALIZE, "{}").await.expect("finalize");
         assert!(matches!(finalize, ClientToolExecuteResult::Complete(_)));
     }
 

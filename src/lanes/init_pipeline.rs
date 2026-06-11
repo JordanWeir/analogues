@@ -3,8 +3,7 @@ use super::{
     init_workspace::InitWorkspaceLane, lane::Lane,
 };
 use crate::{
-    lanes::build_narrative_map::strategy::NarrativeMapStrategy,
-    workspace::InitWorkspaceRequest,
+    lanes::build_narrative_map::strategy::NarrativeMapStrategy, workspace::InitWorkspaceRequest,
 };
 use std::sync::Arc;
 

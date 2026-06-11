@@ -14,13 +14,10 @@ Init Workspace Task Goals:
 
 */
 
-use analogues::{
-    app::App,
-    services::workspace_sql::scalar_i64,
-};
 use analogues::tasks::init_workspace::{
     initialize_workspace, ConceptMappingStrategy, InitWorkspaceRequest,
 };
+use analogues::{app::App, services::workspace_sql::scalar_i64};
 use loco_rs::{task, testing::prelude::*};
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use std::{fs, path::PathBuf};
@@ -223,4 +220,3 @@ async fn scalar_string(db: &sea_orm::DatabaseConnection, sql: &str) -> String {
     .try_get_by_index::<String>(0)
     .unwrap()
 }
-

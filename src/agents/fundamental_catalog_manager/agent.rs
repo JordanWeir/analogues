@@ -41,9 +41,7 @@ impl FundamentalCatalogManagerAgent {
         prompt_suffix: &str,
     ) -> Result<(ConceptReviewOutput, ToolLoopResponse)> {
         let workspace_sqlite = ctx.workspace_sqlite.clone().ok_or_else(|| {
-            Error::string(
-                "fundamental_catalog_manager requires workspace_sqlite to be configured",
-            )
+            Error::string("fundamental_catalog_manager requires workspace_sqlite to be configured")
         })?;
 
         let mut tools = ToolRegistry::new()
@@ -109,7 +107,10 @@ mod tests {
             fetched_at: "2026-06-07T00:00:00Z",
             workspace_sqlite: None,
         };
-        let err = agent.review_workspace(&ctx).await.expect_err("missing sqlite");
+        let err = agent
+            .review_workspace(&ctx)
+            .await
+            .expect_err("missing sqlite");
         assert!(err.to_string().contains("workspace_sqlite"));
     }
 }

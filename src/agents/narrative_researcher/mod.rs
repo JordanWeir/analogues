@@ -5,7 +5,7 @@ pub mod research_workspace;
 pub mod types;
 pub mod validate;
 
-pub use agent::{build_user_prompt, NarrativeResearcherAgent, NarrativeResearchRunResult};
+pub use agent::{build_user_prompt, NarrativeResearchRunResult, NarrativeResearcherAgent};
 pub use config::NarrativeResearcherConfig;
 pub use preamble::AGENT_PREAMBLE;
 pub use research_workspace::{narrative_research_golden_path, workspace_schema_hint};

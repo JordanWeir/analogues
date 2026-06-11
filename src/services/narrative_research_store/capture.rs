@@ -3,7 +3,8 @@ use crate::{
     agents::narrative_researcher::{
         types::{
             CaptureClaimInput, CaptureNarrativeItemsInput, CaptureNarrativeSideInput,
-            CaptureOrientationInput, CaptureResearchGapInput, CaptureSectionInput, CaptureSourceInput,
+            CaptureOrientationInput, CaptureResearchGapInput, CaptureSectionInput,
+            CaptureSourceInput,
         },
         validate::{
             validate_claim, validate_claim_relaxed, validate_narrative_items,
@@ -20,7 +21,9 @@ use serde_json::{json, Value};
 impl<'a> NarrativeResearchStore<'a> {
     pub async fn capture_sources(&self, sources: Vec<CaptureSourceInput>) -> Result<Value> {
         if sources.is_empty() {
-            return Err(Error::string("capture_sources requires at least one source"));
+            return Err(Error::string(
+                "capture_sources requires at least one source",
+            ));
         }
         for source in &sources {
             validate_source(source).map_err(support::validation_error)?;
@@ -114,10 +117,7 @@ impl<'a> NarrativeResearchStore<'a> {
         }))
     }
 
-    pub async fn capture_narrative_side(
-        &self,
-        input: CaptureNarrativeSideInput,
-    ) -> Result<Value> {
+    pub async fn capture_narrative_side(&self, input: CaptureNarrativeSideInput) -> Result<Value> {
         validate_narrative_side(&input).map_err(support::validation_error)?;
         support::ensure_narrative_map_row(self.db).await?;
 

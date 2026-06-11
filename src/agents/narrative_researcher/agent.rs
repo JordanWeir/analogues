@@ -10,8 +10,7 @@ use crate::{
         tools::{ToolRegistry, WebSearchConfig},
     },
     services::{
-        narrative_research_store::NarrativeResearchStore,
-        workspace_store::WorkspaceHandle,
+        narrative_research_store::NarrativeResearchStore, workspace_store::WorkspaceHandle,
     },
 };
 use loco_rs::prelude::*;
@@ -95,15 +94,12 @@ impl NarrativeResearcherAgent {
             })
             .await?;
 
-        let outcome = store
-            .finalize()
-            .await
-            .map_err(|err| {
-                let preview: String = response.text.chars().take(300).collect();
-                Error::string(&format!(
-                    "{err}; agent finalize incomplete (preview: {preview})"
-                ))
-            })?;
+        let outcome = store.finalize().await.map_err(|err| {
+            let preview: String = response.text.chars().take(300).collect();
+            Error::string(&format!(
+                "{err}; agent finalize incomplete (preview: {preview})"
+            ))
+        })?;
 
         Ok((
             NarrativeResearchRunResult {
@@ -127,7 +123,9 @@ pub fn build_user_prompt(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or(ticker);
     let existing_json = serde_json::to_string_pretty(existing_context).map_err(|err| {
-        Error::string(&format!("failed to serialize existing narrative context: {err}"))
+        Error::string(&format!(
+            "failed to serialize existing narrative context: {err}"
+        ))
     })?;
     let has_existing = existing_context
         .get("sources")
@@ -204,7 +202,7 @@ async fn load_company_name(db: &sea_orm::DatabaseConnection) -> Result<Option<St
     Ok(row.and_then(|row| row.try_get::<String>("", "company_name").ok()))
 }
 
-// @TODO: This narrative reesarch runs after the fundamental_catalog_manager agent.  
+// @TODO: This narrative reesarch runs after the fundamental_catalog_manager agent.
 // Instead of getting fixed columns from fundamentals, we should instead query whatever selected fundamental columns that agent flagged
 // We should get something like the last 8 values from each of the targetted columns, so we have a recent time series + anything it thought was worth flagging.
 async fn fundamentals_summary(workspace: &WorkspaceHandle) -> Result<String> {
@@ -260,13 +258,8 @@ mod tests {
             "sections": {},
             "research_gaps": []
         });
-        let prompt = build_user_prompt(
-            "MSFT",
-            Some("Microsoft"),
-            "- revenue_ttm: 100",
-            &existing,
-        )
-        .expect("prompt");
+        let prompt = build_user_prompt("MSFT", Some("Microsoft"), "- revenue_ttm: 100", &existing)
+            .expect("prompt");
         assert!(prompt.contains("Existing narrative board"));
         assert!(prompt.contains("\"id\": 1"));
         assert!(prompt.contains("capture_narrative_side"));

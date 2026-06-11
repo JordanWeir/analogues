@@ -45,7 +45,12 @@ pub fn validate_claim(input: &CaptureClaimInput) -> Result {
     }
     if input.confidence != "inference"
         && input.source_id.is_none()
-        && input.source_title.as_deref().unwrap_or("").trim().is_empty()
+        && input
+            .source_title
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
     {
         return Err(ValidationError::invalid(
             "non-inference claims require source_id or source_title",
@@ -58,7 +63,10 @@ pub fn validate_claim(input: &CaptureClaimInput) -> Result {
         )));
     }
     if !CLAIM_SIDES.contains(&input.side.as_str()) {
-        return Err(ValidationError::invalid(format!("invalid side '{}'", input.side)));
+        return Err(ValidationError::invalid(format!(
+            "invalid side '{}'",
+            input.side
+        )));
     }
     if !CLAIM_CONFIDENCES.contains(&input.confidence.as_str()) {
         return Err(ValidationError::invalid(format!(
@@ -171,10 +179,14 @@ pub fn validate_workspace_ready(
     let mut errors = Vec::new();
 
     if source_count < MIN_SOURCES as i64 {
-        errors.push(format!("need at least {MIN_SOURCES} sources, have {source_count}"));
+        errors.push(format!(
+            "need at least {MIN_SOURCES} sources, have {source_count}"
+        ));
     }
     if claim_count < MIN_CLAIMS as i64 {
-        errors.push(format!("need at least {MIN_CLAIMS} claims, have {claim_count}"));
+        errors.push(format!(
+            "need at least {MIN_CLAIMS} claims, have {claim_count}"
+        ));
     }
     for (label, value) in [
         ("dominant", dominant),

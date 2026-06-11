@@ -3,7 +3,8 @@ use crate::{
     services::{
         canonical_mapping::ConceptMappingStrategy,
         workspace_phases::{
-            mapping_strategy_from_vars, resolve_canonical_mappings_on_workspace, resolve_sqlite_path,
+            mapping_strategy_from_vars, resolve_canonical_mappings_on_workspace,
+            resolve_sqlite_path,
         },
         workspace_store::WorkspaceStore,
     },

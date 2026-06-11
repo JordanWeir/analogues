@@ -62,9 +62,12 @@ async fn test_can_run_generate_report() {
         1
     );
     assert_eq!(
-        scalar_i64(&db, "SELECT COUNT(*) AS count FROM monte_carlo_histogram_bins")
-            .await
-            .unwrap(),
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) AS count FROM monte_carlo_histogram_bins"
+        )
+        .await
+        .unwrap(),
         5
     );
     assert_eq!(

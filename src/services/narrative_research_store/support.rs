@@ -1,9 +1,6 @@
 use super::read::{load_narrative_item_bodies, load_narrative_map_fields};
 use crate::{
-    agents::narrative_researcher::{
-        types::CaptureClaimInput,
-        validate::ValidationError,
-    },
+    agents::narrative_researcher::{types::CaptureClaimInput, validate::ValidationError},
     services::workspace_sql::{execute_sql, scalar_i64, sql_literal, sql_quote},
 };
 use chrono::Utc;
@@ -78,7 +75,12 @@ pub(crate) async fn find_existing_source_id(
     db: &impl ConnectionTrait,
     source: &crate::agents::narrative_researcher::types::CaptureSourceInput,
 ) -> Result<Option<i64>> {
-    if let Some(url) = source.url.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(url) = source
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let row = db
             .query_one(Statement::from_string(
                 DatabaseBackend::Sqlite,
@@ -189,4 +191,3 @@ pub(crate) async fn resolve_source_id(
         .transpose()
         .map_err(|err| Error::string(&format!("parse source id: {err}")))
 }
-

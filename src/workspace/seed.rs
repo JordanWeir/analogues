@@ -80,4 +80,3 @@ pub async fn seed_database(
 
     Ok(())
 }
-

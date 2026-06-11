@@ -1,8 +1,7 @@
 use super::{read, support, NarrativeResearchStore};
 use crate::{
     agents::narrative_researcher::{
-        types::NarrativeWorkspaceSnapshot,
-        validate::validate_workspace_ready,
+        types::NarrativeWorkspaceSnapshot, validate::validate_workspace_ready,
     },
     services::workspace_sql::{execute_sql, scalar_i64, sql_quote},
 };
@@ -38,7 +37,10 @@ impl<'a> NarrativeResearchStore<'a> {
             board.map.consensus.as_deref(),
             snapshot.crux_count,
             snapshot.orientation_captured,
-            snapshot.sections_captured.iter().any(|k| k == "business_model"),
+            snapshot
+                .sections_captured
+                .iter()
+                .any(|k| k == "business_model"),
             snapshot.sections_captured.iter().any(|k| k == "why_now"),
         )
         .map_err(support::validation_error)?;
