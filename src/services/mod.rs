@@ -8,6 +8,7 @@ pub mod market_quote_provider;
 pub mod model_client;
 pub mod narrative_research;
 pub mod narrative_research_store;
+pub mod tool_loop_control;
 pub(crate) mod openrouter_chat;
 pub mod quality_gate_store;
 pub mod sec_facts_provider;

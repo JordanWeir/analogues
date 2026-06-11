@@ -68,6 +68,8 @@ impl FundamentalCatalogManagerAgent {
                 client_tools: None,
                 max_agent_rounds: Some(self.config.max_agent_rounds),
                 submit_tool_name: Some("submit_concept_review".to_string()),
+                prepare_step: None,
+                stop_when: None,
             })
             .await?;
 

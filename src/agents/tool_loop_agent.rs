@@ -5,6 +5,7 @@ use crate::{
             run_client_tool_loop, run_simple_chat_completion, run_single_shot_completion,
             ChatCompletionOptions, ChatCompletionResult, ClientToolHandler,
         },
+        tool_loop_control::{PrepareStepHook, StopCondition},
         usage_snapshot::UsageSnapshot,
         worker_run_store::{
             WorkerRunRecord, WorkerRunStore, WORKER_RUN_STATUS_ERROR, WORKER_RUN_STATUS_SUCCESS,
@@ -30,6 +31,10 @@ pub struct ToolLoopRequest {
     pub client_tools: Option<Arc<dyn ClientToolHandler>>,
     pub max_agent_rounds: Option<usize>,
     pub submit_tool_name: Option<String>,
+    /// Runs before each model turn. Defaults to step-budget nudges when unset.
+    pub prepare_step: Option<Arc<dyn PrepareStepHook>>,
+    /// Evaluated after each tool-bearing step; loop stops when any condition matches.
+    pub stop_when: Option<Vec<Arc<dyn StopCondition>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +79,8 @@ impl ToolLoopAgent {
                 client_tools,
                 max_agent_rounds: request.max_agent_rounds,
                 submit_tool_name: request.submit_tool_name.clone(),
+                prepare_step: request.prepare_step.clone(),
+                stop_when: request.stop_when.clone(),
             })
             .await
         } else if completion_tools.is_some() {
@@ -85,6 +92,8 @@ impl ToolLoopAgent {
                 client_tools: None,
                 max_agent_rounds: None,
                 submit_tool_name: None,
+                prepare_step: None,
+                stop_when: None,
             })
             .await
         } else {
@@ -232,6 +241,8 @@ mod tests {
             client_tools: None,
             max_agent_rounds: None,
             submit_tool_name: None,
+            prepare_step: None,
+            stop_when: None,
         };
         let response = ToolLoopResponse {
             text: "ok".to_string(),
