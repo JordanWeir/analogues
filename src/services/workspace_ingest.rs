@@ -4,7 +4,9 @@ use crate::{
         market_quote_provider::YahooChartMarketDataAdapter,
         sec_facts_provider::SecFactsProvider,
         workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
+        workspace_phases::materialize_sec_catalog_on_workspace,
         workspace_sql::{execute_sql, sql_quote, sql_value},
+        workspace_store::WorkspaceHandle,
     },
     workspace::{MarketQuoteSnapshot, SecRawFact},
 };
@@ -13,7 +15,7 @@ use loco_rs::prelude::*;
 use sea_orm::ConnectionTrait;
 use std::time::Duration;
 
-/// Phase-1 SEC fetch result (raw facts only; catalog materialization is phase 2).
+/// Phase-1 SEC fetch result (raw facts only; catalog materialization is optional).
 #[derive(Debug, Clone)]
 pub struct RawSecIngestResult {
     pub company_name: Option<String>,
@@ -32,7 +34,8 @@ pub struct WorkspaceIngestOutcome {
     pub fetch_status: String,
     pub fetch_error: Option<String>,
     pub source_notes: Vec<String>,
-    pub raw_fact_count: usize,
+    pub av_raw_fact_count: usize,
+    pub sec_raw_fact_count: usize,
 }
 
 pub fn build_financial_http_client() -> Result<reqwest::Client> {
@@ -79,7 +82,8 @@ pub async fn run_workspace_ingest(
             fetch_status: "skipped".to_string(),
             fetch_error: Some("financial fetch was skipped by request".to_string()),
             source_notes: vec!["starter financial fetch skipped".to_string()],
-            raw_fact_count: 0,
+            av_raw_fact_count: 0,
+            sec_raw_fact_count: 0,
         });
     }
 
@@ -106,134 +110,125 @@ pub async fn run_workspace_ingest(
         }
     }
 
-    let mut alpha_vantage_persisted = false;
-    if let Some(alpha_vantage) = AlphaVantageFundamentalsProvider::from_env(client.clone()) {
-        match alpha_vantage.fetch_snapshot(ticker).await {
-            Ok(snapshot) => {
-                if company_name.is_none() {
-                    company_name = snapshot.company_name.clone();
-                }
-                if currency.is_none() {
-                    currency = snapshot.currency.clone();
-                }
-                source_notes.extend(snapshot.source_notes.clone());
-                let store = WorkspaceFinancialStore::new(db);
-                let include_implied_price = market_snapshot
-                    .as_ref()
-                    .and_then(|market| market.headlines.current_price)
-                    .is_none();
-                store
-                    .persist_alpha_vantage_snapshot(&snapshot, include_implied_price)
-                    .await?;
-                alpha_vantage_persisted = true;
-                source_notes.push(
-                    "Persisted current TTM fundamentals from Alpha Vantage.".to_string(),
-                );
-            }
-            Err(err) => {
-                source_notes.push(format!("Alpha Vantage fundamentals fetch failed: {err}"));
-            }
-        }
-    } else {
-        source_notes
-            .push("Alpha Vantage fundamentals skipped: ALPHA_VANTAGE_API_KEY not set.".to_string());
-    }
+    let Some(alpha_vantage) = AlphaVantageFundamentalsProvider::from_env(client.clone()) else {
+        let message = "Alpha Vantage fundamentals required: ALPHA_VANTAGE_API_KEY not set";
+        source_notes.push(message.to_string());
+        record_financial_fetch_gap(db, "failed", Some(message), &[message.to_string()]).await?;
+        return Ok(WorkspaceIngestOutcome {
+            skipped: false,
+            sec_ingested: false,
+            market_persisted: false,
+            alpha_vantage_persisted: false,
+            fetch_status: "failed".to_string(),
+            fetch_error: Some(message.to_string()),
+            source_notes,
+            av_raw_fact_count: 0,
+            sec_raw_fact_count: 0,
+        });
+    };
 
-    match fetch_raw_sec_facts(&sec_provider, ticker).await {
+    let av_ingest = match alpha_vantage.fetch_raw_time_series(ticker).await {
+        Ok(ingest) => ingest,
+        Err(err) => {
+            let message = err.to_string();
+            source_notes.push(format!("Alpha Vantage fundamentals fetch failed: {message}"));
+            record_financial_fetch_gap(db, "failed", Some(&message), &[message.clone()]).await?;
+            return Ok(WorkspaceIngestOutcome {
+                skipped: false,
+                sec_ingested: false,
+                market_persisted: false,
+                alpha_vantage_persisted: false,
+                fetch_status: "failed".to_string(),
+                fetch_error: Some(message),
+                source_notes,
+                av_raw_fact_count: 0,
+                sec_raw_fact_count: 0,
+            });
+        }
+    };
+
+    if company_name.is_none() {
+        company_name = av_ingest.company_name.clone();
+    }
+    if currency.is_none() {
+        currency = av_ingest.currency.clone();
+    }
+    fetched_at = av_ingest.fetched_at.clone();
+    source_notes.extend(av_ingest.source_notes.clone());
+
+    let store = WorkspaceFinancialStore::new(db);
+    let include_implied_price = market_snapshot
+        .as_ref()
+        .and_then(|market| market.headlines.current_price)
+        .is_none();
+    let source_note = source_notes.join(" ");
+    store
+        .persist_av_raw_ingest(
+            &av_ingest,
+            company_name.as_deref(),
+            currency.as_deref(),
+            &source_note,
+            include_implied_price,
+        )
+        .await?;
+    source_notes.push(format!(
+        "Ingested {} Alpha Vantage av_raw_facts observations.",
+        av_ingest.raw_facts.len()
+    ));
+    let alpha_vantage_persisted = true;
+    let av_raw_fact_count = av_ingest.raw_facts.len();
+
+    let sec_result = fetch_raw_sec_facts(&sec_provider, ticker).await;
+    let (sec_ingested, sec_raw_fact_count) = match sec_result {
         Ok(sec) => {
             if company_name.is_none() {
                 company_name = sec.company_name.clone();
             }
-            fetched_at = sec.fetched_at.clone();
             source_notes.push(format!(
-                "Ingested {} raw SEC Company Facts observations from {}.",
+                "Ingested {} raw SEC Company Facts observations from {} for niche agent research.",
                 sec.raw_facts.len(),
                 sec.source_provider
             ));
-
-            let source_note = source_notes.join(" ");
-            let store = WorkspaceFinancialStore::new(db);
             store
                 .persist_raw_ingest(&RawIngestPersist {
                     fetched_at: &fetched_at,
                     company_name: company_name.as_deref(),
                     currency: currency.as_deref(),
-                    source_note: &source_note,
+                    source_note: &source_notes.join(" "),
+                    raw_av_facts: &[],
                     raw_sec_facts: &sec.raw_facts,
                 })
                 .await?;
-
-            let market_persisted =
-                persist_market_if_available(&store, market_snapshot.as_ref()).await?;
-
-            record_financial_fetch_status(db, "ingested", None).await?;
-
-            Ok(WorkspaceIngestOutcome {
-                skipped: false,
-                sec_ingested: true,
-                market_persisted,
-                alpha_vantage_persisted,
-                fetch_status: "ingested".to_string(),
-                fetch_error: None,
-                source_notes,
-                raw_fact_count: sec.raw_facts.len(),
-            })
+            (true, sec.raw_facts.len())
         }
         Err(err) => {
-            let message = err.to_string();
             source_notes.push(format!(
-                "SEC Company Facts unavailable or failed: {message}"
+                "SEC Company Facts unavailable or failed (niche catalog only): {}",
+                err
             ));
-
-            let store = WorkspaceFinancialStore::new(db);
-            if market_snapshot.is_some() || alpha_vantage_persisted {
-                let source_note = source_notes.join(" ");
-                store
-                    .persist_raw_ingest(&RawIngestPersist {
-                        fetched_at: &fetched_at,
-                        company_name: company_name.as_deref(),
-                        currency: currency.as_deref(),
-                        source_note: &source_note,
-                        raw_sec_facts: &[],
-                    })
-                    .await?;
-            }
-
-            let market_persisted =
-                persist_market_if_available(&store, market_snapshot.as_ref()).await?;
-
-            if alpha_vantage_persisted {
-                record_financial_fetch_status(
-                    db,
-                    "partial",
-                    Some("SEC Company Facts failed; Alpha Vantage fundamentals persisted"),
-                )
-                .await?;
-            } else {
-                record_financial_fetch_gap(db, "failed", Some(&message), &[message.clone()])
-                    .await?;
-            }
-
-            Ok(WorkspaceIngestOutcome {
-                skipped: false,
-                sec_ingested: false,
-                market_persisted,
-                alpha_vantage_persisted,
-                fetch_status: if alpha_vantage_persisted {
-                    "partial".to_string()
-                } else {
-                    "failed".to_string()
-                },
-                fetch_error: if alpha_vantage_persisted {
-                    None
-                } else {
-                    Some(message)
-                },
-                source_notes,
-                raw_fact_count: 0,
-            })
+            (false, 0)
         }
-    }
+    };
+
+    let market_persisted = persist_market_if_available(&store, market_snapshot.as_ref()).await?;
+
+    record_financial_fetch_status(db, "ingested", None).await?;
+
+    Ok(WorkspaceIngestOutcome {
+        skipped: false,
+        sec_ingested,
+        market_persisted,
+        alpha_vantage_persisted,
+        fetch_status: "ingested".to_string(),
+        fetch_error: None,
+        source_notes,
+        av_raw_fact_count,
+        sec_raw_fact_count,
+    })
+}
+
+pub async fn finalize_sec_catalog_if_present(handle: &WorkspaceHandle) -> Result<()> {
+    materialize_sec_catalog_on_workspace(handle).await
 }
 
 async fn persist_market_if_available(
@@ -362,7 +357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_raw_ingest_writes_facts_without_catalog() {
+    async fn persist_raw_ingest_writes_av_and_sec_facts_without_catalog() {
         let (db, _path) = seeded_workspace().await;
         let facts_root = json!({
             "us-gaap": {
@@ -372,22 +367,40 @@ mod tests {
                 }
             }
         });
-        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-09T00:00:00Z");
+        let raw_sec_facts = extract_raw_facts_from_root(&facts_root, "2026-06-09T00:00:00Z");
+        let raw_av_facts = vec![crate::workspace::AvRawFact {
+            endpoint: "INCOME_STATEMENT".to_string(),
+            report_type: "annual".to_string(),
+            field_name: "totalRevenue".to_string(),
+            label: None,
+            period_end: "2025-12-31".to_string(),
+            period_type: "annual".to_string(),
+            unit: "USD".to_string(),
+            currency: Some("USD".to_string()),
+            value: 100.0,
+            raw_json: "{}".to_string(),
+            fetched_at: "2026-06-09T00:00:00Z".to_string(),
+        }];
         WorkspaceFinancialStore::new(&db)
             .persist_raw_ingest(&RawIngestPersist {
                 fetched_at: "2026-06-09T00:00:00Z",
                 company_name: Some("Example Corp"),
                 currency: Some("USD"),
                 source_note: "test ingest",
-                raw_sec_facts: &raw_facts,
+                raw_av_facts: &raw_av_facts,
+                raw_sec_facts: &raw_sec_facts,
             })
             .await
             .expect("persist");
 
         let store = WorkspaceFinancialStore::new(&db);
         assert_eq!(
-            store.load_sec_raw_facts().await.expect("facts").len(),
-            raw_facts.len()
+            store.load_av_raw_facts().await.expect("av facts").len(),
+            raw_av_facts.len()
+        );
+        assert_eq!(
+            store.load_sec_raw_facts().await.expect("sec facts").len(),
+            raw_sec_facts.len()
         );
         assert!(store
             .load_concept_catalog_entries()

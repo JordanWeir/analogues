@@ -6,7 +6,9 @@ use super::{
     result::LaneWritesSummary,
 };
 use crate::{
-    services::workspace_ingest::{record_financial_fetch_status, run_workspace_ingest},
+    services::workspace_ingest::{
+        finalize_sec_catalog_if_present, record_financial_fetch_status, run_workspace_ingest,
+    },
     workspace::InitWorkspaceRequest,
 };
 use async_trait::async_trait;
@@ -62,29 +64,28 @@ impl Lane for InitWorkspaceLane {
             });
         }
 
+        if outcome.alpha_vantage_persisted {
+            writes = writes.wrote("av_raw_facts");
+        }
         if outcome.sec_ingested {
             writes = writes.wrote("sec_raw_facts");
+            finalize_sec_catalog_if_present(&ctx.workspace).await?;
+            writes = writes.wrote("concept_catalog_entries");
         }
         if outcome.market_persisted {
             writes = writes
                 .wrote("fundamentals")
                 .wrote("fundamental_observations");
         }
-        if outcome.alpha_vantage_persisted {
-            writes = writes
-                .wrote("fundamentals")
-                .wrote("fundamental_observations")
-                .wrote("data_quality_flags");
-        }
         if outcome.fetch_status == "failed" {
             writes = writes.wrote("data_gaps");
         }
 
-        if self.defer_catalog && outcome.sec_ingested {
+        if self.defer_catalog && outcome.alpha_vantage_persisted {
             record_financial_fetch_status(
                 ctx.workspace.connection(),
                 "ingested",
-                Some("canonical mapping and starter fundamentals deferred"),
+                Some("Alpha Vantage canonical mapping and starter fundamentals deferred"),
             )
             .await?;
         }

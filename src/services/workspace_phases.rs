@@ -1,14 +1,10 @@
 use crate::{
-    agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig,
     services::{
-        alpha_vantage_fundamentals_provider::merge_alpha_vantage_starter,
-        canonical_mapping::{
-            resolve_canonical_mappings, CanonicalResolutionContext, CanonicalResolutionResult,
-            ConceptMappingStrategy,
-        },
+        av_canonical_mapping::{resolve_av_canonical_mappings, AvCanonicalResolution},
+        av_fundamental_deriver::{AvFundamentalDeriver, AV_SOURCE_TYPE},
         concept_catalog::ConceptCatalog,
+        concept_review::ConceptReviewDecisionRecord,
         financial_run::FinancialRun,
-        fundamental_deriver::FundamentalDeriver,
         workspace_financial_store::{
             DerivedPersist, ResolutionPersist, WorkspaceFinancialStore, WorkspaceStockInfo,
         },
@@ -17,9 +13,7 @@ use crate::{
         },
         workspace_store::WorkspaceHandle,
     },
-    workspace::{
-        seed_database, ConceptCatalogEntry, DerivedFundamentals, SecIngestionResult, SecRawFact,
-    },
+    workspace::{AvRawFact, DerivedFundamentals, SecRawFact},
 };
 use chrono::Utc;
 use loco_rs::prelude::*;
@@ -28,8 +22,8 @@ use std::path::PathBuf;
 pub struct WorkspaceIngestLayers {
     pub stock: WorkspaceStockInfo,
     pub fetched_at: String,
-    pub raw_facts: Vec<SecRawFact>,
-    pub catalog_entries: Vec<ConceptCatalogEntry>,
+    pub av_raw_facts: Vec<AvRawFact>,
+    pub sec_raw_facts: Vec<SecRawFact>,
 }
 
 pub fn resolve_sqlite_path(vars: &task::Vars) -> Result<PathBuf> {
@@ -43,30 +37,11 @@ pub fn resolve_sqlite_path(vars: &task::Vars) -> Result<PathBuf> {
         })
 }
 
-pub fn mapping_strategy_from_vars(vars: &task::Vars) -> Result<ConceptMappingStrategy> {
-    let Some(value) = vars
-        .cli
-        .get("mapping_strategy")
-        .or_else(|| vars.cli.get("concept_mapping_strategy"))
-    else {
-        return Err(Error::string(
-            "resolveCanonicalMappings requires mapping_strategy:candidate_scoring or mapping_strategy:llm_reviewed",
-        ));
-    };
-    ConceptMappingStrategy::from_var(value)?.ok_or_else(|| {
-        Error::string(
-            "resolveCanonicalMappings requires mapping_strategy:candidate_scoring or mapping_strategy:llm_reviewed",
-        )
-    })
-}
-
-pub async fn materialize_catalog_on_workspace(handle: &WorkspaceHandle) -> Result<()> {
+pub async fn materialize_sec_catalog_on_workspace(handle: &WorkspaceHandle) -> Result<()> {
     let store = WorkspaceFinancialStore::new(handle.connection());
     let raw_facts = store.load_sec_raw_facts().await?;
     if raw_facts.is_empty() {
-        return Err(Error::string(
-            "workspace has no sec_raw_facts; run init_workspace ingest first",
-        ));
+        return Ok(());
     }
     let catalog_entries = ConceptCatalog::materialize_catalog_entries(&raw_facts);
     let fetched_at = raw_facts
@@ -85,19 +60,14 @@ pub async fn load_ingest_layers(
     store: &WorkspaceFinancialStore<'_>,
 ) -> Result<WorkspaceIngestLayers> {
     let stock = store.load_stock_info().await?;
-    let raw_facts = store.load_sec_raw_facts().await?;
-    if raw_facts.is_empty() {
+    let av_raw_facts = store.load_av_raw_facts().await?;
+    if av_raw_facts.is_empty() {
         return Err(Error::string(
-            "workspace has no sec_raw_facts; run ingest (initWorkspace with mapping_strategy:none) first",
+            "workspace has no av_raw_facts; run init_workspace ingest first",
         ));
     }
-    let catalog_entries = store.load_concept_catalog_entries().await?;
-    if catalog_entries.is_empty() {
-        return Err(Error::string(
-            "workspace has no concept_catalog_entries; run ingest first",
-        ));
-    }
-    let fetched_at = raw_facts
+    let sec_raw_facts = store.load_sec_raw_facts().await?;
+    let fetched_at = av_raw_facts
         .iter()
         .map(|fact| fact.fetched_at.as_str())
         .max()
@@ -106,35 +76,22 @@ pub async fn load_ingest_layers(
     Ok(WorkspaceIngestLayers {
         stock,
         fetched_at,
-        raw_facts,
-        catalog_entries,
+        av_raw_facts,
+        sec_raw_facts,
     })
 }
 
-pub async fn resolve_canonical_mappings_on_workspace(
+pub async fn resolve_av_canonical_mappings_on_workspace(
     handle: &WorkspaceHandle,
-    strategy: ConceptMappingStrategy,
-    agent_config: Option<FundamentalCatalogManagerConfig>,
-) -> Result<CanonicalResolutionResult> {
+) -> Result<AvCanonicalResolution> {
     let store = WorkspaceFinancialStore::new(handle.connection());
     let layers = load_ingest_layers(&store).await?;
-    let sqlite_path = handle.paths.sqlite_path.clone();
-    let resolution = resolve_canonical_mappings(
-        strategy,
-        &CanonicalResolutionContext {
-            ticker: &layers.stock.ticker,
-            raw_sec_facts: &layers.raw_facts,
-            catalog_entries: &layers.catalog_entries,
-            fetched_at: &layers.fetched_at,
-            workspace_sqlite: Some(sqlite_path),
-        },
-        agent_config,
-    )
-    .await;
+    let resolution = resolve_av_canonical_mappings(&layers.av_raw_facts)?;
+    let review_decisions = Vec::<ConceptReviewDecisionRecord>::new();
     store
         .persist_canonical_resolution(&ResolutionPersist {
             fetched_at: &layers.fetched_at,
-            concept_review_decisions: &resolution.review_decisions,
+            concept_review_decisions: &review_decisions,
             canonical_mappings: &resolution.mappings,
             quality_flags: &resolution.quality_flags,
         })
@@ -150,30 +107,18 @@ pub async fn derive_starter_fundamentals_on_workspace(
     let mappings = store.load_active_canonical_mappings().await?;
     if mappings.is_empty() {
         return Err(Error::string(
-            "workspace has no active canonical mappings; run resolveCanonicalMappings first",
+            "workspace has no active canonical mappings; run resolve_av_canonical_mappings first",
         ));
     }
 
-    let mut derived = FundamentalDeriver::derive_starter_fundamentals(
-        &layers.raw_facts,
+    let derived = AvFundamentalDeriver::derive_starter_fundamentals(
+        &layers.av_raw_facts,
         &mappings,
         layers.stock.currency.as_deref(),
     );
-    let av_starter = store.load_alpha_vantage_starter().await?;
-    merge_alpha_vantage_starter(&mut derived.starter, &av_starter);
-    if av_starter.revenue_ttm.is_some() {
-        derived.source_notes.push(
-            "Merged Alpha Vantage current TTM fundamentals over SEC-derived starter values."
-                .to_string(),
-        );
-    }
 
     let mut run = financial_run_from_layers(&layers, derived);
-    if av_starter.revenue_ttm.is_some() {
-        run.fundamental_source = Some(
-            crate::services::alpha_vantage_fundamentals_provider::ALPHA_VANTAGE_SOURCE.to_string(),
-        );
-    }
+    run.fundamental_source = Some(AV_SOURCE_TYPE.to_string());
     run.compute_derived_metrics();
     run.mark_gaps();
 
@@ -217,11 +162,8 @@ pub async fn derive_starter_fundamentals_on_workspace(
     Ok(run)
 }
 
-pub async fn resolve_and_derive_on_workspace(
-    handle: &WorkspaceHandle,
-    strategy: ConceptMappingStrategy,
-) -> Result<FinancialRun> {
-    resolve_canonical_mappings_on_workspace(handle, strategy, None).await?;
+pub async fn resolve_and_derive_on_workspace(handle: &WorkspaceHandle) -> Result<FinancialRun> {
+    resolve_av_canonical_mappings_on_workspace(handle).await?;
     derive_starter_fundamentals_on_workspace(handle).await
 }
 
@@ -233,25 +175,7 @@ fn financial_run_from_layers(
     run.fetched_at = layers.fetched_at.clone();
     run.currency = layers.stock.currency.clone();
     run.company_name = layers.stock.company_name.clone();
-    run.fundamental_source = Some(
-        layers
-            .stock
-            .source_note
-            .as_deref()
-            .filter(|note| !note.is_empty())
-            .unwrap_or("SEC Company Facts")
-            .to_string(),
-    );
-    run.ingest = Some(SecIngestionResult {
-        company_name: layers.stock.company_name.clone(),
-        fetched_at: layers.fetched_at.clone(),
-        raw_facts: layers.raw_facts.clone(),
-        catalog_entries: layers.catalog_entries.clone(),
-        source_provider: run
-            .fundamental_source
-            .clone()
-            .unwrap_or_else(|| "SEC Company Facts".to_string()),
-    });
+    run.fundamental_source = Some(AV_SOURCE_TYPE.to_string());
     run.apply_derived(derived);
     run
 }
@@ -261,41 +185,55 @@ mod tests {
     use super::*;
     use crate::{
         services::{
-            concept_catalog::ConceptCatalog,
-            sec_facts_provider::extract_raw_facts_from_root,
+            av_canonical_mapping::AV_TAXONOMY,
             workspace_store::{execute_schema, WorkspaceStore},
         },
-        workspace::{InitWorkspaceRequest, SecRawFact, WorkspacePaths},
+        workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths},
     };
     use sea_orm::Database;
-    use serde_json::json;
 
-    fn sample_facts() -> Vec<SecRawFact> {
-        let facts_root = json!({
-            "us-gaap": {
-                "Revenues": {
-                    "label": "Revenues",
-                    "units": { "USD": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":100.0}]}
-                },
-                "NetIncomeLoss": {
-                    "label": "Net income",
-                    "units": { "USD": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":10.0}]}
-                },
-                "Assets": {
-                    "label": "Assets",
-                    "units": { "USD": [{"form":"10-K","end":"2025-12-31","filed":"2026-02-15","val":500.0}]}
-                },
-                "Liabilities": {
-                    "label": "Liabilities",
-                    "units": { "USD": [{"form":"10-K","end":"2025-12-31","filed":"2026-02-15","val":200.0}]}
-                },
-                "WeightedAverageNumberOfDilutedSharesOutstanding": {
-                    "label": "Diluted shares",
-                    "units": { "shares": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":10.0}]}
-                }
-            }
-        });
-        extract_raw_facts_from_root(&facts_root, "2026-06-08T00:00:00Z")
+    fn sample_av_facts() -> Vec<AvRawFact> {
+        vec![
+            AvRawFact {
+                endpoint: "INCOME_STATEMENT".to_string(),
+                report_type: "annual".to_string(),
+                field_name: "totalRevenue".to_string(),
+                label: None,
+                period_end: "2025-12-31".to_string(),
+                period_type: "annual".to_string(),
+                unit: "USD".to_string(),
+                currency: Some("USD".to_string()),
+                value: 100.0,
+                raw_json: "{}".to_string(),
+                fetched_at: "2026-06-08T00:00:00Z".to_string(),
+            },
+            AvRawFact {
+                endpoint: "INCOME_STATEMENT".to_string(),
+                report_type: "annual".to_string(),
+                field_name: "netIncome".to_string(),
+                label: None,
+                period_end: "2025-12-31".to_string(),
+                period_type: "annual".to_string(),
+                unit: "USD".to_string(),
+                currency: Some("USD".to_string()),
+                value: 10.0,
+                raw_json: "{}".to_string(),
+                fetched_at: "2026-06-08T00:00:00Z".to_string(),
+            },
+            AvRawFact {
+                endpoint: "OVERVIEW".to_string(),
+                report_type: "overview".to_string(),
+                field_name: "DilutedEPSTTM".to_string(),
+                label: None,
+                period_end: "2025-12-31".to_string(),
+                period_type: "ttm".to_string(),
+                unit: "USD".to_string(),
+                currency: Some("USD".to_string()),
+                value: 1.25,
+                raw_json: "{}".to_string(),
+                fetched_at: "2026-06-08T00:00:00Z".to_string(),
+            },
+        ]
     }
 
     async fn ingest_only_workspace(dir: &std::path::Path) -> WorkspaceHandle {
@@ -328,16 +266,15 @@ mod tests {
         )
         .await
         .expect("seed");
-        let facts = sample_facts();
-        let entries = ConceptCatalog::materialize_catalog_entries(&facts);
+        let facts = sample_av_facts();
         WorkspaceFinancialStore::new(&db)
-            .persist_ingestion(&crate::services::workspace_financial_store::IngestPersist {
+            .persist_raw_ingest(&crate::services::workspace_financial_store::RawIngestPersist {
                 fetched_at: "2026-06-08T00:00:00Z",
                 company_name: Some("Example Corp"),
                 currency: Some("USD"),
                 source_note: "ingest only fixture",
-                raw_sec_facts: &facts,
-                concept_catalog_entries: &entries,
+                raw_av_facts: &facts,
+                raw_sec_facts: &[],
             })
             .await
             .expect("persist ingest");
@@ -349,7 +286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reruns_mapping_and_derivation_on_ingest_only_workspace() {
+    async fn reruns_av_mapping_and_derivation_on_ingest_only_workspace() {
         let dir =
             std::env::temp_dir().join(format!("analogues-phase-rerun-{}", uuid::Uuid::new_v4()));
         let handle = ingest_only_workspace(&dir).await;
@@ -361,19 +298,18 @@ mod tests {
             .expect("mappings")
             .is_empty());
 
-        resolve_canonical_mappings_on_workspace(
-            &handle,
-            ConceptMappingStrategy::CandidateScoring,
-            None,
-        )
-        .await
-        .expect("resolve");
+        resolve_av_canonical_mappings_on_workspace(&handle)
+            .await
+            .expect("resolve");
 
         let mappings = store
             .load_active_canonical_mappings()
             .await
             .expect("mappings after resolve");
         assert!(!mappings.is_empty());
+        assert!(mappings
+            .iter()
+            .all(|mapping| mapping.taxonomy == AV_TAXONOMY));
 
         let run = derive_starter_fundamentals_on_workspace(&handle)
             .await

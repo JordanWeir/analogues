@@ -47,6 +47,36 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
         ON sec_raw_facts(taxonomy, concept_name, unit, period_end, filed_at)",
     "CREATE INDEX IF NOT EXISTS idx_sec_raw_facts_frame
         ON sec_raw_facts(frame)",
+    "CREATE TABLE IF NOT EXISTS av_raw_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        endpoint TEXT NOT NULL,
+        report_type TEXT NOT NULL,
+        field_name TEXT NOT NULL,
+        label TEXT,
+        period_end TEXT NOT NULL,
+        period_type TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        currency TEXT,
+        metric_value REAL NOT NULL,
+        raw_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        CHECK (json_valid(raw_json))
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_av_raw_facts_field_period
+        ON av_raw_facts(endpoint, field_name, period_end, report_type)",
+    "CREATE VIEW IF NOT EXISTS av_fact_metric_catalog AS
+        SELECT
+            endpoint,
+            field_name,
+            label,
+            unit,
+            COUNT(*) AS fact_count,
+            MIN(period_end) AS earliest_period_end,
+            MAX(period_end) AS latest_period_end,
+            MIN(metric_value) AS min_value,
+            MAX(metric_value) AS max_value
+        FROM av_raw_facts
+        GROUP BY endpoint, field_name, label, unit",
     "CREATE TABLE IF NOT EXISTS canonical_metric_definitions (
         canonical_key TEXT PRIMARY KEY,
         metric_key TEXT NOT NULL,
@@ -551,9 +581,26 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
         ON analysis_runs(status, created_at)",
 ];
 
-/// Idempotent column additions for workspaces created before schema version 3.
+/// Idempotent column additions for workspaces created before schema version 4.
 pub const SCHEMA_MIGRATION_STATEMENTS: &[&str] = &[
     "ALTER TABLE supporting_metric_selections ADD COLUMN crux_id INTEGER REFERENCES crux_candidates(id)",
     "ALTER TABLE supporting_metric_selections ADD COLUMN period_basis TEXT",
     "ALTER TABLE supporting_metric_selections ADD COLUMN quality_status TEXT DEFAULT 'ok'",
+    "CREATE TABLE IF NOT EXISTS av_raw_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        endpoint TEXT NOT NULL,
+        report_type TEXT NOT NULL,
+        field_name TEXT NOT NULL,
+        label TEXT,
+        period_end TEXT NOT NULL,
+        period_type TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        currency TEXT,
+        metric_value REAL NOT NULL,
+        raw_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        CHECK (json_valid(raw_json))
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_av_raw_facts_field_period
+        ON av_raw_facts(endpoint, field_name, period_end, report_type)",
 ];

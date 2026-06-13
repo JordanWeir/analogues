@@ -6,12 +6,8 @@ use super::{
     context::LaneContext, gate::Gate, lane::Lane, result::LaneResult, result::LaneStatus,
     result::LaneWritesSummary,
 };
-use crate::services::{
-    canonical_mapping::ConceptMappingStrategy,
-    workspace_phases::{
-        derive_starter_fundamentals_on_workspace, materialize_catalog_on_workspace,
-        resolve_canonical_mappings_on_workspace,
-    },
+use crate::services::workspace_phases::{
+    derive_starter_fundamentals_on_workspace, resolve_av_canonical_mappings_on_workspace,
 };
 use async_trait::async_trait;
 use loco_rs::prelude::*;
@@ -20,20 +16,18 @@ use std::sync::Arc;
 pub use strategy::CatalogResolutionStrategy;
 
 pub struct BuildCatalogLane {
-    resolution_strategy: CatalogResolutionStrategy,
+    _resolution_strategy: CatalogResolutionStrategy,
 }
 
 impl BuildCatalogLane {
-    pub fn new(mapping_strategy: ConceptMappingStrategy) -> Self {
+    pub fn new(resolution_strategy: CatalogResolutionStrategy) -> Self {
         Self {
-            resolution_strategy: CatalogResolutionStrategy::from_mapping_strategy(mapping_strategy),
+            _resolution_strategy: resolution_strategy,
         }
     }
 
     pub fn with_resolution_strategy(resolution_strategy: CatalogResolutionStrategy) -> Self {
-        Self {
-            resolution_strategy,
-        }
+        Self::new(resolution_strategy)
     }
 }
 
@@ -48,28 +42,22 @@ impl Lane for BuildCatalogLane {
     }
 
     async fn run(&self, ctx: &mut LaneContext) -> Result<LaneResult> {
-        let raw_fact_count =
+        let av_raw_fact_count =
             crate::services::workspace_financial_store::WorkspaceFinancialStore::new(
                 ctx.workspace.connection(),
             )
-            .load_sec_raw_facts()
+            .load_av_raw_facts()
             .await?
             .len();
 
-        if raw_fact_count == 0 {
+        if av_raw_fact_count == 0 {
             return Ok(LaneResult::skipped(
                 self.name(),
-                "no sec_raw_facts available; catalog build requires ingest first",
+                "no av_raw_facts available; catalog build requires Alpha Vantage ingest first",
             ));
         }
 
-        materialize_catalog_on_workspace(&ctx.workspace).await?;
-        resolve_canonical_mappings_on_workspace(
-            &ctx.workspace,
-            self.resolution_strategy.mapping_strategy(),
-            self.resolution_strategy.agent_config().cloned(),
-        )
-        .await?;
+        resolve_av_canonical_mappings_on_workspace(&ctx.workspace).await?;
         let run = derive_starter_fundamentals_on_workspace(&ctx.workspace).await?;
 
         let error = if run.gaps.is_empty() {
@@ -79,8 +67,7 @@ impl Lane for BuildCatalogLane {
         };
 
         let mut writes = LaneWritesSummary::default()
-            .read("sec_raw_facts")
-            .wrote("concept_catalog_entries")
+            .read("av_raw_facts")
             .wrote("canonical_metric_mappings")
             .wrote("fundamental_observations")
             .wrote("fundamentals")
@@ -108,17 +95,56 @@ mod tests {
     use super::*;
     use crate::{
         lanes::context::LaneConfig,
-        services::{
-            concept_catalog::ConceptCatalog,
-            sec_facts_provider::extract_raw_facts_from_root,
-            workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
-            workspace_store::{execute_schema, WorkspaceStore},
-        },
-        workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths},
+        services::workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
+        workspace::{seed_database, AvRawFact, InitWorkspaceRequest, WorkspacePaths},
     };
+    use crate::services::workspace_store::{execute_schema, WorkspaceStore};
     use sea_orm::Database;
-    use serde_json::json;
     use std::path::PathBuf;
+
+    fn sample_av_facts() -> Vec<AvRawFact> {
+        vec![
+            AvRawFact {
+                endpoint: "INCOME_STATEMENT".to_string(),
+                report_type: "annual".to_string(),
+                field_name: "totalRevenue".to_string(),
+                label: None,
+                period_end: "2025-12-31".to_string(),
+                period_type: "annual".to_string(),
+                unit: "USD".to_string(),
+                currency: Some("USD".to_string()),
+                value: 100.0,
+                raw_json: "{}".to_string(),
+                fetched_at: "2026-06-09T00:00:00Z".to_string(),
+            },
+            AvRawFact {
+                endpoint: "INCOME_STATEMENT".to_string(),
+                report_type: "annual".to_string(),
+                field_name: "netIncome".to_string(),
+                label: None,
+                period_end: "2025-12-31".to_string(),
+                period_type: "annual".to_string(),
+                unit: "USD".to_string(),
+                currency: Some("USD".to_string()),
+                value: 10.0,
+                raw_json: "{}".to_string(),
+                fetched_at: "2026-06-09T00:00:00Z".to_string(),
+            },
+            AvRawFact {
+                endpoint: "OVERVIEW".to_string(),
+                report_type: "overview".to_string(),
+                field_name: "DilutedEPSTTM".to_string(),
+                label: None,
+                period_end: "2025-12-31".to_string(),
+                period_type: "ttm".to_string(),
+                unit: "USD".to_string(),
+                currency: Some("USD".to_string()),
+                value: 1.25,
+                raw_json: "{}".to_string(),
+                fetched_at: "2026-06-09T00:00:00Z".to_string(),
+            },
+        ]
+    }
 
     async fn ingest_only_lane_context() -> LaneContext {
         let path = std::env::temp_dir().join(format!(
@@ -150,38 +176,14 @@ mod tests {
         .await
         .expect("seed");
 
-        let facts_root = json!({
-            "us-gaap": {
-                "Revenues": {
-                    "label": "Revenues",
-                    "units": { "USD": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":100.0}]}
-                },
-                "NetIncomeLoss": {
-                    "label": "Net income",
-                    "units": { "USD": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":10.0}]}
-                },
-                "Assets": {
-                    "label": "Assets",
-                    "units": { "USD": [{"form":"10-K","end":"2025-12-31","filed":"2026-02-15","val":500.0}]}
-                },
-                "Liabilities": {
-                    "label": "Liabilities",
-                    "units": { "USD": [{"form":"10-K","end":"2025-12-31","filed":"2026-02-15","val":200.0}]}
-                },
-                "WeightedAverageNumberOfDilutedSharesOutstanding": {
-                    "label": "Diluted shares",
-                    "units": { "shares": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":10.0}]}
-                }
-            }
-        });
-        let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-09T00:00:00Z");
         WorkspaceFinancialStore::new(&db)
             .persist_raw_ingest(&RawIngestPersist {
                 fetched_at: "2026-06-09T00:00:00Z",
                 company_name: Some("Example Corp"),
                 currency: Some("USD"),
                 source_note: "fixture",
-                raw_sec_facts: &raw_facts,
+                raw_av_facts: &sample_av_facts(),
+                raw_sec_facts: &[],
             })
             .await
             .expect("persist");
@@ -194,16 +196,11 @@ mod tests {
     #[tokio::test]
     async fn build_catalog_lane_materializes_mappings_and_fundamentals() {
         let mut ctx = ingest_only_lane_context().await;
-        let lane = BuildCatalogLane::new(ConceptMappingStrategy::CandidateScoring);
+        let lane = BuildCatalogLane::new(CatalogResolutionStrategy::Deterministic);
         let result = lane.run(&mut ctx).await.expect("run");
 
         assert_eq!(result.status, LaneStatus::Success);
         let store = WorkspaceFinancialStore::new(ctx.workspace.connection());
-        assert!(!store
-            .load_concept_catalog_entries()
-            .await
-            .expect("catalog")
-            .is_empty());
         assert!(!store
             .load_active_canonical_mappings()
             .await

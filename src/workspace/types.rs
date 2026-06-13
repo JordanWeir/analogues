@@ -25,6 +25,22 @@ pub struct FundamentalObservation {
     pub is_derived: bool,
 }
 
+/// One numeric field from an Alpha Vantage fundamentals endpoint at a single fiscal period.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AvRawFact {
+    pub endpoint: String,
+    pub report_type: String,
+    pub field_name: String,
+    pub label: Option<String>,
+    pub period_end: String,
+    pub period_type: String,
+    pub unit: String,
+    pub currency: Option<String>,
+    pub value: f64,
+    pub raw_json: String,
+    pub fetched_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecRawFact {
     pub taxonomy: String,

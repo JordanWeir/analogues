@@ -9,15 +9,58 @@ use crate::{
         build_catalog::BuildCatalogLane, context::LaneConfig, context::LaneContext, lane::Lane,
     },
     services::{
-        sec_facts_provider::extract_raw_facts_from_root,
         workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
         workspace_store::{execute_schema, WorkspaceStore},
     },
-    workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths},
+    workspace::{seed_database, AvRawFact, InitWorkspaceRequest, WorkspacePaths},
 };
 use sea_orm::Database;
 use serde_json::json;
 use std::path::PathBuf;
+
+fn sample_av_facts() -> Vec<AvRawFact> {
+    vec![
+        AvRawFact {
+            endpoint: "INCOME_STATEMENT".to_string(),
+            report_type: "annual".to_string(),
+            field_name: "totalRevenue".to_string(),
+            label: None,
+            period_end: "2025-12-31".to_string(),
+            period_type: "annual".to_string(),
+            unit: "USD".to_string(),
+            currency: Some("USD".to_string()),
+            value: 100.0,
+            raw_json: "{}".to_string(),
+            fetched_at: "2026-06-09T00:00:00Z".to_string(),
+        },
+        AvRawFact {
+            endpoint: "INCOME_STATEMENT".to_string(),
+            report_type: "annual".to_string(),
+            field_name: "netIncome".to_string(),
+            label: None,
+            period_end: "2025-12-31".to_string(),
+            period_type: "annual".to_string(),
+            unit: "USD".to_string(),
+            currency: Some("USD".to_string()),
+            value: 10.0,
+            raw_json: "{}".to_string(),
+            fetched_at: "2026-06-09T00:00:00Z".to_string(),
+        },
+        AvRawFact {
+            endpoint: "OVERVIEW".to_string(),
+            report_type: "overview".to_string(),
+            field_name: "DilutedEPSTTM".to_string(),
+            label: None,
+            period_end: "2025-12-31".to_string(),
+            period_type: "ttm".to_string(),
+            unit: "USD".to_string(),
+            currency: Some("USD".to_string()),
+            value: 1.25,
+            raw_json: "{}".to_string(),
+            fetched_at: "2026-06-09T00:00:00Z".to_string(),
+        },
+    ]
+}
 
 pub async fn catalog_lane_context() -> (LaneContext, PathBuf) {
     let path = std::env::temp_dir().join(format!(
@@ -49,26 +92,14 @@ pub async fn catalog_lane_context() -> (LaneContext, PathBuf) {
     .await
     .expect("seed");
 
-    let facts_root = json!({
-        "us-gaap": {
-            "Revenues": {
-                "label": "Revenues",
-                "units": { "USD": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":100.0}]}
-            },
-            "NetIncomeLoss": {
-                "label": "Net income",
-                "units": { "USD": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":10.0}]}
-            }
-        }
-    });
-    let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-09T00:00:00Z");
     WorkspaceFinancialStore::new(&db)
         .persist_raw_ingest(&RawIngestPersist {
             fetched_at: "2026-06-09T00:00:00Z",
             company_name: Some("Example Corp"),
             currency: Some("USD"),
             source_note: "fixture",
-            raw_sec_facts: &raw_facts,
+            raw_av_facts: &sample_av_facts(),
+            raw_sec_facts: &[],
         })
         .await
         .expect("persist");
@@ -76,12 +107,10 @@ pub async fn catalog_lane_context() -> (LaneContext, PathBuf) {
 
     let workspace = WorkspaceStore.open_workspace(&path).await.expect("open");
     let mut ctx = LaneContext::new(workspace, LaneConfig::new("EXMP"));
-    BuildCatalogLane::new(
-        crate::services::canonical_mapping::ConceptMappingStrategy::CandidateScoring,
-    )
-    .run(&mut ctx)
-    .await
-    .expect("catalog");
+    BuildCatalogLane::new(crate::lanes::build_catalog::CatalogResolutionStrategy::Deterministic)
+        .run(&mut ctx)
+        .await
+        .expect("catalog");
     ctx.workspace.close().await.ok();
 
     let workspace = WorkspaceStore.open_workspace(&path).await.expect("reopen");
