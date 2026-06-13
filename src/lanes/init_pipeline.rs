@@ -59,8 +59,7 @@ mod tests {
                 "init_workspace",
                 "build_catalog",
                 "build_narrative_map",
-                "identify_crux_candidates",
-                "financial_mechanics_experiments",
+                "financial_fan_out",
             ]
         );
     }

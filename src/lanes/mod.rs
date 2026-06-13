@@ -1,6 +1,7 @@
 pub mod build_catalog;
 pub mod build_narrative_map;
 pub mod context;
+pub mod financial_fan_out;
 pub mod financial_mechanics_experiments;
 pub mod gate;
 pub mod identify_crux_candidates;

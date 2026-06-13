@@ -8,6 +8,7 @@ pub struct FinancialModelExplorerConfig {
     pub model: String,
     pub mode: ExplorerMode,
     pub max_agent_rounds: usize,
+    pub prompt_prefix: Option<String>,
 }
 
 impl Default for FinancialModelExplorerConfig {
@@ -16,6 +17,7 @@ impl Default for FinancialModelExplorerConfig {
             model: "deepseek/deepseek-v4-flash".to_string(),
             mode: ExplorerMode::CruxTriage,
             max_agent_rounds: FINANCIAL_EXPLORER_MAX_AGENT_ROUNDS,
+            prompt_prefix: None,
         }
     }
 }
@@ -34,5 +36,10 @@ impl FinancialModelExplorerConfig {
             max_agent_rounds: FINANCIAL_MECHANICS_MAX_AGENT_ROUNDS,
             ..Self::default()
         }
+    }
+
+    pub fn with_prompt_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prompt_prefix = Some(prefix.into());
+        self
     }
 }

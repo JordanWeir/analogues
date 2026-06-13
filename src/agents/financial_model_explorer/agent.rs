@@ -4,7 +4,10 @@ use super::{
         format_explorer_context_section, load_explorer_context, validate_crux_triage_with_context,
         validate_mechanics_complete_with_context,
     },
-    golden_path::{crux_triage_golden_path, explorer_schema_hint, mechanics_experiment_golden_path, mechanics_finalize_example},
+    golden_path::{
+        crux_triage_golden_path, crux_triage_submit_example, explorer_schema_hint,
+        mechanics_experiment_golden_path, mechanics_finalize_example,
+    },
     types::{
         AnalysisExperimentInput, CruxTriageOutput, ExplorerMode, MechanicsExperimentsComplete,
     },
@@ -252,6 +255,12 @@ impl FinancialModelExplorerAgent {
             .as_deref()
             .map(|label| format!("Company: {label}\n\n"))
             .unwrap_or_default();
+        let focus = self
+            .config
+            .prompt_prefix
+            .as_deref()
+            .map(|prefix| format!("{prefix}\n\n"))
+            .unwrap_or_default();
         let workspace_context = load_explorer_context(workspace_sqlite)
             .await
             .unwrap_or_else(|_| super::explorer_context::ExplorerWorkspaceContext {
@@ -267,14 +276,12 @@ impl FinancialModelExplorerAgent {
             ExplorerMode::MechanicsExperiment => mechanics_experiment_golden_path(),
         };
         let submit_shape = match self.config.mode {
-            ExplorerMode::CruxTriage => {
-                r#"{"cruxes":[{"crux_key":"rpo_conversion","title":"RPO conversion","statement":"...","bridge_archetype":"backlog_to_cash_conversion","narrative_side":"bear","watch_condition":"...","confirming_signal":"...","breaking_signal":"...","disposition":"promoted","rationale":"...","cluster_members":[{"taxonomy":"us-gaap","concept_name":"RevenueRemainingPerformanceObligation","unit":"USD","role":"driver"}],"linked_claim_ids":[]}],"supporting_metrics":[{"selection_scope":"crux_support","crux_key":"rpo_conversion","taxonomy":"us-gaap","concept_name":"RevenueRemainingPerformanceObligation","unit":"USD","rationale":"Backlog driver for conversion mechanic","period_basis":"instant","quality_status":"ok"}],"quality_flags":[],"open_questions":[]}"#
-            }
+            ExplorerMode::CruxTriage => crux_triage_submit_example(),
             ExplorerMode::MechanicsExperiment => mechanics_finalize_example(),
         };
 
         Ok(format!(
-            r#"{company_context}{schema}
+            r#"{company_context}{focus}{schema}
 
 Workspace context:
 {context_section}

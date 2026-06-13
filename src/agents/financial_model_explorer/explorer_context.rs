@@ -146,6 +146,15 @@ pub fn validate_crux_triage_with_context(
         .filter(|crux| crux.disposition == "promoted")
         .count();
 
+    if output.cruxes.len() == 1 {
+        if promoted_cruxes == 1 && output.supporting_metrics.is_empty() {
+            return Err(Error::string(
+                "submit_crux_triage requires at least one supporting_metric when promoting a crux",
+            ));
+        }
+        return Ok(());
+    }
+
     if ctx.narrative_crux_count >= NARRATIVE_CRUX_COUNT_FOR_STRICT_TRIAGE
         && promoted_cruxes < MIN_PROMOTED_CRUXES_WHEN_NARRATIVE_RICH
     {
@@ -243,6 +252,28 @@ mod tests {
 
     #[test]
     fn requires_two_cruxes_when_narrative_is_rich() {
+        let mut background = sample_crux();
+        background.crux_key = "background_crux".to_string();
+        background.disposition = "background".to_string();
+        let output = CruxTriageOutput {
+            cruxes: vec![sample_crux(), background],
+            supporting_metrics: vec![],
+            quality_flags: vec![],
+            open_questions: vec![],
+        };
+        let ctx = ExplorerWorkspaceContext {
+            narrative_crux_count: 5,
+            open_gaps: vec![],
+            narrative_cruxes_summary: String::new(),
+            sec_freshness_summary: String::new(),
+            claims_guidance_present: false,
+        };
+        let err = validate_crux_triage_with_context(&output, &ctx).expect_err("should fail");
+        assert!(err.to_string().contains("at least 2 promoted cruxes"));
+    }
+
+    #[test]
+    fn single_crux_focus_requires_supporting_metric() {
         let output = CruxTriageOutput {
             cruxes: vec![sample_crux()],
             supporting_metrics: vec![],
@@ -257,6 +288,6 @@ mod tests {
             claims_guidance_present: false,
         };
         let err = validate_crux_triage_with_context(&output, &ctx).expect_err("should fail");
-        assert!(err.to_string().contains("at least 2 promoted cruxes"));
+        assert!(err.to_string().contains("supporting_metric"));
     }
 }

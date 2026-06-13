@@ -75,7 +75,14 @@ Phase 3 — Cluster and crux (agent reasoning):
 
 Phase 4 — Submit:
 Call submit_crux_triage with cruxes, supporting_metrics, quality_flags, open_questions.
+quality_flags objects require flag_key, severity, description (not gap_key).
+open_questions objects require gap_key, description (not flag_key).
 Fix validation errors and resubmit."#
+}
+
+// @TODO: This would be better if we instantiated an example of the object, and then used toSTring.  That gives better guarantees the shape continues to be correct as schema change.
+pub fn crux_triage_submit_example() -> &'static str {
+    r#"{"cruxes":[{"crux_key":"rpo_conversion","title":"RPO conversion","statement":"Backlog must convert fast enough to fund capex.","bridge_archetype":"backlog_to_cash_conversion","narrative_side":"bear","watch_condition":"RPO/revenue trend","confirming_signal":"OCF keeps pace with capex","breaking_signal":"OCF lags guided capex","disposition":"promoted","rationale":"Core funding mechanic.","cluster_members":[{"taxonomy":"us-gaap","concept_name":"RevenueRemainingPerformanceObligation","unit":"USD","role":"driver"}],"linked_claim_ids":[4]}],"supporting_metrics":[{"selection_scope":"crux_support","crux_key":"rpo_conversion","taxonomy":"us-gaap","concept_name":"RevenueRemainingPerformanceObligation","unit":"USD","rationale":"Backlog driver","period_basis":"instant","quality_status":"ok"}],"quality_flags":[{"flag_key":"sec_rpo_stale","severity":"warning","description":"SEC RPO ends 2026-02-28; narrative cites $638B at FY2026 Q4 — use claims for forward figures."}],"open_questions":[{"gap_key":"rpo_customer_concentration","description":"Is a single customer >50% of RPO? Not disclosed in SEC filings."}]}"#
 }
 
 pub fn mechanics_experiment_golden_path() -> &'static str {
