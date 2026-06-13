@@ -70,6 +70,12 @@ impl Lane for InitWorkspaceLane {
                 .wrote("fundamentals")
                 .wrote("fundamental_observations");
         }
+        if outcome.alpha_vantage_persisted {
+            writes = writes
+                .wrote("fundamentals")
+                .wrote("fundamental_observations")
+                .wrote("data_quality_flags");
+        }
         if outcome.fetch_status == "failed" {
             writes = writes.wrote("data_gaps");
         }
