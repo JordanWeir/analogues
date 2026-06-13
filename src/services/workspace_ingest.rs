@@ -129,6 +129,12 @@ pub async fn run_workspace_ingest(
                 source_notes.push(
                     "Persisted current TTM fundamentals from Alpha Vantage.".to_string(),
                 );
+                if !snapshot.daily_prices.is_empty() {
+                    source_notes.push(format!(
+                        "Persisted {} daily OHLC bars from Alpha Vantage.",
+                        snapshot.daily_prices.len()
+                    ));
+                }
             }
             Err(err) => {
                 source_notes.push(format!("Alpha Vantage fundamentals fetch failed: {err}"));
