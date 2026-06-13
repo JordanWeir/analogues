@@ -1,4 +1,7 @@
-use crate::workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths, SCHEMA_STATEMENTS};
+use crate::workspace::{
+    seed_database, InitWorkspaceRequest, WorkspacePaths, SCHEMA_MIGRATION_STATEMENTS,
+    SCHEMA_STATEMENTS,
+};
 use chrono::NaiveDate;
 use loco_rs::prelude::*;
 use sea_orm::{Database, DatabaseBackend, Statement};
@@ -15,7 +18,7 @@ pub struct WorkspaceStore;
 
 pub const DEFAULT_REPORT_ROOT: &str = "reports/stock-narrative-research";
 pub const RUN_DB_FILENAME: &str = "run.sqlite";
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub async fn execute_schema(db: &sea_orm::DatabaseConnection) -> Result<()> {
     for statement in SCHEMA_STATEMENTS {
@@ -25,6 +28,23 @@ pub async fn execute_schema(db: &sea_orm::DatabaseConnection) -> Result<()> {
         ))
         .await
         .map_err(|err| Error::string(&format!("failed to apply run schema: {err}")))?;
+    }
+
+    for statement in SCHEMA_MIGRATION_STATEMENTS {
+        if let Err(err) = db
+            .execute(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                (*statement).to_string(),
+            ))
+            .await
+        {
+            let message = err.to_string();
+            if !message.contains("duplicate column name") {
+                return Err(Error::string(&format!(
+                    "failed to apply schema migration: {message}"
+                )));
+            }
+        }
     }
 
     Ok(())

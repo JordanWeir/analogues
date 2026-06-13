@@ -73,18 +73,45 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_canonical_metric_mappings_concept
         ON canonical_metric_mappings(taxonomy, concept_name, unit, is_active)",
+    "CREATE TABLE IF NOT EXISTS crux_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        crux_key TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        statement TEXT NOT NULL,
+        bridge_archetype TEXT,
+        narrative_side TEXT,
+        watch_condition TEXT NOT NULL,
+        confirming_signal TEXT NOT NULL,
+        breaking_signal TEXT NOT NULL,
+        disposition TEXT NOT NULL DEFAULT 'promoted'
+            CHECK (disposition IN ('promoted', 'background', 'rejected', 'unresolved')),
+        status TEXT NOT NULL DEFAULT 'active'
+            CHECK (status IN ('active', 'superseded', 'quarantined')),
+        rationale TEXT NOT NULL,
+        worker_run_id TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        CHECK (json_valid(payload_json))
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_crux_candidates_disposition
+        ON crux_candidates(disposition, status)",
     "CREATE TABLE IF NOT EXISTS supporting_metric_selections (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         selection_scope TEXT NOT NULL,
         scenario_id INTEGER,
+        crux_id INTEGER,
         taxonomy TEXT NOT NULL,
         concept_name TEXT NOT NULL,
         unit TEXT NOT NULL,
         label TEXT,
         rationale TEXT NOT NULL,
+        period_basis TEXT,
+        quality_status TEXT DEFAULT 'ok',
         selected_by TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        FOREIGN KEY(scenario_id) REFERENCES scenario_assumptions(id)
+        FOREIGN KEY(scenario_id) REFERENCES scenario_assumptions(id),
+        FOREIGN KEY(crux_id) REFERENCES crux_candidates(id)
     )",
     "CREATE VIEW IF NOT EXISTS raw_fact_metric_catalog AS
         SELECT
@@ -454,4 +481,79 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_quality_gate_results_lane_created
         ON quality_gate_results(lane_name, created_at)",
+    "CREATE TABLE IF NOT EXISTS analysis_experiments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        experiment_key TEXT NOT NULL UNIQUE,
+        crux_id INTEGER,
+        question TEXT NOT NULL,
+        purpose TEXT NOT NULL
+            CHECK (purpose IN (
+                'historical_investigation',
+                'sensitivity',
+                'forward_projection',
+                'scenario_validation'
+            )),
+        sql_body TEXT NOT NULL,
+        period_basis TEXT NOT NULL,
+        disposition TEXT NOT NULL
+            CHECK (disposition IN (
+                'draft',
+                'candidate',
+                'promoted',
+                'rejected',
+                'background'
+            )),
+        rejection_reason TEXT,
+        source_note TEXT,
+        rationale TEXT,
+        worker_run_id TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        assumptions_json TEXT NOT NULL DEFAULT '[]',
+        inputs_json TEXT NOT NULL DEFAULT '[]',
+        outputs_json TEXT NOT NULL DEFAULT '[]',
+        bridge_json TEXT,
+        CHECK (json_valid(assumptions_json)),
+        CHECK (json_valid(inputs_json)),
+        CHECK (json_valid(outputs_json)),
+        FOREIGN KEY(crux_id) REFERENCES crux_candidates(id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_analysis_experiments_crux_disposition
+        ON analysis_experiments(crux_id, disposition)",
+    "CREATE TABLE IF NOT EXISTS analysis_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_key TEXT NOT NULL UNIQUE,
+        experiment_key TEXT,
+        crux_id INTEGER,
+        question TEXT NOT NULL,
+        executed_sql TEXT NOT NULL,
+        period_basis TEXT NOT NULL,
+        execution_status TEXT NOT NULL
+            CHECK (execution_status IN ('success', 'error', 'truncated', 'empty')),
+        row_count INTEGER,
+        error_message TEXT,
+        result_json TEXT NOT NULL DEFAULT '[]',
+        assumptions_json TEXT NOT NULL DEFAULT '[]',
+        inputs_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'draft'
+            CHECK (status IN ('draft', 'finalized', 'discarded')),
+        worker_run_id TEXT,
+        created_at TEXT NOT NULL,
+        finalized_at TEXT,
+        CHECK (json_valid(result_json)),
+        CHECK (json_valid(assumptions_json)),
+        CHECK (json_valid(inputs_json)),
+        FOREIGN KEY(crux_id) REFERENCES crux_candidates(id),
+        FOREIGN KEY(experiment_key) REFERENCES analysis_experiments(experiment_key)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_analysis_runs_status_created
+        ON analysis_runs(status, created_at)",
+];
+
+/// Idempotent column additions for workspaces created before schema version 3.
+pub const SCHEMA_MIGRATION_STATEMENTS: &[&str] = &[
+    "ALTER TABLE supporting_metric_selections ADD COLUMN crux_id INTEGER REFERENCES crux_candidates(id)",
+    "ALTER TABLE supporting_metric_selections ADD COLUMN period_basis TEXT",
+    "ALTER TABLE supporting_metric_selections ADD COLUMN quality_status TEXT DEFAULT 'ok'",
 ];
