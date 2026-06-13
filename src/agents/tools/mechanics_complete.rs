@@ -1,6 +1,7 @@
 use crate::{
     agents::financial_model_explorer::{
-        FinancialModelExplorerAgent, types::MechanicsExperimentsComplete,
+        explorer_context::load_explorer_context, FinancialModelExplorerAgent,
+        types::MechanicsExperimentsComplete,
     },
     services::{financial_analysis_store::FinancialAnalysisStore, openrouter_chat::ClientToolExecuteResult},
 };
@@ -15,7 +16,8 @@ pub fn openrouter_tool() -> Tool {
     Tool::builder()
         .name(TOOL_NAME)
         .description(
-            "Finish the mechanics experiment lane after at least one promoted experiment exists. \
+            "Finish the mechanics experiment lane after at least two promoted experiments exist, \
+             including forward/sensitivity work when claims include guidance. \
              Experiments should already be persisted via finalize_analysis.",
         )
         .parameters(json!({
@@ -40,7 +42,6 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<ClientToo
             ))
         })?
     };
-    FinancialModelExplorerAgent::validate_mechanics_complete(&output)?;
 
     let db = sea_orm::Database::connect(crate::services::workspace_store::sqlite_uri(
         sqlite_path,
@@ -48,17 +49,19 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<ClientToo
     .await?;
     let store = FinancialAnalysisStore::new(&db);
     let promoted = store.count_promoted_experiments().await?;
+    let non_historical = store.count_promoted_non_historical_experiments().await?;
     db.close().await.ok();
 
-    if promoted == 0 {
-        return Err(Error::string(
-            "submit_mechanics_experiments requires at least one promoted analysis_experiments row; use finalize_analysis first",
-        ));
-    }
+    let ctx = load_explorer_context(sqlite_path).await?;
+    FinancialModelExplorerAgent::validate_mechanics_complete(
+        &output,
+        promoted,
+        non_historical,
+        &ctx,
+    )?;
 
     let text = serde_json::to_string(&output).map_err(|err| {
         Error::string(&format!("failed to serialize mechanics completion payload: {err}"))
     })?;
     Ok(ClientToolExecuteResult::Complete(text))
 }
-

@@ -6,12 +6,19 @@ pub fn explorer_schema_hint() -> &'static str {
 - Lane 5 writes analysis_runs (draft) and analysis_experiments (finalized).
 
 Table tiers (use in this order):
-1. Narrative context — narrative_map, narrative_map_items, claims, sources.
+1. Narrative context — narrative_map, narrative_map_items, claims, sources, data_gaps.
 2. Judgment — crux_candidates(crux_key, title, statement, watch_condition, confirming_signal, breaking_signal, disposition, payload_json).
 3. Catalog search — concept_catalog_entries(taxonomy, concept_name, label, unit, fact_count, latest_period_end, dominant_period_shape, series_usability, narrative_tags).
 4. Core flows — canonical_fundamental_observations, fundamental_observations, fundamentals.
 5. Experiments — analysis_experiments(experiment_key, crux_id, question, purpose, sql_body, period_basis, disposition, outputs_json), analysis_runs(run_key, status, result_json).
-6. Confirmation — sec_raw_facts for spot checks only after catalog shortlist.
+6. Confirmation — sec_raw_facts for spot checks after catalog shortlist; claims + sources when SEC lags narrative.
+
+Schema quirks:
+- stock_info uses company_name (not name): ticker, company_name, exchange, sector, industry.
+- sec_raw_facts is single-company; there is no ticker column. Filter by taxonomy, concept_name, unit, fiscal_period, period_end.
+- sec_raw_facts columns: taxonomy, concept_name, label, unit, form, period_start, period_end, filed_at, fiscal_year, fiscal_period, frame, metric_value.
+- sec_raw_facts may store multiple fiscal_year labels for the same period_end (restatement artifact). Do NOT GROUP BY fiscal_year for annual series — use GROUP BY period_end and pick MAX(filed_at) or MAX(metric_value). If a draft returns row_count >> distinct fiscal years, fix SQL before finalizing.
+- When SEC latest_period_end lags claims or open data_gaps, note staleness in quality_flags, assumptions, or source_note. You may reference claims as input_type claim with source provenance — never treat stale SEC as current without disclosure.
 
 LIMIT rules:
 - Always ORDER BY before LIMIT.
@@ -30,8 +37,9 @@ pub fn crux_triage_golden_path() -> &'static str {
 
 Phase 0 — Orient (one round, parallel SQL):
 SELECT dominant, bull, bear, consensus, counter_narrative FROM narrative_map WHERE id = 1;
-SELECT item_type, body FROM narrative_map_items ORDER BY item_order LIMIT 20;
+SELECT item_type, item_order, body FROM narrative_map_items ORDER BY item_order LIMIT 20;
 SELECT claim, claim_type, side FROM claims ORDER BY id LIMIT 20;
+SELECT gap_key, description, status FROM data_gaps WHERE status = 'open';
 SELECT COUNT(*) AS catalog_concepts FROM concept_catalog_entries;
 SELECT canonical_key, metric_label FROM canonical_metric_definitions ORDER BY display_order;
 
@@ -57,11 +65,13 @@ ORDER BY period_end DESC, filed_at DESC
 LIMIT 10;
 
 Phase 3 — Cluster and crux (agent reasoning):
-- Group 2–5 concepts into one mechanic cluster when they answer the same narrative tension.
-- Draft 2–5 crux candidates total, not one per metric.
+- Read every narrative crux in the prompt context. Produce one promoted or background crux_candidate per narrative crux, or cluster 2 related narrative cruxes into one mechanic with linked_claim_ids.
+- When narrative has 3+ crux items, submit at least 2 promoted crux_candidates covering distinct bridge archetypes (e.g. backlog_to_cash_conversion AND capex_to_funding_pressure).
+- Draft 2–5 crux candidates total, not one per metric and not a single crux that collapses the whole board.
 - Each crux must be falsifiable: include watch_condition, confirming_signal, breaking_signal.
 - Prefer bridge archetypes: backlog_to_cash_conversion, capex_to_funding_pressure, debt_to_eps, obligation_build, working_capital_pressure.
-- Flag sparse/stale/mixed-period concepts in quality_flags; do not promote them as smooth series.
+- Persist at least 2 supporting_metrics from catalog search with rationale tying each metric to a crux.
+- If SEC latest_period_end lags claims, add a quality_flags entry (e.g. sec_facts_stale) naming the concept and periods.
 
 Phase 4 — Submit:
 Call submit_crux_triage with cruxes, supporting_metrics, quality_flags, open_questions.
@@ -83,27 +93,50 @@ WHERE disposition IN ('promoted', 'candidate')
 ORDER BY updated_at DESC
 LIMIT 10;
 
+Compare SEC freshness summary in prompt context to claims. Flag gaps before finalizing.
+
 Phase 1 — Pick one question per experiment:
 Good: "Is capex rising faster than operating cash flow on an annual basis?"
+Good: "What RPO conversion rate would be needed to fund FY27 guided capex at current OCF?"
 Bad: "Analyze the whole business."
 
 Phase 2 — run_analysis_draft:
 - Provide run_key, question, sql_body, period_basis, optional crux_key, assumptions, inputs.
 - Use one consistent period basis per query.
 - Prefer ratios and simple bridges: capex/revenue, capex/OCF, RPO/deferred_revenue, interest/operating_income.
-- Review returned rows before judging.
+- Dedupe annual SEC series with GROUP BY period_end only (not fiscal_year).
+- Review returned rows before judging. If row_count looks inflated, fix SQL and re-draft.
 
 Phase 3 — finalize_analysis:
+- Pass run_key from the draft you are judging.
+- sql_body and period_basis may be omitted; they default from the draft run.
+- purpose must be one of: historical_investigation | sensitivity | forward_projection | scenario_validation.
+- When claims include forward guidance, at least one promoted experiment must use sensitivity or forward_projection.
 - If results are useful: disposition promoted or candidate, include arithmetic outputs AND a separate interpretation output row.
+- If SEC data is stale vs claims, record staleness in assumptions or source_note.
 - If not useful: disposition rejected with rejection_reason, or discard by not finalizing.
 - Promoted experiments must include at least one arithmetic/ratio output and one interpretation output.
 
-Phase 4 — Repeat for 2–4 focused experiments across different crux mechanics.
+Phase 4 — Repeat for 2–4 focused experiments across different promoted crux mechanics (not all on one crux).
 
-Phase 5 — submit_mechanics_experiments when at least one promoted experiment exists.
+Phase 5 — submit_mechanics_experiments only after:
+- At least 2 promoted experiments exist.
+- At least 2 distinct purposes OR one forward/sensitivity experiment when claims include guidance.
+- On penultimate turn: finalize any pending drafts first. Reserve the final turn for submit_mechanics_experiments or validation fixes.
 
 Arithmetic vs interpretation:
 - Arithmetic rows: kind ratio | arithmetic | series_point | bridge_step with value/formula.
 - Interpretation rows: kind interpretation with text only.
 - Never hide arithmetic inside interpretation prose."#
+}
+
+pub fn mechanics_finalize_example() -> &'static str {
+    r#"finalize_analysis example (after run_analysis_draft with run_key "capex_ocf_draft"):
+{"run_key":"capex_ocf_draft","experiment":{"experiment_key":"capex_ocf_pressure","question":"Is capex rising faster than operating cash flow on an annual basis?","purpose":"historical_investigation","period_basis":"annual","crux_key":"capex_to_funding_pressure","disposition":"promoted","rationale":"FY2025 capex/OCF exceeded 1.0 with negative free cash flow.","inputs":[{"input_type":"concept","taxonomy":"us-gaap","concept_name":"PaymentsToAcquirePropertyPlantAndEquipment","unit":"USD"},{"input_type":"concept","taxonomy":"us-gaap","concept_name":"NetCashProvidedByUsedInOperatingActivities","unit":"USD"}],"outputs":[{"kind":"ratio","label":"Capex / OCF FY2025","value":1.019,"unit":"ratio","period_end":"2025-05-31"},{"kind":"interpretation","label":"Funding gap read","text":"Capex now exceeds operating cash flow, implying external funding for the build-out."}]}}
+
+Forward/sensitivity example:
+{"run_key":"rpo_conversion_sensitivity","experiment":{"experiment_key":"rpo_conversion_to_fund_capex","question":"What annual RPO conversion rate closes the FY27 funding gap at guided capex?","purpose":"sensitivity","period_basis":"annual","crux_key":"rpo_conversion_quality","disposition":"promoted","assumptions":[{"key":"Guided FY27 net capex","value":"~$70B from claims","note":"SEC annual capex may lag; not treated as current"}],"inputs":[{"input_type":"claim","note":"FY27 capex guidance from official release"}],"outputs":[{"kind":"ratio","label":"Implied conversion rate","value":0.12,"unit":"ratio"},{"kind":"interpretation","label":"Sensitivity read","text":"At ~12% annual RPO conversion, backlog could fund guided build-out; below that, external financing dominates."}]}}
+
+sql_body may be omitted — it defaults to the draft run's executed_sql.
+Finish lane with submit_mechanics_experiments: {"summary":"..."}"#
 }

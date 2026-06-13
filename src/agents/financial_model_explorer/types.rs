@@ -139,7 +139,9 @@ pub struct AnalysisExperimentInput {
     pub purpose: String,
     #[serde(default)]
     pub crux_key: Option<String>,
+    #[serde(default)]
     pub sql_body: String,
+    #[serde(default)]
     pub period_basis: String,
     pub disposition: String,
     #[serde(default)]

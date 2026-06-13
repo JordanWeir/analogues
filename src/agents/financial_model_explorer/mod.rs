@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod config;
+pub mod explorer_context;
 pub mod golden_path;
 pub mod types;
 

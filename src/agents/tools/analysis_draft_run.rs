@@ -96,6 +96,7 @@ pub async fn execute(sqlite_path: &PathBuf, arguments: &str) -> Result<String> {
         row_count,
         &query_result,
         error_message.as_deref(),
+        &input.sql_body,
     ))
 }
 
@@ -139,12 +140,32 @@ fn success_payload(
     row_count: Option<i64>,
     result: &WorkspaceQueryResult,
     error_message: Option<&str>,
+    sql_body: &str,
 ) -> String {
+    let mut warnings: Vec<String> = Vec::new();
+    if sql_body.contains("fiscal_year") {
+        warnings.push(
+            "SQL groups by fiscal_year; SEC may duplicate rows per period_end — prefer GROUP BY period_end only."
+                .to_string(),
+        );
+    }
+    if let Some(count) = row_count {
+        if count > 8 {
+            warnings.push(format!(
+                "High row_count ({count}); verify deduplication before finalize_analysis."
+            ));
+        }
+    }
+    if execution_status == "truncated" {
+        warnings.push("Results truncated at 200 rows.".to_string());
+    }
+
     json!({
         "run_key": run_key,
         "execution_status": execution_status,
         "row_count": row_count,
         "error_message": error_message,
+        "warnings": warnings,
         "columns": result.columns,
         "rows": result.rows,
     })

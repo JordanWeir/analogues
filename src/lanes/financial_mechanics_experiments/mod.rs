@@ -9,6 +9,7 @@ use super::{
     result::LaneWritesSummary,
 };
 use crate::{
+    agents::financial_model_explorer::explorer_context::MIN_PROMOTED_EXPERIMENTS,
     agents::financial_model_explorer::FinancialModelExplorerAgent,
     services::financial_analysis_store::FinancialAnalysisStore,
 };
@@ -68,10 +69,10 @@ impl Lane for FinancialMechanicsExperimentsLane {
             }
         }
 
-        if store.count_promoted_experiments().await? == 0 {
-            return Err(Error::string(
-                "financial mechanics lane finished without any promoted analysis_experiments",
-            ));
+        if store.count_promoted_experiments().await? < MIN_PROMOTED_EXPERIMENTS {
+            return Err(Error::string(&format!(
+                "financial mechanics lane finished with fewer than {MIN_PROMOTED_EXPERIMENTS} promoted analysis_experiments"
+            )));
         }
 
         let mut writes = LaneWritesSummary::default();

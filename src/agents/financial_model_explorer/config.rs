@@ -1,5 +1,7 @@
 use super::types::ExplorerMode;
-use crate::services::openrouter_chat::FINANCIAL_EXPLORER_MAX_AGENT_ROUNDS;
+use crate::services::openrouter_chat::{
+    FINANCIAL_EXPLORER_MAX_AGENT_ROUNDS, FINANCIAL_MECHANICS_MAX_AGENT_ROUNDS,
+};
 
 #[derive(Debug, Clone)]
 pub struct FinancialModelExplorerConfig {
@@ -29,6 +31,7 @@ impl FinancialModelExplorerConfig {
     pub fn mechanics_experiment() -> Self {
         Self {
             mode: ExplorerMode::MechanicsExperiment,
+            max_agent_rounds: FINANCIAL_MECHANICS_MAX_AGENT_ROUNDS,
             ..Self::default()
         }
     }

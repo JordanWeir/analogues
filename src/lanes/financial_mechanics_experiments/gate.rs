@@ -1,4 +1,5 @@
 use crate::{
+    agents::financial_model_explorer::explorer_context::MIN_PROMOTED_EXPERIMENTS,
     lanes::{
         context::LaneContext,
         gate::{Gate, GateResult},
@@ -15,6 +16,8 @@ pub fn financial_mechanics_experiments_gates() -> Vec<Arc<dyn Gate>> {
     vec![
         Arc::new(CruxCandidatesPresentGate),
         Arc::new(ExperimentsHaveQuestionsGate),
+        Arc::new(MinPromotedExperimentsGate),
+        Arc::new(ExperimentPurposeDiversityGate),
         Arc::new(InputsAndUnitsRecordedGate),
         Arc::new(ArithmeticVsInterpretationSplitGate),
         Arc::new(PromotedLinkedToSourcesGate),
@@ -71,6 +74,96 @@ impl Gate for ExperimentsHaveQuestionsGate {
 
         if count > 0 {
             return GateResult::reject(self.name(), "analysis_experiments rows missing question");
+        }
+
+        GateResult::pass(self.name())
+    }
+}
+
+struct MinPromotedExperimentsGate;
+
+#[async_trait]
+impl Gate for MinPromotedExperimentsGate {
+    fn name(&self) -> &'static str {
+        "min_promoted_experiments"
+    }
+
+    async fn check(&self, ctx: &LaneContext, result: &LaneResult) -> GateResult {
+        if result.status == LaneStatus::Skipped {
+            return GateResult::pass(self.name());
+        }
+
+        let store = FinancialAnalysisStore::new(ctx.workspace.connection());
+        let count = match store.count_promoted_experiments().await {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(self.name(), format!("experiment count failed: {err}"))
+            }
+        };
+
+        if count < MIN_PROMOTED_EXPERIMENTS {
+            return GateResult::reject(
+                self.name(),
+                format!(
+                    "need at least {MIN_PROMOTED_EXPERIMENTS} promoted analysis_experiments (have {count})"
+                ),
+            );
+        }
+
+        GateResult::pass(self.name())
+    }
+}
+
+struct ExperimentPurposeDiversityGate;
+
+#[async_trait]
+impl Gate for ExperimentPurposeDiversityGate {
+    fn name(&self) -> &'static str {
+        "experiment_purpose_diversity"
+    }
+
+    async fn check(&self, ctx: &LaneContext, result: &LaneResult) -> GateResult {
+        if result.status == LaneStatus::Skipped {
+            return GateResult::pass(self.name());
+        }
+
+        let store = FinancialAnalysisStore::new(ctx.workspace.connection());
+        let guidance_claims = match scalar_i64(
+            ctx.workspace.connection(),
+            "SELECT COUNT(*) AS count FROM claims
+             WHERE LOWER(claim) LIKE '%guidance%'
+                OR LOWER(claim) LIKE '%expects%'
+                OR LOWER(claim) LIKE '%outlook%'
+                OR LOWER(claim) LIKE '%fy20%'
+                OR LOWER(claim) LIKE '%fiscal 20%'",
+        )
+        .await
+        {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(self.name(), format!("claims query failed: {err}"))
+            }
+        };
+
+        if guidance_claims == 0 {
+            return GateResult::pass(self.name());
+        }
+
+        let non_historical = match store.count_promoted_non_historical_experiments().await {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(
+                    self.name(),
+                    format!("non-historical experiment count failed: {err}"),
+                )
+            }
+        };
+
+        if non_historical == 0 {
+            return GateResult::reject(
+                self.name(),
+                "claims include forward guidance; need at least one promoted experiment with purpose sensitivity, forward_projection, or scenario_validation",
+            );
         }
 
         GateResult::pass(self.name())

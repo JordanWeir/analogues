@@ -1,4 +1,8 @@
 use crate::{
+    agents::financial_model_explorer::explorer_context::{
+        MIN_PROMOTED_CRUXES_WHEN_NARRATIVE_RICH, MIN_SUPPORTING_METRICS,
+        NARRATIVE_CRUX_COUNT_FOR_STRICT_TRIAGE,
+    },
     lanes::{
         context::LaneContext,
         gate::{Gate, GateResult},
@@ -15,6 +19,8 @@ pub fn identify_crux_candidates_gates() -> Vec<Arc<dyn Gate>> {
     vec![
         Arc::new(NarrativeContextPresentGate),
         Arc::new(CruxCandidatesFalsifiableGate),
+        Arc::new(CruxCoverageGate),
+        Arc::new(SupportingMetricsPresentGate),
         Arc::new(PromotedMetricsHaveRationaleGate),
         Arc::new(PeriodShapeLabeledGate),
     ]
@@ -89,6 +95,92 @@ impl Gate for CruxCandidatesFalsifiableGate {
                     format!("crux {key} is missing watch_condition or breaking_signal"),
                 );
             }
+        }
+
+        GateResult::pass(self.name())
+    }
+}
+
+struct CruxCoverageGate;
+
+#[async_trait]
+impl Gate for CruxCoverageGate {
+    fn name(&self) -> &'static str {
+        "crux_coverage_vs_narrative"
+    }
+
+    async fn check(&self, ctx: &LaneContext, result: &LaneResult) -> GateResult {
+        if result.status == LaneStatus::Skipped {
+            return GateResult::pass(self.name());
+        }
+
+        let store = FinancialAnalysisStore::new(ctx.workspace.connection());
+        let narrative_cruxes = match store.count_narrative_cruxes().await {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(self.name(), format!("narrative crux count failed: {err}"))
+            }
+        };
+        let promoted_cruxes = match store.count_promoted_cruxes().await {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(self.name(), format!("promoted crux count failed: {err}"))
+            }
+        };
+
+        if narrative_cruxes >= NARRATIVE_CRUX_COUNT_FOR_STRICT_TRIAGE
+            && promoted_cruxes < MIN_PROMOTED_CRUXES_WHEN_NARRATIVE_RICH as i64
+        {
+            return GateResult::reject(
+                self.name(),
+                format!(
+                    "narrative has {narrative_cruxes} crux items but only {promoted_cruxes} promoted crux_candidates (need {MIN_PROMOTED_CRUXES_WHEN_NARRATIVE_RICH})"
+                ),
+            );
+        }
+
+        GateResult::pass(self.name())
+    }
+}
+
+struct SupportingMetricsPresentGate;
+
+#[async_trait]
+impl Gate for SupportingMetricsPresentGate {
+    fn name(&self) -> &'static str {
+        "supporting_metrics_present"
+    }
+
+    async fn check(&self, ctx: &LaneContext, result: &LaneResult) -> GateResult {
+        if result.status == LaneStatus::Skipped {
+            return GateResult::pass(self.name());
+        }
+
+        let store = FinancialAnalysisStore::new(ctx.workspace.connection());
+        let promoted_cruxes = match store.count_promoted_cruxes().await {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(self.name(), format!("promoted crux count failed: {err}"))
+            }
+        };
+        if promoted_cruxes == 0 {
+            return GateResult::pass(self.name());
+        }
+
+        let metric_count = match store.count_supporting_metrics().await {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(self.name(), format!("metric count failed: {err}"))
+            }
+        };
+
+        if metric_count < MIN_SUPPORTING_METRICS as i64 {
+            return GateResult::reject(
+                self.name(),
+                format!(
+                    "need at least {MIN_SUPPORTING_METRICS} supporting_metric_selections when cruxes are promoted (have {metric_count})"
+                ),
+            );
         }
 
         GateResult::pass(self.name())

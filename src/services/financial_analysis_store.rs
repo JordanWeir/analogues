@@ -33,6 +33,8 @@ pub struct AnalysisRunRecord {
     pub run_key: String,
     pub status: String,
     pub execution_status: String,
+    pub executed_sql: String,
+    pub period_basis: String,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,32 @@ impl<'a> FinancialAnalysisStore<'a> {
         scalar_i64(
             self.db,
             "SELECT COUNT(*) AS count FROM analysis_experiments WHERE disposition = 'promoted'",
+        )
+        .await
+    }
+
+    pub async fn count_promoted_non_historical_experiments(&self) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            "SELECT COUNT(*) AS count FROM analysis_experiments
+             WHERE disposition = 'promoted'
+               AND purpose IN ('sensitivity', 'forward_projection', 'scenario_validation')",
+        )
+        .await
+    }
+
+    pub async fn count_supporting_metrics(&self) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            "SELECT COUNT(*) AS count FROM supporting_metric_selections",
+        )
+        .await
+    }
+
+    pub async fn count_narrative_cruxes(&self) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            "SELECT COUNT(*) AS count FROM narrative_map_items WHERE item_type = 'crux'",
         )
         .await
     }
@@ -354,7 +382,7 @@ impl<'a> FinancialAnalysisStore<'a> {
         let rows = query_all(
             self.db,
             &format!(
-                "SELECT run_key, status, execution_status
+                "SELECT run_key, status, execution_status, executed_sql, period_basis
                  FROM analysis_runs WHERE run_key = {} LIMIT 1",
                 sql_value(Some(run_key))
             ),
@@ -367,6 +395,8 @@ impl<'a> FinancialAnalysisStore<'a> {
             run_key: row_string(&rows[0], 0)?,
             status: row_string(&rows[0], 1)?,
             execution_status: row_string(&rows[0], 2)?,
+            executed_sql: row_string(&rows[0], 3)?,
+            period_basis: row_string(&rows[0], 4)?,
         }))
     }
 
