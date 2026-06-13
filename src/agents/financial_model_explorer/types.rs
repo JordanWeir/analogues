@@ -122,6 +122,35 @@ pub struct MechanicsExperimentsComplete {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MechanicsReviewOutput {
+    #[serde(default)]
+    pub summary: String,
+    /// Per-scope fan-out validator; mirrors mechanics per_worker scoping.
+    #[serde(default)]
+    pub per_worker: bool,
+    #[serde(default)]
+    pub crux_key: Option<String>,
+    #[serde(default)]
+    pub scout: bool,
+    pub verdict: String,
+    #[serde(default)]
+    pub findings: Vec<MechanicsReviewFinding>,
+    #[serde(default)]
+    pub experiments_reviewed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MechanicsReviewFinding {
+    pub category: String,
+    pub severity: String,
+    pub description: String,
+    #[serde(default)]
+    pub experiment_key: Option<String>,
+    #[serde(default)]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisDraftInput {
     pub run_key: String,
     pub question: String,

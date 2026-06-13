@@ -470,6 +470,48 @@ impl<'a> FinancialAnalysisStore<'a> {
             .collect())
     }
 
+    pub async fn load_promoted_experiment_keys_for_scope(
+        &self,
+        scope: MechanicsDraftScope<'_>,
+    ) -> Result<Vec<String>> {
+        let rows = query_all(self.db, &promoted_experiments_sql(scope)).await?;
+        rows.into_iter()
+            .map(|row| row_string(&row, 0))
+            .collect()
+    }
+
+    pub async fn load_promoted_experiments_for_scope(
+        &self,
+        scope: MechanicsDraftScope<'_>,
+    ) -> Result<Vec<AnalysisExperimentRecord>> {
+        let sql = format!(
+            "SELECT ae.experiment_key, ae.crux_id, ae.question, ae.disposition, ae.outputs_json
+             FROM analysis_experiments ae
+             LEFT JOIN crux_candidates cc ON ae.crux_id = cc.id
+             WHERE ae.disposition = 'promoted' AND ({})",
+            promoted_experiments_where(scope)
+        );
+        let rows = query_all(self.db, &sql).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AnalysisExperimentRecord {
+                    experiment_key: row_string(&row, 0)?,
+                    crux_id: row.try_get_by_index::<Option<i64>>(1).ok().flatten(),
+                    question: row_string(&row, 2)?,
+                    disposition: row_string(&row, 3)?,
+                    outputs_json: row_string(&row, 4)?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn scout_review_scope_has_experiments(&self) -> Result<bool> {
+        Ok(!self
+            .load_promoted_experiment_keys_for_scope(MechanicsDraftScope::ScoutGaps)
+            .await?
+            .is_empty())
+    }
+
     pub async fn load_analysis_run(&self, run_key: &str) -> Result<Option<AnalysisRunRecord>> {
         let rows = query_all(
             self.db,
@@ -615,6 +657,37 @@ pub fn outputs_include_arithmetic_and_interpretation(outputs: &[AnalysisOutputRo
 
 fn sql_str(value: &str) -> String {
     format!("'{}'", escape_sql(value))
+}
+
+fn promoted_experiments_sql(scope: MechanicsDraftScope<'_>) -> String {
+    format!(
+        "SELECT ae.experiment_key
+         FROM analysis_experiments ae
+         LEFT JOIN crux_candidates cc ON ae.crux_id = cc.id
+         WHERE ae.disposition = 'promoted' AND ({})",
+        promoted_experiments_where(scope)
+    )
+}
+
+fn promoted_experiments_where(scope: MechanicsDraftScope<'_>) -> String {
+    match scope {
+        MechanicsDraftScope::CruxKey(crux_key) => format!(
+            "cc.crux_key = {}",
+            sql_str(crux_key)
+        ),
+        MechanicsDraftScope::ScoutGaps => {
+            "ae.crux_id IS NULL OR cc.crux_key IN (
+               SELECT cc2.crux_key FROM crux_candidates cc2
+               WHERE cc2.disposition = 'promoted' AND cc2.status = 'active'
+                 AND cc2.id NOT IN (
+                   SELECT DISTINCT crux_id FROM analysis_experiments
+                   WHERE disposition = 'promoted' AND crux_id IS NOT NULL
+                 )
+             )"
+                .to_string()
+        }
+        MechanicsDraftScope::Workspace => "1 = 1".to_string(),
+    }
 }
 
 async fn query_all(
