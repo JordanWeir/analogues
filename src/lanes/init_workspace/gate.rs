@@ -280,6 +280,7 @@ mod tests {
                 fetch_financials: false,
                 mapping_strategy: None,
                 build_narrative_map: false,
+                build_financial_analysis: false,
             },
             &paths,
         )
@@ -337,6 +338,7 @@ mod tests {
             fetch_financials: true,
             mapping_strategy: None,
             build_narrative_map: false,
+            build_financial_analysis: false,
         });
         assert_eq!(Lane::gates(&lane).len(), 4);
     }

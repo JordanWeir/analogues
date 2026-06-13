@@ -116,6 +116,7 @@ mod tests {
                 fetch_financials: false,
                 mapping_strategy: None,
                 build_narrative_map: false,
+                build_financial_analysis: false,
             },
             &WorkspacePaths {
                 run_slug: "MSFT-2026-06-07-1".to_string(),

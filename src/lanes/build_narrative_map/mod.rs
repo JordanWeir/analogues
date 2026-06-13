@@ -162,6 +162,7 @@ mod tests {
                 fetch_financials: false,
                 mapping_strategy: None,
                 build_narrative_map: false,
+                build_financial_analysis: false,
             },
             &paths,
         )

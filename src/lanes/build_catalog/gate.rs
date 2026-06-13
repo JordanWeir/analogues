@@ -213,7 +213,10 @@ impl Gate for FlowMetricsPeriodLabeledGate {
 mod tests {
     use super::*;
     use crate::{
-        lanes::{context::LaneConfig, result::LaneWritesSummary},
+        lanes::{
+            build_catalog::BuildCatalogLane,
+            context::LaneConfig, result::LaneWritesSummary,
+        },
         services::{
             workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
             workspace_phases::resolve_av_canonical_mappings_on_workspace,
@@ -292,6 +295,7 @@ mod tests {
                 fetch_financials: false,
                 mapping_strategy: None,
                 build_narrative_map: false,
+                build_financial_analysis: false,
             },
             &paths,
         )

@@ -15,9 +15,29 @@ pub struct InitWorkspaceRequest {
     pub mapping_strategy: Option<ConceptMappingStrategy>,
     /// Run `build_narrative_map` after catalog when financial ingest is enabled.
     pub build_narrative_map: bool,
+    /// Run crux identification and mechanics experiments after narrative map.
+    pub build_financial_analysis: bool,
+}
+
+impl Default for InitWorkspaceRequest {
+    fn default() -> Self {
+        Self {
+            ticker: String::new(),
+            date: String::new(),
+            base_dir: PathBuf::from("reports/stock-narrative-research"),
+            fetch_financials: true,
+            mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
+            build_narrative_map: true,
+            build_financial_analysis: true,
+        }
+    }
 }
 
 impl InitWorkspaceRequest {
+    pub fn runs_narrative_map(&self) -> bool {
+        self.build_narrative_map || self.build_financial_analysis
+    }
+
     pub fn normalized(&self) -> Result<Self> {
         validate_date(&self.date)?;
         Ok(Self {
@@ -27,6 +47,7 @@ impl InitWorkspaceRequest {
             fetch_financials: self.fetch_financials,
             mapping_strategy: self.mapping_strategy,
             build_narrative_map: self.build_narrative_map,
+            build_financial_analysis: self.build_financial_analysis,
         })
     }
 }

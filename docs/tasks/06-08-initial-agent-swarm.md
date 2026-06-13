@@ -180,9 +180,9 @@ Setup a simple linear track, see where agents break down, iterate.
    - Workspace-native review (no throwaway DB); depends on steps 5–6
    - `CatalogResolutionStrategy` (`Deterministic` | `Agent`) in `build_catalog/strategy.rs`; `mapping_strategy:llm_reviewed` invokes agent via `LlmReviewedResolver`
 
-8. **`narrative_researcher` agent**
+8. **`narrative_researcher` agent** ✅
 
-9. **`build_narrative_map` lane + gates**
+9. **`build_narrative_map` lane + gates** ✅
 
 10. **`financial_model_explorer` agent** ✅
     - `src/agents/financial_model_explorer/` — crux-triage and mechanics-experiment modes
