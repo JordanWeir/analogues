@@ -1,3 +1,4 @@
+pub mod alpha_vantage_fundamentals_provider;
 pub mod canonical_mapping;
 pub mod concept_catalog;
 pub mod concept_review;

@@ -1,5 +1,6 @@
 use crate::{
     services::{
+        alpha_vantage_fundamentals_provider::AlphaVantageFundamentalsProvider,
         market_quote_provider::YahooChartMarketDataAdapter,
         sec_facts_provider::SecFactsProvider,
         workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
@@ -27,6 +28,7 @@ pub struct WorkspaceIngestOutcome {
     pub skipped: bool,
     pub sec_ingested: bool,
     pub market_persisted: bool,
+    pub alpha_vantage_persisted: bool,
     pub fetch_status: String,
     pub fetch_error: Option<String>,
     pub source_notes: Vec<String>,
@@ -73,6 +75,7 @@ pub async fn run_workspace_ingest(
             skipped: true,
             sec_ingested: false,
             market_persisted: false,
+            alpha_vantage_persisted: false,
             fetch_status: "skipped".to_string(),
             fetch_error: Some("financial fetch was skipped by request".to_string()),
             source_notes: vec!["starter financial fetch skipped".to_string()],
@@ -82,7 +85,7 @@ pub async fn run_workspace_ingest(
 
     let client = build_financial_http_client()?;
     let market_data = YahooChartMarketDataAdapter::new(client.clone());
-    let sec_provider = SecFactsProvider::new(client);
+    let sec_provider = SecFactsProvider::new(client.clone());
 
     let mut company_name: Option<String> = None;
     let mut currency: Option<String> = None;
@@ -101,6 +104,39 @@ pub async fn run_workspace_ingest(
         Err(err) => {
             source_notes.push(format!("Yahoo chart fallback failed: {err}"));
         }
+    }
+
+    let mut alpha_vantage_persisted = false;
+    if let Some(alpha_vantage) = AlphaVantageFundamentalsProvider::from_env(client.clone()) {
+        match alpha_vantage.fetch_snapshot(ticker).await {
+            Ok(snapshot) => {
+                if company_name.is_none() {
+                    company_name = snapshot.company_name.clone();
+                }
+                if currency.is_none() {
+                    currency = snapshot.currency.clone();
+                }
+                source_notes.extend(snapshot.source_notes.clone());
+                let store = WorkspaceFinancialStore::new(db);
+                let include_implied_price = market_snapshot
+                    .as_ref()
+                    .and_then(|market| market.headlines.current_price)
+                    .is_none();
+                store
+                    .persist_alpha_vantage_snapshot(&snapshot, include_implied_price)
+                    .await?;
+                alpha_vantage_persisted = true;
+                source_notes.push(
+                    "Persisted current TTM fundamentals from Alpha Vantage.".to_string(),
+                );
+            }
+            Err(err) => {
+                source_notes.push(format!("Alpha Vantage fundamentals fetch failed: {err}"));
+            }
+        }
+    } else {
+        source_notes
+            .push("Alpha Vantage fundamentals skipped: ALPHA_VANTAGE_API_KEY not set.".to_string());
     }
 
     match fetch_raw_sec_facts(&sec_provider, ticker).await {
@@ -136,6 +172,7 @@ pub async fn run_workspace_ingest(
                 skipped: false,
                 sec_ingested: true,
                 market_persisted,
+                alpha_vantage_persisted,
                 fetch_status: "ingested".to_string(),
                 fetch_error: None,
                 source_notes,
@@ -149,7 +186,7 @@ pub async fn run_workspace_ingest(
             ));
 
             let store = WorkspaceFinancialStore::new(db);
-            if market_snapshot.is_some() {
+            if market_snapshot.is_some() || alpha_vantage_persisted {
                 let source_note = source_notes.join(" ");
                 store
                     .persist_raw_ingest(&RawIngestPersist {
@@ -165,14 +202,33 @@ pub async fn run_workspace_ingest(
             let market_persisted =
                 persist_market_if_available(&store, market_snapshot.as_ref()).await?;
 
-            record_financial_fetch_gap(db, "failed", Some(&message), &[message.clone()]).await?;
+            if alpha_vantage_persisted {
+                record_financial_fetch_status(
+                    db,
+                    "partial",
+                    Some("SEC Company Facts failed; Alpha Vantage fundamentals persisted"),
+                )
+                .await?;
+            } else {
+                record_financial_fetch_gap(db, "failed", Some(&message), &[message.clone()])
+                    .await?;
+            }
 
             Ok(WorkspaceIngestOutcome {
                 skipped: false,
                 sec_ingested: false,
                 market_persisted,
-                fetch_status: "failed".to_string(),
-                fetch_error: Some(message),
+                alpha_vantage_persisted,
+                fetch_status: if alpha_vantage_persisted {
+                    "partial".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                fetch_error: if alpha_vantage_persisted {
+                    None
+                } else {
+                    Some(message)
+                },
                 source_notes,
                 raw_fact_count: 0,
             })

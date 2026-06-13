@@ -221,6 +221,86 @@ impl<'a> WorkspaceFinancialStore<'a> {
         Ok(())
     }
 
+    /// Phase-1 Alpha Vantage fundamentals persistence (upsert without clearing SEC layers).
+    pub async fn persist_alpha_vantage_snapshot(
+        &self,
+        snapshot: &crate::services::alpha_vantage_fundamentals_provider::AlphaVantageFundamentalsSnapshot,
+        include_implied_price: bool,
+    ) -> Result<()> {
+        use crate::services::alpha_vantage_fundamentals_provider::{
+            alpha_vantage_financial_run, ALPHA_VANTAGE_SOURCE,
+        };
+
+        let fetched_at = snapshot.fetched_at.as_str();
+        if !snapshot.derived.observations.is_empty() {
+            Self::insert_observations(self.db, &snapshot.derived.observations, fetched_at).await?;
+        }
+        for flag in &snapshot.derived.quality_flags {
+            Self::insert_data_quality_flag(self.db, flag, fetched_at).await?;
+        }
+        let run = alpha_vantage_financial_run(snapshot);
+        for metric in run.fundamental_metrics() {
+            Self::insert_fundamental(self.db, &metric, fetched_at).await?;
+        }
+        if include_implied_price {
+            if let Some(price) = snapshot.market_headlines.current_price {
+                Self::insert_fundamental(
+                    self.db,
+                    &FundamentalInsert {
+                        key: "current_price",
+                        label: "Current price",
+                        value: Some(price),
+                        text: None,
+                        unit: snapshot.currency.as_deref(),
+                        period: None,
+                        source_note: Some(format!(
+                            "{ALPHA_VANTAGE_SOURCE} implied from market cap and shares"
+                        )),
+                    },
+                    fetched_at,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn load_alpha_vantage_starter(
+        &self,
+    ) -> Result<crate::workspace::StarterFundamentals> {
+        let rows = query_all(
+            self.db,
+            "SELECT metric_key, metric_value, period
+             FROM fundamentals
+             WHERE source_note LIKE '%Alpha Vantage%'",
+        )
+        .await?;
+        let mut starter = crate::workspace::StarterFundamentals::default();
+        for row in rows {
+            let key = row_string(&row, "metric_key")?;
+            let value = row_opt_f64(&row, "metric_value")?;
+            let period = row_opt_string(&row, "period")?;
+            if period.is_some() && starter.fundamental_period_end.is_none() {
+                starter.fundamental_period_end = period;
+            }
+            match key.as_str() {
+                "shares_outstanding" => starter.shares_outstanding = value,
+                "revenue_ttm" => starter.revenue_ttm = value,
+                "net_income_ttm" => starter.net_income_ttm = value,
+                "gross_profit_ttm" => starter.gross_profit_ttm = value,
+                "operating_income_ttm" => starter.operating_income_ttm = value,
+                "gross_margin" => starter.gross_margin = value,
+                "operating_margin" => starter.operating_margin = value,
+                "net_margin" => starter.net_margin = value,
+                "eps_ttm" => starter.eps_ttm = value,
+                "cash" => starter.cash = value,
+                "total_debt" => starter.total_debt = value,
+                _ => {}
+            }
+        }
+        Ok(starter)
+    }
+
     pub async fn persist_ingestion(&self, input: &IngestPersist<'_>) -> Result<()> {
         let txn = self.db.begin().await.map_err(|err| {
             Error::string(&format!("failed to begin ingestion transaction: {err}"))

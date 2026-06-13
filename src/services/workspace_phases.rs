@@ -1,6 +1,7 @@
 use crate::{
     agents::fundamental_catalog_manager::FundamentalCatalogManagerConfig,
     services::{
+        alpha_vantage_fundamentals_provider::merge_alpha_vantage_starter,
         canonical_mapping::{
             resolve_canonical_mappings, CanonicalResolutionContext, CanonicalResolutionResult,
             ConceptMappingStrategy,
@@ -153,12 +154,26 @@ pub async fn derive_starter_fundamentals_on_workspace(
         ));
     }
 
-    let derived = FundamentalDeriver::derive_starter_fundamentals(
+    let mut derived = FundamentalDeriver::derive_starter_fundamentals(
         &layers.raw_facts,
         &mappings,
         layers.stock.currency.as_deref(),
     );
+    let av_starter = store.load_alpha_vantage_starter().await?;
+    merge_alpha_vantage_starter(&mut derived.starter, &av_starter);
+    if av_starter.revenue_ttm.is_some() {
+        derived.source_notes.push(
+            "Merged Alpha Vantage current TTM fundamentals over SEC-derived starter values."
+                .to_string(),
+        );
+    }
+
     let mut run = financial_run_from_layers(&layers, derived);
+    if av_starter.revenue_ttm.is_some() {
+        run.fundamental_source = Some(
+            crate::services::alpha_vantage_fundamentals_provider::ALPHA_VANTAGE_SOURCE.to_string(),
+        );
+    }
     run.compute_derived_metrics();
     run.mark_gaps();
 
