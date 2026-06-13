@@ -2,6 +2,7 @@ use crate::{
     agents::narrative_researcher::types::{
         CaptureClaimInput, CaptureNarrativeItemsInput, CaptureNarrativeSideInput,
         CaptureOrientationInput, CaptureResearchGapInput, CaptureSectionInput, CaptureSourceInput,
+        CLAIM_TYPES,
     },
     services::{
         narrative_research_store::NarrativeResearchStore, openrouter_chat::ClientToolExecuteResult,
@@ -177,7 +178,7 @@ fn tool_capture_claims() -> Tool {
                             "claim": { "type": "string" },
                             "source_id": { "type": "integer" },
                             "source_title": { "type": "string" },
-                            "claim_type": { "type": "string" },
+                            "claim_type": { "type": "string", "enum": CLAIM_TYPES },
                             "side": { "type": "string" },
                             "confidence": { "type": "string" },
                             "metric": { "type": "string" },

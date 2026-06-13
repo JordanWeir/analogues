@@ -8,7 +8,7 @@ pub fn workspace_schema_hint() -> &'static str {
 Table tiers (use in this order):
 1. Context — stock_info(ticker, company_name, currency, sector, industry), run_metadata(ticker, created_at, financial_fetch_status)
 2. Fundamentals — fundamentals(metric_key, metric_value, period, source_note): headline revenue, EPS, price, margins
-3. Observations — fundamental_observations use period suffixes on income-statement flow metrics (e.g. revenue_quarter, revenue_ytd, revenue_annual); default to *_quarter for time-series work
+3. Observations — fundamental_observations(metric_key, period_end, period_type, ...): no `period` column (that is on `fundamentals` only). Income-statement flow metrics use period suffixes in metric_key (e.g. revenue_quarter, revenue_ytd, revenue_annual); default to *_quarter for time-series work. Sort by period_end DESC, not period.
 4. Narrative board — sources(id, title, url, ...), claims(id, claim, source_id, side, ...), narrative_map, narrative_map_items
 5. Catalog signal — concept_catalog_entries(concept_name, label, narrative_tags, latest_period_end, series_usability)
 6. Avoid overwriting — canonical_metric_mappings and fundamental_observations are inputs, not outputs for this agent
@@ -67,6 +67,8 @@ mod tests {
         assert!(hint.contains("concept_catalog_entries"));
         assert!(hint.contains("may already contain"));
         assert!(hint.contains("Never delete"));
+        assert!(hint.contains("period_end"));
+        assert!(hint.contains("no `period` column"));
     }
 
     #[test]

@@ -58,8 +58,9 @@ pub fn validate_claim(input: &CaptureClaimInput) -> Result {
     }
     if !CLAIM_TYPES.contains(&input.claim_type.as_str()) {
         return Err(ValidationError::invalid(format!(
-            "invalid claim_type '{}'",
-            input.claim_type
+            "invalid claim_type '{}'; expected one of: {}",
+            input.claim_type,
+            CLAIM_TYPES.join(", ")
         )));
     }
     if !CLAIM_SIDES.contains(&input.side.as_str()) {
@@ -233,6 +234,24 @@ pub fn validate_workspace_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_invalid_claim_type_with_allowed_values() {
+        let input = CaptureClaimInput {
+            claim: "Revenue grew 10%.".to_string(),
+            source_id: Some(1),
+            source_title: None,
+            claim_type: "financial".to_string(),
+            side: "bull".to_string(),
+            confidence: "high".to_string(),
+            metric: None,
+            notes: None,
+        };
+        let err = validate_claim(&input).unwrap_err().to_string();
+        assert!(err.contains("invalid claim_type 'financial'"));
+        assert!(err.contains("expected one of:"));
+        assert!(err.contains("revenue growth"));
+    }
 
     #[test]
     fn rejects_short_bull_narrative() {
