@@ -4,6 +4,7 @@ pub mod concept_review_submit;
 pub mod crux_triage_submit;
 pub mod fundamentals_lookup;
 pub mod mechanics_complete;
+pub mod mechanics_review_submit;
 pub mod narrative_research;
 pub mod sql_query;
 pub mod web_search;
@@ -17,6 +18,7 @@ use concept_review_submit::TOOL_NAME as CONCEPT_REVIEW_SUBMIT_TOOL_NAME;
 use crux_triage_submit::TOOL_NAME as CRUX_TRIAGE_SUBMIT_TOOL_NAME;
 use fundamentals_lookup::TOOL_NAME as FUNDAMENTALS_LOOKUP_TOOL_NAME;
 use mechanics_complete::TOOL_NAME as MECHANICS_COMPLETE_TOOL_NAME;
+use mechanics_review_submit::{MechanicsReviewSubmitConfig, TOOL_NAME as MECHANICS_REVIEW_SUBMIT_TOOL_NAME};
 use narrative_research::NARRATIVE_TOOL_NAMES;
 use sql_query::TOOL_NAME as SQL_QUERY_TOOL_NAME;
 
@@ -24,6 +26,7 @@ pub use analysis_draft_run::TOOL_NAME as ANALYSIS_DRAFT_TOOL;
 pub use analysis_finalize::TOOL_NAME as ANALYSIS_FINALIZE_TOOL;
 pub use crux_triage_submit::TOOL_NAME as CRUX_TRIAGE_SUBMIT_TOOL;
 pub use mechanics_complete::TOOL_NAME as MECHANICS_COMPLETE_TOOL;
+pub use mechanics_review_submit::TOOL_NAME as MECHANICS_REVIEW_SUBMIT_TOOL;
 use std::{path::PathBuf, sync::Arc};
 pub use web_search::WebSearchConfig;
 
@@ -38,6 +41,7 @@ pub enum SharedTool {
     AnalysisDraft,
     AnalysisFinalize,
     MechanicsComplete,
+    MechanicsReviewSubmit(Arc<MechanicsReviewSubmitConfig>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -147,6 +151,15 @@ impl ToolRegistry {
         self
     }
 
+    pub fn with_mechanics_review_submit(mut self, review_round: i64) -> Self {
+        self.tools
+            .retain(|tool| !matches!(tool, SharedTool::MechanicsReviewSubmit(_)));
+        self.tools.push(SharedTool::MechanicsReviewSubmit(
+            mechanics_review_submit::handler_config(review_round),
+        ));
+        self
+    }
+
     pub fn needs_client_loop(&self) -> bool {
         self.tools.iter().any(|tool| match tool {
             SharedTool::SqlQuery
@@ -156,7 +169,8 @@ impl ToolRegistry {
             | SharedTool::CruxTriageSubmit
             | SharedTool::AnalysisDraft
             | SharedTool::AnalysisFinalize
-            | SharedTool::MechanicsComplete => true,
+            | SharedTool::MechanicsComplete
+            | SharedTool::MechanicsReviewSubmit(_) => true,
             SharedTool::WebSearch(_) => false,
         })
     }
@@ -203,6 +217,9 @@ impl ToolRegistry {
                 SharedTool::MechanicsComplete => {
                     CompletionTool::Function(mechanics_complete::openrouter_tool())
                 }
+                SharedTool::MechanicsReviewSubmit(_) => {
+                    CompletionTool::Function(mechanics_review_submit::openrouter_tool())
+                }
                 SharedTool::NarrativeResearch => unreachable!("handled above"),
             })
             .collect()
@@ -232,6 +249,7 @@ impl ToolRegistry {
                     | SharedTool::AnalysisDraft
                     | SharedTool::AnalysisFinalize
                     | SharedTool::MechanicsComplete
+                    | SharedTool::MechanicsReviewSubmit(_)
             )
         }) {
             return None;
@@ -347,6 +365,20 @@ impl ClientToolHandler for RegistryClientHandler {
                 )
             })?;
             return mechanics_complete::execute(path, arguments).await;
+        }
+        if tool_name == MECHANICS_REVIEW_SUBMIT_TOOL_NAME {
+            let config = self.tools.iter().find_map(|tool| match tool {
+                SharedTool::MechanicsReviewSubmit(config) => Some(config.clone()),
+                _ => None,
+            });
+            if let Some(config) = config {
+                let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                    loco_rs::prelude::Error::string(
+                        "submit_mechanics_review requires a workspace sqlite path to be configured",
+                    )
+                })?;
+                return mechanics_review_submit::execute(path, arguments, config.review_round).await;
+            }
         }
 
         Err(loco_rs::prelude::Error::string(&format!(
