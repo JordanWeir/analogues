@@ -94,7 +94,9 @@ pub async fn populate_fixture_narrative(path: &PathBuf) {
         "sources": [
             {"title": "Example 10-K", "url": "https://example.com/10k", "source_type": "Filing", "why_it_matters": "Primary audited financial disclosure for baseline facts."},
             {"title": "Earnings call transcript", "source_type": "Transcript", "why_it_matters": "Management commentary on demand trends and guidance."},
-            {"title": "Sell-side debate note", "source_type": "Market commentary", "why_it_matters": "Captures bull and bear framing in one place."}
+            {"title": "Sell-side debate note", "source_type": "Market commentary", "why_it_matters": "Captures bull and bear framing in one place."},
+            {"title": "Official Q1 press release", "url": "https://example.com/q1-release", "source_type": "Official company source", "why_it_matters": "Latest-quarter official revenue and guidance figures."},
+            {"title": "Financial news recap", "url": "https://example.com/news-recap", "source_type": "Financial news", "why_it_matters": "Summarizes market reaction to the latest earnings print."}
         ]
     })
     .to_string();
@@ -108,7 +110,12 @@ pub async fn populate_fixture_narrative(path: &PathBuf) {
             {"claim": "Margin pressure from mix shift remains a risk.", "source_id": 2, "claim_type": "margin", "side": "bear", "confidence": "medium"},
             {"claim": "Valuation embeds optimistic AI monetization.", "source_id": 3, "claim_type": "valuation", "side": "bear", "confidence": "medium"},
             {"claim": "Balance sheet supports continued buybacks.", "source_id": 1, "claim_type": "capital allocation", "side": "bull", "confidence": "high"},
-            {"claim": "Consensus assumes stable enterprise demand.", "source_id": 3, "claim_type": "demand", "side": "consensus", "confidence": "medium"}
+            {"claim": "Consensus assumes stable enterprise demand.", "source_id": 3, "claim_type": "demand", "side": "consensus", "confidence": "medium"},
+            {"claim": "Cloud backlog conversion is accelerating.", "source_id": 4, "claim_type": "demand", "side": "bull", "confidence": "high"},
+            {"claim": "Capex intensity may pressure free cash flow.", "source_id": 2, "claim_type": "capital allocation", "side": "bear", "confidence": "medium"},
+            {"claim": "Operating margin held steady year over year.", "source_id": 1, "claim_type": "margin", "side": "bull", "confidence": "high"},
+            {"claim": "Customer concentration remains elevated.", "source_id": 5, "claim_type": "customer concentration", "side": "bear", "confidence": "inference"},
+            {"claim": "Latest quarter EPS beat consensus.", "source_id": 4, "claim_type": "earnings", "side": "bull", "confidence": "high"}
         ]
     })
     .to_string();
@@ -132,13 +139,28 @@ pub async fn populate_fixture_narrative(path: &PathBuf) {
         "item_type": "crux",
         "items": [
             "Whether cloud consumption growth re-accelerates through FY26.",
-            "Whether margin expansion offsets heavier AI infrastructure spend."
+            "Whether margin expansion offsets heavier AI infrastructure spend.",
+            "Whether backlog converts to revenue on management's timeline.",
+            "Whether customer concentration creates binary demand risk.",
+            "Whether financing costs stay manageable during the capex ramp."
         ]
     })
     .to_string();
     narrative_research::execute(path, TOOL_CAPTURE_NARRATIVE_ITEMS, &cruxes)
         .await
         .expect("cruxes");
+
+    let agreements = json!({
+        "item_type": "agreement",
+        "items": [
+            "Both sides agree cloud is now the primary growth engine.",
+            "Both sides agree capex is rising materially this cycle."
+        ]
+    })
+    .to_string();
+    narrative_research::execute(path, TOOL_CAPTURE_NARRATIVE_ITEMS, &agreements)
+        .await
+        .expect("agreements");
 
     let orientation = json!({
         "dominant_question": "Is growth re-acceleration already priced in?",

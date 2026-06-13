@@ -11,9 +11,10 @@ use openrouter_rs::{
     },
     OpenRouterClient,
 };
+use reqwest::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
-use std::{env, sync::Arc};
+use std::{env, future::Future, sync::Arc, time::Duration};
 
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const HTTP_REFERER: &str = "research@example.local";
@@ -22,6 +23,9 @@ pub const DEFAULT_MAX_AGENT_ROUNDS: usize = 16;
 pub const CONCEPT_REVIEW_MAX_AGENT_ROUNDS: usize = 20;
 pub const FINANCIAL_EXPLORER_MAX_AGENT_ROUNDS: usize = 24;
 pub const NARRATIVE_RESEARCH_MAX_AGENT_ROUNDS: usize = 28;
+
+/// Backoff delays before each retry after a transient OpenRouter failure.
+const OPENROUTER_RETRY_DELAYS_SECS: &[u64] = &[5, 15, 45];
 
 #[async_trait]
 pub trait ClientToolHandler: Send + Sync {
@@ -426,11 +430,14 @@ async fn send_completion(
         builder.build()
     }
     .map_err(map_openrouter_error)?;
-    let response = client
-        .chat()
-        .create(&request)
-        .await
-        .map_err(map_openrouter_error)?;
+    let response = with_openrouter_backoff("openrouter_chat", || async {
+        client
+            .chat()
+            .create(&request)
+            .await
+            .map_err(OpenRouterAttemptError::from)
+    })
+    .await?;
     let raw_payload = serde_json::to_value(&response).unwrap_or(Value::Null);
     Ok((response, raw_payload))
 }
@@ -445,6 +452,15 @@ async fn post_agent_chat(request: &AgentChatRequest) -> Result<(CompletionsRespo
         .build()
         .map_err(|err| Error::string(&format!("failed to build HTTP client: {err}")))?;
 
+    with_openrouter_backoff("post_agent_chat", || post_agent_chat_attempt(&http, &api_key, request))
+        .await
+}
+
+async fn post_agent_chat_attempt(
+    http: &reqwest::Client,
+    api_key: &str,
+    request: &AgentChatRequest,
+) -> Result<(CompletionsResponse, Value), OpenRouterAttemptError> {
     let response = http
         .post(OPENROUTER_CHAT_COMPLETIONS_URL)
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
@@ -454,32 +470,152 @@ async fn post_agent_chat(request: &AgentChatRequest) -> Result<(CompletionsRespo
         .json(request)
         .send()
         .await
-        .map_err(|err| Error::string(&format!("OpenRouter request failed: {err}")))?;
+        .map_err(|err| {
+            if reqwest_error_is_retryable(&err) {
+                OpenRouterAttemptError::retryable(format!("OpenRouter request failed: {err}"))
+            } else {
+                OpenRouterAttemptError::fatal(format!("OpenRouter request failed: {err}"))
+            }
+        })?;
 
     let status = response.status();
-    let raw_payload: Value = response
-        .json()
-        .await
-        .map_err(|err| Error::string(&format!("OpenRouter response was not JSON: {err}")))?;
+    let raw_payload: Value = response.json().await.map_err(|err| {
+        OpenRouterAttemptError::fatal(format!("OpenRouter response was not JSON: {err}"))
+    })?;
 
     if !status.is_success() {
         let message = raw_payload
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or("unknown OpenRouter error");
-        return Err(Error::string(&format!(
-            "OpenRouter request failed ({status}): {message}"
-        )));
+        let error = format!("OpenRouter request failed ({status}): {message}");
+        if http_status_is_retryable(status) {
+            return Err(OpenRouterAttemptError::retryable(error));
+        }
+        return Err(OpenRouterAttemptError::fatal(error));
     }
 
-    let parsed: CompletionsResponse =
-        serde_json::from_value(raw_payload.clone()).map_err(|err| {
-            Error::string(&format!(
-                "OpenRouter response did not match expected schema: {err}"
-            ))
-        })?;
+    let parsed: CompletionsResponse = serde_json::from_value(raw_payload.clone()).map_err(|err| {
+        OpenRouterAttemptError::fatal(format!(
+            "OpenRouter response did not match expected schema: {err}"
+        ))
+    })?;
 
     Ok((parsed, raw_payload))
+}
+
+#[derive(Debug, Clone)]
+enum OpenRouterAttemptError {
+    Retryable(String),
+    Fatal(String),
+}
+
+impl OpenRouterAttemptError {
+    fn retryable(message: impl Into<String>) -> Self {
+        Self::Retryable(message.into())
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self::Fatal(message.into())
+    }
+
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+}
+
+impl std::fmt::Display for OpenRouterAttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retryable(message) | Self::Fatal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<OpenRouterError> for OpenRouterAttemptError {
+    fn from(err: OpenRouterError) -> Self {
+        let message = format!("OpenRouter error: {err}");
+        if openrouter_error_is_retryable(&err) {
+            Self::Retryable(message)
+        } else {
+            Self::Fatal(message)
+        }
+    }
+}
+
+fn http_status_is_retryable(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+fn reqwest_error_is_retryable(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request()
+}
+
+fn openrouter_error_is_retryable(err: &OpenRouterError) -> bool {
+    match err {
+        OpenRouterError::HttpRequest(_) => true,
+        OpenRouterError::Api(ctx) => ctx.is_retryable(),
+        _ => false,
+    }
+}
+
+fn retry_delay_for_attempt(attempt: usize) -> Duration {
+    let secs = OPENROUTER_RETRY_DELAYS_SECS
+        .get(attempt)
+        .copied()
+        .unwrap_or_else(|| {
+            OPENROUTER_RETRY_DELAYS_SECS
+                .last()
+                .copied()
+                .unwrap_or(45)
+        });
+    Duration::from_secs(secs)
+}
+
+async fn with_openrouter_backoff<T, F, Fut>(operation_name: &str, mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, OpenRouterAttemptError>>,
+{
+    let max_retries = OPENROUTER_RETRY_DELAYS_SECS.len();
+
+    for attempt in 0..=max_retries {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(err) if err.is_retryable() && attempt < max_retries => {
+                let delay = retry_delay_for_attempt(attempt);
+                tracing::warn!(
+                    operation = operation_name,
+                    attempt = attempt + 1,
+                    max_retries,
+                    delay_secs = delay.as_secs(),
+                    error = %err,
+                    "OpenRouter request failed; retrying after backoff"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(err) => {
+                let message = match err {
+                    OpenRouterAttemptError::Retryable(message)
+                    | OpenRouterAttemptError::Fatal(message) => message,
+                };
+                return Err(Error::string(&message));
+            }
+        }
+    }
+
+    Err(Error::string(&format!(
+        "OpenRouter request failed after {} attempts ({operation_name})",
+        max_retries + 1
+    )))
 }
 
 fn has_server_tools(tools: Option<&[CompletionTool]>) -> bool {
@@ -706,5 +842,31 @@ mod tests {
             web_search_server_tool(json!({})),
         ];
         assert!(has_server_tools(Some(&tools)));
+    }
+
+    #[test]
+    fn http_status_retryable_for_transient_failures_only() {
+        assert!(http_status_is_retryable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(http_status_is_retryable(StatusCode::BAD_GATEWAY));
+        assert!(!http_status_is_retryable(StatusCode::UNAUTHORIZED));
+        assert!(!http_status_is_retryable(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn retry_delay_uses_exponential_backoff() {
+        assert_eq!(retry_delay_for_attempt(0), Duration::from_secs(5));
+        assert_eq!(retry_delay_for_attempt(1), Duration::from_secs(15));
+        assert_eq!(retry_delay_for_attempt(2), Duration::from_secs(45));
+        assert_eq!(retry_delay_for_attempt(9), Duration::from_secs(45));
+    }
+
+    #[test]
+    fn openrouter_http_request_errors_are_retryable() {
+        use openrouter_rs::error::HttpRequestError;
+
+        let err = OpenRouterError::HttpRequest(HttpRequestError::new(
+            "error sending request for url (https://openrouter.ai/api/v1/chat/completions)",
+        ));
+        assert!(openrouter_error_is_retryable(&err));
     }
 }

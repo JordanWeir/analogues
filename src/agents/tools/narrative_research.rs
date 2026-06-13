@@ -131,8 +131,10 @@ fn tool_capture_sources() -> Tool {
     Tool::builder()
         .name(TOOL_CAPTURE_SOURCES)
         .description(
-            "Add 1–3 NEW citeable sources after discovery. Duplicate url or title returns the \
-             existing source id with status already_exists. Returns ids for capture_claims.",
+            "Add 1–3 NEW citeable sources after discovery. Use real urls (no placeholders). \
+             When workspace SEC facts lag, include at least one Official company source or Filing \
+             from the latest reported quarter. Duplicate url or title returns the existing source id \
+             with status already_exists. Returns ids for capture_claims.",
         )
         .parameters(json!({
             "type": "object",
@@ -164,8 +166,10 @@ fn tool_capture_claims() -> Tool {
     Tool::builder()
         .name(TOOL_CAPTURE_CLAIMS)
         .description(
-            "Add NEW extracted claims linked to sources. Reuse source_id from the existing board \
-             or prior capture_sources responses. Duplicate claim+source pairs are skipped.",
+            "Add NEW extracted claims linked to sources for the current catalyst quarter. \
+             Reuse source_id from the existing board or prior capture_sources responses. \
+             When correcting stale metrics, set notes to reference superseded claim ids. \
+             Duplicate claim+source pairs are skipped.",
         )
         .parameters(json!({
             "type": "object",
@@ -376,6 +380,18 @@ mod tests {
                     "title": "Sell-side debate note",
                     "source_type": "Market commentary",
                     "why_it_matters": "Captures bull and bear framing in one place."
+                },
+                {
+                    "title": "Official Q1 press release",
+                    "url": "https://example.com/q1-release",
+                    "source_type": "Official company source",
+                    "why_it_matters": "Latest-quarter official revenue and guidance figures."
+                },
+                {
+                    "title": "Financial news recap",
+                    "url": "https://example.com/news-recap",
+                    "source_type": "Financial news",
+                    "why_it_matters": "Summarizes market reaction to the latest earnings print."
                 }
             ]
         })
@@ -394,7 +410,12 @@ mod tests {
                 {"claim": "Margin pressure from mix shift remains a risk.", "source_id": 2, "claim_type": "margin", "side": "bear", "confidence": "medium"},
                 {"claim": "Valuation embeds optimistic AI monetization.", "source_id": 3, "claim_type": "valuation", "side": "bear", "confidence": "medium"},
                 {"claim": "Balance sheet supports continued buybacks.", "source_id": 1, "claim_type": "capital allocation", "side": "bull", "confidence": "high"},
-                {"claim": "Consensus assumes stable enterprise demand.", "source_id": 3, "claim_type": "demand", "side": "consensus", "confidence": "medium"}
+                {"claim": "Consensus assumes stable enterprise demand.", "source_id": 3, "claim_type": "demand", "side": "consensus", "confidence": "medium"},
+                {"claim": "Cloud backlog conversion is accelerating.", "source_id": 4, "claim_type": "demand", "side": "bull", "confidence": "high"},
+                {"claim": "Capex intensity may pressure free cash flow.", "source_id": 2, "claim_type": "capital allocation", "side": "bear", "confidence": "medium"},
+                {"claim": "Operating margin held steady year over year.", "source_id": 1, "claim_type": "margin", "side": "bull", "confidence": "high"},
+                {"claim": "Customer concentration remains elevated.", "source_id": 5, "claim_type": "customer concentration", "side": "bear", "confidence": "inference"},
+                {"claim": "Latest quarter EPS beat consensus.", "source_id": 4, "claim_type": "earnings", "side": "bull", "confidence": "high"}
             ]
         })
         .to_string();
@@ -431,13 +452,28 @@ mod tests {
             "item_type": "crux",
             "items": [
                 "Whether cloud consumption growth re-accelerates through FY26.",
-                "Whether margin expansion offsets heavier AI infrastructure spend."
+                "Whether margin expansion offsets heavier AI infrastructure spend.",
+                "Whether backlog converts to revenue on management's timeline.",
+                "Whether customer concentration creates binary demand risk.",
+                "Whether financing costs stay manageable during the capex ramp."
             ]
         })
         .to_string();
         execute(&path, TOOL_CAPTURE_NARRATIVE_ITEMS, &cruxes)
             .await
             .expect("cruxes");
+
+        let agreements = json!({
+            "item_type": "agreement",
+            "items": [
+                "Both sides agree cloud is now the primary growth engine.",
+                "Both sides agree capex is rising materially this cycle."
+            ]
+        })
+        .to_string();
+        execute(&path, TOOL_CAPTURE_NARRATIVE_ITEMS, &agreements)
+            .await
+            .expect("agreements");
 
         let orientation = json!({
             "dominant_question": "Is growth re-acceleration already priced in?",

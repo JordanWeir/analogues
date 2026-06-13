@@ -6,12 +6,13 @@ pub fn workspace_schema_hint() -> &'static str {
 - Never delete or wipe tables; append new evidence and update existing narrative sides/sections as needed.
 
 Table tiers (use in this order):
-1. Context — stock_info(ticker, company_name, currency, sector, industry), run_metadata(ticker, created_at, financial_fetch_status)
-2. Fundamentals — fundamentals(metric_key, metric_value, period, source_note): headline revenue, EPS, price, margins
-3. Observations — fundamental_observations(metric_key, period_end, period_type, ...): no `period` column (that is on `fundamentals` only). Income-statement flow metrics use period suffixes in metric_key (e.g. revenue_quarter, revenue_ytd, revenue_annual); default to *_quarter for time-series work. Sort by period_end DESC, not period.
-4. Narrative board — sources(id, title, url, ...), claims(id, claim, source_id, side, ...), narrative_map, narrative_map_items
-5. Catalog signal — concept_catalog_entries(concept_name, label, narrative_tags, latest_period_end, series_usability)
-6. Avoid overwriting — canonical_metric_mappings and fundamental_observations are inputs, not outputs for this agent
+1. Context — stock_info(ticker, company_name, currency, sector, industry), run_metadata(ticker, created_at, financial_fetch_status, financial_fetch_error), data_gaps(gap_key, description, status)
+2. Fundamentals — fundamentals(metric_key, metric_value, period, source_note): headline TTM rows (may lag latest quarter)
+3. Observations — fundamental_observations(metric_key, period_end, period_type, filed_at, metric_value, ...): no `period` column (that is on `fundamentals` only). Income-statement flow metrics use period suffixes in metric_key (e.g. revenue_quarter, revenue_ytd, revenue_annual); default to *_quarter for time-series work. Sort by period_end DESC, not period.
+4. Filing freshness — sec_raw_facts(filed_at, period_end, concept_name, metric_value): check MAX(filed_at) and MAX(period_end) before trusting headline metrics
+5. Narrative board — sources(id, title, url, source_type, published_at, ...), claims(id, claim, source_id, side, metric, notes, ...), narrative_map, narrative_map_items
+6. Catalog signal — concept_catalog_entries(concept_name, label, narrative_tags, latest_period_end, latest_filed_at, series_usability)
+7. Avoid overwriting — canonical_metric_mappings and fundamental_observations are inputs, not outputs for this agent
 
 LIMIT rules:
 - Always ORDER BY before LIMIT.
@@ -21,40 +22,65 @@ LIMIT rules:
 
 /// Golden-path workflow using incremental capture tools (not one giant JSON submit).
 pub fn narrative_research_golden_path() -> &'static str {
-    r#"Golden path — review existing board state first, then use incremental capture tools (web search between SQL rounds as needed):
+    r#"Golden path — review existing board state first, then use incremental capture tools (web search between SQL rounds when filing lag or gaps exist):
 
 Phase 0 — Review existing board (prompt + workspace_sql):
-Read the Existing narrative board JSON in your prompt. Note existing source ids, claims, narrative sides, cruxes, and section drafts.
-Only research and capture what is missing, stale, or needs correction.
+Read the Existing narrative board JSON in your prompt. Note existing source ids, claims, narrative sides, cruxes, section drafts, and any headline metrics tied to old fiscal periods.
+Identify claims that a newer quarter supersedes; plan corrected replacements (use capture_claims.notes to reference superseded claim ids).
 
-Phase 1 — Orient (workspace_sql, one round if fundamentals need refresh):
+Phase 0.5 — Freshness check (workspace_sql, mandatory first round):
+SELECT ticker, created_at, financial_fetch_status, financial_fetch_error FROM run_metadata;
+SELECT gap_key, description, status FROM data_gaps WHERE status = 'open';
+SELECT MAX(filed_at) AS max_sec_filed_at, MAX(period_end) AS max_sec_period_end FROM sec_raw_facts;
+SELECT MAX(period_end) AS max_obs_period_end
+  FROM fundamental_observations WHERE metric_key = 'revenue_quarter';
+SELECT MAX(latest_period_end) AS max_catalog_period_end, MAX(latest_filed_at) AS max_catalog_filed_at
+  FROM concept_catalog_entries;
+If max_sec_filed_at or max_obs_period_end lags the current catalyst (recent earnings, open ingestion gaps, or run_metadata created_at much later than max_sec_filed_at), you MUST web-search the latest official earnings release / 8-K and capture it before finalize. Log capture_research_gap when workspace ingestion still trails the market.
+
+Phase 1 — Orient on latest persisted numbers (workspace_sql):
 SELECT ticker, company_name, currency, sector, industry FROM stock_info;
 SELECT metric_key, metric_value, period, source_note FROM fundamentals
-  WHERE metric_key IN ('revenue_ttm','net_income_ttm','eps_ttm','current_price','market_cap')
+  WHERE metric_key IN ('revenue_ttm','net_income_ttm','eps_ttm','current_price','market_cap','total_debt')
   ORDER BY metric_key;
+SELECT metric_key, metric_value, period_end, filed_at, fiscal_year, fiscal_period
+  FROM fundamental_observations
+  WHERE metric_key IN (
+    'revenue_quarter','net_income_quarter','eps_quarter',
+    'cash','debt_current','debt_noncurrent'
+  )
+  ORDER BY period_end DESC, metric_key
+  LIMIT 24;
+SELECT concept_name, label, metric_value, period_end, filed_at
+  FROM sec_raw_facts
+  WHERE concept_name IN ('RevenueRemainingPerformanceObligation')
+  ORDER BY period_end DESC, filed_at DESC
+  LIMIT 4;
+Prefer observation and sec_raw_facts rows over stale fundamentals TTM when building claims for the latest quarter.
 
-Phase 2 — Source discovery (web search, as needed):
-Search for recent filings, transcripts, and credible bull/bear commentary when gaps exist.
-Call capture_sources only for NEW sources (duplicate url/title returns existing id).
+Phase 2 — Source discovery (web search, required when Phase 0.5 shows filing lag):
+Search for the latest-quarter official press release, 8-K/exhibit, earnings transcript, and credible bull/bear commentary.
+Call capture_sources for NEW sources (duplicate url/title returns existing id).
+When workspace SEC facts lag, capture at least one Official company source or Filing from the latest reported quarter before finalize.
 
-Phase 3 — Claims (capture_claims, as needed):
-Add only claims not already on the board. Reuse source_id from existing or newly captured sources.
+Phase 3 — Claims (capture_claims):
+Add claims for the current catalyst quarter. When replacing stale headline metrics, add corrected claims and note superseded claim ids in notes.
+Reuse source_id from existing or newly captured sources. Link metric to workspace keys when possible.
 
 Phase 4–5 — Narrative sides (capture_narrative_side):
-Use capture_narrative_side to UPDATE bull, bear, dominant, consensus when you have better text.
-Skip sides that are already strong unless new evidence warrants revision.
+Use capture_narrative_side to UPDATE bull, bear, dominant, consensus when you have better text — especially after a new earnings quarter.
 
 Phase 6–7 — Agreements and cruxes (capture_narrative_items):
-Add only new agreement/crux items. Duplicate bodies are skipped automatically.
+Add agreement and crux items for the live debate (minimum gates require several of each). Duplicate bodies are skipped automatically.
 
 Phase 8 — Orientation + sections:
-capture_orientation and capture_section update existing drafts when needed.
+capture_orientation and capture_section should reflect the current catalyst quarter, not only persisted workspace TTM.
 
-Phase 9 — Gaps (optional):
-capture_research_gap for unresolved questions.
+Phase 9 — Gaps (required when filing lag persists):
+capture_research_gap for unresolved questions and for quarters not yet in fundamental_observations.
 
 Phase 10 — Finalize:
-Call finalize_narrative_research when gates should pass. Fix validation errors, then finalize again."#
+Call finalize_narrative_research when gates should pass (≥10 claims, ≥5 cruxes, ≥2 bear claims, ≥1 agreement, ≥5 sources, plus narrative sides and sections). Fix validation errors, then finalize again."#
 }
 
 #[cfg(test)]
@@ -68,13 +94,18 @@ mod tests {
         assert!(hint.contains("may already contain"));
         assert!(hint.contains("Never delete"));
         assert!(hint.contains("period_end"));
-        assert!(hint.contains("no `period` column"));
+        assert!(hint.contains("data_gaps"));
+        assert!(hint.contains("sec_raw_facts"));
     }
 
     #[test]
     fn golden_path_reviews_existing_board_first() {
         let path = narrative_research_golden_path();
         assert!(path.contains("Review existing board"));
+        assert!(path.contains("Phase 0.5"));
+        assert!(path.contains("max_sec_filed_at"));
+        assert!(path.contains("fundamental_observations"));
+        assert!(path.contains("superseded"));
         assert!(path.contains("capture_narrative_side"));
         assert!(path.contains("finalize_narrative_research"));
     }

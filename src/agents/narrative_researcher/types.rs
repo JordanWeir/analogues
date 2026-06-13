@@ -1,9 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 pub const MIN_NARRATIVE_BODY_LEN: usize = 80;
-pub const MIN_SOURCES: usize = 3;
-pub const MIN_CLAIMS: usize = 5;
-pub const MIN_CRUXES: usize = 2;
+pub const MIN_SOURCES: usize = 5;
+pub const MIN_CLAIMS: usize = 10;
+pub const MIN_CRUXES: usize = 5;
+pub const MIN_BEAR_CLAIMS: usize = 2;
+pub const MIN_AGREEMENTS: usize = 1;
+
+/// When workspace SEC facts trail the run by more than this many days, finalize
+/// requires at least one Official company source or Filing captured via web discovery.
+pub const WORKSPACE_FILING_LAG_DAYS: i64 = 60;
+
+pub const OFFICIAL_SOURCE_TYPES: &[&str] = &["Official company source", "Filing"];
 
 pub const NARRATIVE_SIDES: &[&str] =
     &["dominant", "bull", "bear", "consensus", "counter_narrative"];

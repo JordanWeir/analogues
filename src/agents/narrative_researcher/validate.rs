@@ -1,8 +1,9 @@
 use super::types::{
     CaptureClaimInput, CaptureNarrativeItemsInput, CaptureNarrativeSideInput,
     CaptureOrientationInput, CaptureResearchGapInput, CaptureSectionInput, CaptureSourceInput,
-    CLAIM_CONFIDENCES, CLAIM_SIDES, CLAIM_TYPES, MIN_CLAIMS, MIN_CRUXES, MIN_NARRATIVE_BODY_LEN,
-    MIN_SOURCES, NARRATIVE_ITEM_TYPES, NARRATIVE_SIDES, SECTION_KEYS, SOURCE_TYPES,
+    CLAIM_CONFIDENCES, CLAIM_SIDES, CLAIM_TYPES, MIN_AGREEMENTS, MIN_BEAR_CLAIMS, MIN_CLAIMS,
+    MIN_CRUXES, MIN_NARRATIVE_BODY_LEN, MIN_SOURCES, NARRATIVE_ITEM_TYPES, NARRATIVE_SIDES,
+    SECTION_KEYS, SOURCE_TYPES,
 };
 use thiserror::Error;
 
@@ -35,6 +36,15 @@ pub fn validate_source(input: &CaptureSourceInput) -> Result {
             input.source_type,
             SOURCE_TYPES.join(", ")
         )));
+    }
+    if let Some(url) = input.url.as_deref().map(str::trim).filter(|url| !url.is_empty()) {
+        let lower = url.to_ascii_lowercase();
+        // @TODO: We can definitely do better "is this a url" capture then this...
+        if lower.contains("placeholder") || lower.contains("no-url") {
+            return Err(ValidationError::invalid(
+                "source url looks like a placeholder; capture a real citeable url",
+            ));
+        }
     }
     Ok(())
 }
@@ -168,6 +178,9 @@ pub fn validate_research_gap(input: &CaptureResearchGapInput) -> Result {
 pub fn validate_workspace_ready(
     source_count: i64,
     claim_count: i64,
+    bull_claim_count: i64,
+    bear_claim_count: i64,
+    agreement_count: i64,
     dominant: Option<&str>,
     bull: Option<&str>,
     bear: Option<&str>,
@@ -187,6 +200,21 @@ pub fn validate_workspace_ready(
     if claim_count < MIN_CLAIMS as i64 {
         errors.push(format!(
             "need at least {MIN_CLAIMS} claims, have {claim_count}"
+        ));
+    }
+    if bull_claim_count < 1 {
+        errors.push(format!(
+            "need at least one bull claim, have {bull_claim_count}"
+        ));
+    }
+    if bear_claim_count < MIN_BEAR_CLAIMS as i64 {
+        errors.push(format!(
+            "need at least {MIN_BEAR_CLAIMS} bear claims, have {bear_claim_count}"
+        ));
+    }
+    if agreement_count < MIN_AGREEMENTS as i64 {
+        errors.push(format!(
+            "need at least {MIN_AGREEMENTS} agreement items, have {agreement_count}"
         ));
     }
     for (label, value) in [
@@ -231,6 +259,19 @@ pub fn validate_workspace_ready(
     }
 }
 
+/// When workspace SEC facts trail the run, require an official/filing source from web discovery.
+pub fn validate_workspace_filing_lag_sources(
+    workspace_filing_lag: bool,
+    official_source_count: i64,
+) -> Result {
+    if workspace_filing_lag && official_source_count < 1 {
+        return Err(ValidationError::invalid(
+            "workspace SEC facts lag the run; capture at least one Official company source or Filing from the latest reported quarter before finalize",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,16 +304,40 @@ mod tests {
     }
 
     #[test]
+    fn filing_lag_requires_official_source() {
+        assert!(validate_workspace_filing_lag_sources(true, 0).is_err());
+        assert!(validate_workspace_filing_lag_sources(true, 1).is_ok());
+        assert!(validate_workspace_filing_lag_sources(false, 0).is_ok());
+    }
+
+    #[test]
+    fn rejects_placeholder_source_url() {
+        let input = CaptureSourceInput {
+            title: "Example".to_string(),
+            url: Some("https://example.com/no-url-placeholder".to_string()),
+            source_type: "Financial news".to_string(),
+            published_at: None,
+            accessed_at: None,
+            why_it_matters: "This source matters for the narrative because it covers capex.".to_string(),
+            notes: None,
+        };
+        assert!(validate_source(&input).is_err());
+    }
+
+    #[test]
     fn workspace_ready_requires_cruxes() {
         let long = "x".repeat(MIN_NARRATIVE_BODY_LEN);
         assert!(validate_workspace_ready(
-            5,
-            6,
+            MIN_SOURCES as i64,
+            MIN_CLAIMS as i64,
+            1,
+            MIN_BEAR_CLAIMS as i64,
+            MIN_AGREEMENTS as i64,
             Some(&long),
             Some(&long),
             Some(&format!("{long} bear variant")),
             Some(&long),
-            1,
+            MIN_CRUXES as i64 - 1,
             true,
             true,
             true,

@@ -137,9 +137,9 @@ pub fn build_user_prompt(
             .is_some_and(|claims| !claims.is_empty());
 
     let existing_guidance = if has_existing {
-        "Review what is already on the board. Reuse source ids, update stale narrative sides, and add only net-new sources/claims/items."
+        "Review what is already on the board. Reuse valid source ids, supersede stale claims when a newer quarter changes headline metrics (note superseded claim ids in capture_claims.notes), update narrative sides for the current catalyst quarter, and add net-new sources/claims/items where gaps remain."
     } else {
-        "The narrative board is empty — build the initial source pack and narrative map."
+        "The narrative board is empty — build the initial source pack and narrative map for the current catalyst quarter."
     };
 
     Ok(format!(
@@ -151,23 +151,23 @@ pub fn build_user_prompt(
 
 {golden_path}
 
-## Existing narrative board (durable state — do not duplicate)
+## Existing narrative board (durable state — reconcile stale rows, do not blindly duplicate)
 ```json
 {existing_json}
 ```
 
-## Fundamentals snapshot (from workspace)
+## Workspace fundamentals snapshot (starter TTM + latest observations — prefer observations when newer)
 {fundamentals}
 
 ## Incremental capture tools
-- capture_sources — add NEW sources only (duplicates return existing id)
-- capture_claims — add NEW claims; reuse source_id from the board above
-- capture_narrative_side — UPDATE bull/bear/dominant/consensus text when needed
-- capture_narrative_items — add NEW agreements/cruxes only
-- capture_orientation — update orientation when needed
+- capture_sources — add NEW sources (duplicates return existing id); use real citeable urls
+- capture_claims — add claims for the current quarter; note superseded claim ids in notes when correcting stale metrics
+- capture_narrative_side — UPDATE bull/bear/dominant/consensus for the current catalyst
+- capture_narrative_items — add agreements and cruxes (minimum gates require several of each)
+- capture_orientation — update orientation for the current catalyst quarter
 - capture_section — update business_model or why_now when needed
-- capture_research_gap — record unresolved questions
-- finalize_narrative_research — validate when the board is ready
+- capture_research_gap — record filing-lag and unresolved questions (required when SEC facts trail the market)
+- finalize_narrative_research — validate when the board is ready (≥10 claims, ≥5 cruxes, ≥2 bear claims, ≥5 sources, ≥1 agreement, plus sides and sections)
 
 Each capture tool returns a workspace snapshot. Fix gaps before finalize."#,
         schema = workspace_schema_hint(),
@@ -202,32 +202,31 @@ async fn load_company_name(db: &sea_orm::DatabaseConnection) -> Result<Option<St
     Ok(row.and_then(|row| row.try_get::<String>("", "company_name").ok()))
 }
 
-// @TODO: This narrative reesarch runs after the fundamental_catalog_manager agent.
-// Instead of getting fixed columns from fundamentals, we should instead query whatever selected fundamental columns that agent flagged
-// We should get something like the last 8 values from each of the targetted columns, so we have a recent time series + anything it thought was worth flagging.
+// @TODO: Pull from catalog manager flagged metrics once that lane exposes them.
 async fn fundamentals_summary(workspace: &WorkspaceHandle) -> Result<String> {
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
-    let rows = workspace
-        .connection()
+
+    let conn = workspace.connection();
+    let mut sections = Vec::new();
+
+    let fundamentals_sql = "SELECT metric_key, metric_value, period FROM fundamentals
+         WHERE metric_key IN (
+            'revenue_ttm','net_income_ttm','eps_ttm','current_price','market_cap','net_margin','total_debt'
+         )
+         ORDER BY metric_key";
+    let rows = conn
         .query_all(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT metric_key, metric_value, period FROM fundamentals
-             WHERE metric_key IN (
-                'revenue_ttm','net_income_ttm','eps_ttm','current_price','market_cap','net_margin'
-             )
-             ORDER BY metric_key"
-                .to_string(),
+            fundamentals_sql.to_string(),
         ))
         .await
         .map_err(|err| Error::string(&format!("fundamentals query failed: {err}")))?;
 
     if rows.is_empty() {
-        return Ok("(no fundamentals rows yet)".to_string());
-    }
-
-    let lines: Result<Vec<String>> = rows
-        .into_iter()
-        .map(|row| {
+        sections.push("(no fundamentals rows yet)".to_string());
+    } else {
+        let mut lines = Vec::from(["Headline fundamentals (TTM — may lag latest quarter):".to_string()]);
+        for row in rows {
             let key = row
                 .try_get::<String>("", "metric_key")
                 .map_err(|err| Error::string(&format!("parse metric_key: {err}")))?;
@@ -238,10 +237,90 @@ async fn fundamentals_summary(workspace: &WorkspaceHandle) -> Result<String> {
             let period = row
                 .try_get::<String>("", "period")
                 .unwrap_or_else(|_| "n/a".to_string());
-            Ok(format!("- {key}: {value} ({period})"))
-        })
-        .collect();
-    lines.map(|items| items.join("\n"))
+            lines.push(format!("- {key}: {value} ({period})"));
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    let freshness_sql = "SELECT
+            (SELECT MAX(filed_at) FROM sec_raw_facts) AS max_sec_filed_at,
+            (SELECT MAX(period_end) FROM sec_raw_facts) AS max_sec_period_end,
+            (SELECT MAX(period_end) FROM fundamental_observations WHERE metric_key = 'revenue_quarter') AS max_revenue_quarter_end,
+            (SELECT created_at FROM run_metadata WHERE id = 1) AS run_created_at,
+            (SELECT financial_fetch_status FROM run_metadata WHERE id = 1) AS financial_fetch_status";
+    if let Some(row) = conn
+        .query_one(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            freshness_sql.to_string(),
+        ))
+        .await
+        .map_err(|err| Error::string(&format!("freshness query failed: {err}")))?
+    {
+        sections.push(format!(
+            "Filing freshness:\n- max_sec_filed_at: {}\n- max_sec_period_end: {}\n- max_revenue_quarter_end: {}\n- run_created_at: {}\n- financial_fetch_status: {}",
+            row.try_get::<String>("", "max_sec_filed_at").unwrap_or_else(|_| "n/a".to_string()),
+            row.try_get::<String>("", "max_sec_period_end").unwrap_or_else(|_| "n/a".to_string()),
+            row.try_get::<String>("", "max_revenue_quarter_end").unwrap_or_else(|_| "n/a".to_string()),
+            row.try_get::<String>("", "run_created_at").unwrap_or_else(|_| "n/a".to_string()),
+            row.try_get::<String>("", "financial_fetch_status").unwrap_or_else(|_| "n/a".to_string()),
+        ));
+    }
+
+    let observations_sql = "SELECT metric_key, metric_value, period_end, filed_at, fiscal_year, fiscal_period
+         FROM fundamental_observations
+         WHERE metric_key IN (
+            'revenue_quarter','net_income_quarter','eps_quarter','cash','debt_current','debt_noncurrent'
+         )
+         ORDER BY period_end DESC, metric_key
+         LIMIT 24";
+    let obs_rows = conn
+        .query_all(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            observations_sql.to_string(),
+        ))
+        .await
+        .map_err(|err| Error::string(&format!("observations query failed: {err}")))?;
+    if !obs_rows.is_empty() {
+        let mut lines = Vec::from(["Latest fundamental_observations (prefer over TTM for claims):".to_string()]);
+        for row in obs_rows {
+            let key = row
+                .try_get::<String>("", "metric_key")
+                .unwrap_or_else(|_| "?".to_string());
+            let value = row
+                .try_get::<f64>("", "metric_value")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| "n/a".to_string());
+            let period_end = row
+                .try_get::<String>("", "period_end")
+                .unwrap_or_else(|_| "n/a".to_string());
+            let filed_at = row
+                .try_get::<String>("", "filed_at")
+                .unwrap_or_else(|_| "n/a".to_string());
+            lines.push(format!("- {key}: {value} (period_end {period_end}, filed {filed_at})"));
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    let gaps_sql = "SELECT gap_key, status FROM data_gaps WHERE status = 'open' ORDER BY id";
+    let gap_rows = conn
+        .query_all(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            gaps_sql.to_string(),
+        ))
+        .await
+        .map_err(|err| Error::string(&format!("data_gaps query failed: {err}")))?;
+    if !gap_rows.is_empty() {
+        let mut lines = Vec::from(["Open data_gaps:".to_string()]);
+        for row in gap_rows {
+            let gap_key = row
+                .try_get::<String>("", "gap_key")
+                .unwrap_or_else(|_| "?".to_string());
+            lines.push(format!("- {gap_key}"));
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    Ok(sections.join("\n\n"))
 }
 
 #[cfg(test)]

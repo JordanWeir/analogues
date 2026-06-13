@@ -16,7 +16,7 @@ loco-rs = { version = "0.16" }
 loco-rs = { workspace = true  }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
-tokio = { version = "1.45", default-features = false, features = ["rt-multi-thread"] }
+tokio = { version = "1.45", default-features = false, features = ["rt-multi-thread", "time"] }
 async-trait = { version = "0.1" }
 axum = { version = "0.8" }
 tracing = { version = "0.1" }
