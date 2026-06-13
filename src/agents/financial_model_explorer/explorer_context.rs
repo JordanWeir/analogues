@@ -1,6 +1,9 @@
 use crate::{
     agents::financial_model_explorer::types::{CruxTriageOutput, MechanicsExperimentsComplete},
-    services::workspace_store::sqlite_uri,
+    services::{
+        financial_analysis_store::{AnalysisDraftSummary, FinancialAnalysisStore, MechanicsDraftScope},
+        workspace_store::sqlite_uri,
+    },
 };
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
@@ -178,11 +181,15 @@ pub fn validate_crux_triage_with_context(
 }
 
 pub fn validate_mechanics_complete_with_context(
-    _output: &MechanicsExperimentsComplete,
+    output: &MechanicsExperimentsComplete,
     promoted_count: i64,
     non_historical_purpose_count: i64,
     ctx: &ExplorerWorkspaceContext,
 ) -> Result<()> {
+    if output.per_worker {
+        return Ok(());
+    }
+
     if promoted_count < MIN_PROMOTED_EXPERIMENTS {
         return Err(Error::string(&format!(
             "submit_mechanics_experiments requires at least {MIN_PROMOTED_EXPERIMENTS} promoted \
@@ -198,6 +205,107 @@ pub fn validate_mechanics_complete_with_context(
     }
 
     Ok(())
+}
+
+pub fn mechanics_draft_scope(output: &MechanicsExperimentsComplete) -> Result<MechanicsDraftScope<'_>> {
+    if output.per_worker {
+        if output.scout {
+            return Ok(MechanicsDraftScope::ScoutGaps);
+        }
+        let crux_key = output.crux_key.as_deref().filter(|key| !key.trim().is_empty()).ok_or_else(|| {
+            Error::string(
+                "submit_mechanics_experiments with per_worker requires crux_key for your assigned crux \
+                 (or scout true for the scout worker)",
+            )
+        })?;
+        return Ok(MechanicsDraftScope::CruxKey(crux_key));
+    }
+    Ok(MechanicsDraftScope::Workspace)
+}
+
+pub fn format_blocking_drafts_error(drafts: &[AnalysisDraftSummary]) -> String {
+    let mut lines = vec![
+        "submit_mechanics_experiments rejected: unfinalized analysis drafts remain. \
+         Call finalize_analysis (promote, background, or rejected) for each draft before submitting."
+            .to_string(),
+    ];
+    for draft in drafts {
+        let crux = draft
+            .crux_key
+            .as_deref()
+            .map(|key| format!(", crux_key={key}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- run_key={} ({}){}{}",
+            draft.run_key,
+            draft.execution_status,
+            crux,
+            if draft.question.len() > 80 {
+                format!(" — {}", &draft.question[..80])
+            } else if draft.question.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", draft.question)
+            }
+        ));
+    }
+    lines.join("\n")
+}
+
+pub async fn enforce_mechanics_draft_hygiene(
+    store: &FinancialAnalysisStore<'_>,
+    output: &MechanicsExperimentsComplete,
+) -> Result<()> {
+    let scope = mechanics_draft_scope(output)?;
+    store.discard_error_draft_runs(scope).await?;
+    let blocking = store.load_blocking_draft_runs(scope).await?;
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    Err(Error::string(&format_blocking_drafts_error(&blocking)))
+}
+
+pub fn mechanics_draft_scope_for_prepare(
+    focus_crux_key: Option<&str>,
+    scout_worker: bool,
+) -> MechanicsDraftScope<'_> {
+    if scout_worker {
+        MechanicsDraftScope::ScoutGaps
+    } else if let Some(crux_key) = focus_crux_key.filter(|key| !key.trim().is_empty()) {
+        MechanicsDraftScope::CruxKey(crux_key)
+    } else {
+        MechanicsDraftScope::Workspace
+    }
+}
+
+pub async fn load_draft_summaries_for_prepare(
+    sqlite_path: &std::path::Path,
+    focus_crux_key: Option<&str>,
+    scout_worker: bool,
+) -> Vec<AnalysisDraftSummary> {
+    let db = match sea_orm::Database::connect(sqlite_uri(sqlite_path)).await {
+        Ok(db) => db,
+        Err(_) => return vec![],
+    };
+    let store = FinancialAnalysisStore::new(&db);
+    let scope = mechanics_draft_scope_for_prepare(focus_crux_key, scout_worker);
+    let drafts = store.load_draft_runs(scope).await.unwrap_or_default();
+    db.close().await.ok();
+    drafts
+}
+
+pub fn format_draft_hygiene_prepare_message(drafts: &[AnalysisDraftSummary]) -> String {
+    let mut lines = vec![
+        "[Draft hygiene] Unfinalized analysis drafts remain — call finalize_analysis before submit_mechanics_experiments:"
+            .to_string(),
+    ];
+    for draft in drafts {
+        lines.push(format!(
+            "- {} ({})",
+            draft.run_key, draft.execution_status
+        ));
+    }
+    lines.join("\n")
 }
 
 async fn scalar_i64(db: &sea_orm::DatabaseConnection, sql: &str) -> Result<i64> {
@@ -289,5 +397,45 @@ mod tests {
         };
         let err = validate_crux_triage_with_context(&output, &ctx).expect_err("should fail");
         assert!(err.to_string().contains("supporting_metric"));
+    }
+
+    #[test]
+    fn per_worker_mechanics_submit_skips_lane_minimums() {
+        use crate::agents::financial_model_explorer::types::MechanicsExperimentsComplete;
+
+        let output = MechanicsExperimentsComplete {
+            summary: String::new(),
+            per_worker: true,
+            crux_key: Some("test_crux".to_string()),
+            scout: false,
+        };
+        let ctx = ExplorerWorkspaceContext {
+            narrative_crux_count: 5,
+            open_gaps: vec![],
+            narrative_cruxes_summary: String::new(),
+            sec_freshness_summary: String::new(),
+            claims_guidance_present: true,
+        };
+        validate_mechanics_complete_with_context(&output, 0, 0, &ctx).expect("per_worker skips");
+    }
+
+    #[test]
+    fn per_worker_submit_requires_crux_key_or_scout() {
+        use crate::agents::financial_model_explorer::types::MechanicsExperimentsComplete;
+
+        let output = MechanicsExperimentsComplete {
+            summary: String::new(),
+            per_worker: true,
+            crux_key: None,
+            scout: false,
+        };
+        let err = mechanics_draft_scope(&output).expect_err("should require crux_key");
+        assert!(err.to_string().contains("crux_key"));
+
+        let scout = MechanicsExperimentsComplete {
+            scout: true,
+            ..output
+        };
+        assert_eq!(mechanics_draft_scope(&scout).unwrap(), MechanicsDraftScope::ScoutGaps);
     }
 }

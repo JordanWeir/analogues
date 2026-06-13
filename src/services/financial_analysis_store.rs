@@ -38,6 +38,21 @@ pub struct AnalysisRunRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct AnalysisDraftSummary {
+    pub run_key: String,
+    pub execution_status: String,
+    pub question: String,
+    pub crux_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MechanicsDraftScope<'a> {
+    CruxKey(&'a str),
+    ScoutGaps,
+    Workspace,
+}
+
+#[derive(Debug, Clone)]
 pub struct FinancialAnalysisStore<'a> {
     db: &'a sea_orm::DatabaseConnection,
 }
@@ -376,6 +391,83 @@ impl<'a> FinancialAnalysisStore<'a> {
             .await
             .map_err(|err| Error::string(&format!("failed to discard analysis run: {err}")))?;
         Ok(())
+    }
+
+    pub async fn load_draft_runs(&self, scope: MechanicsDraftScope<'_>) -> Result<Vec<AnalysisDraftSummary>> {
+        let sql = match scope {
+            MechanicsDraftScope::CruxKey(crux_key) => format!(
+                "SELECT ar.run_key, ar.execution_status, ar.question, cc.crux_key
+                 FROM analysis_runs ar
+                 INNER JOIN crux_candidates cc ON ar.crux_id = cc.id
+                 WHERE ar.status = 'draft' AND cc.crux_key = {}
+                 ORDER BY ar.id",
+                sql_str(crux_key)
+            ),
+            MechanicsDraftScope::ScoutGaps => {
+                "SELECT ar.run_key, ar.execution_status, ar.question, cc.crux_key
+                 FROM analysis_runs ar
+                 LEFT JOIN crux_candidates cc ON ar.crux_id = cc.id
+                 WHERE ar.status = 'draft'
+                   AND (
+                     ar.crux_id IS NULL
+                     OR ar.crux_id IN (
+                       SELECT cc2.id FROM crux_candidates cc2
+                       WHERE cc2.disposition = 'promoted' AND cc2.status = 'active'
+                         AND cc2.id NOT IN (
+                           SELECT DISTINCT crux_id FROM analysis_experiments
+                           WHERE disposition = 'promoted' AND crux_id IS NOT NULL
+                         )
+                     )
+                   )
+                 ORDER BY ar.id"
+                    .to_string()
+            }
+            MechanicsDraftScope::Workspace => {
+                "SELECT ar.run_key, ar.execution_status, ar.question, cc.crux_key
+                 FROM analysis_runs ar
+                 LEFT JOIN crux_candidates cc ON ar.crux_id = cc.id
+                 WHERE ar.status = 'draft'
+                 ORDER BY ar.id"
+                    .to_string()
+            }
+        };
+
+        let rows = query_all(self.db, &sql).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AnalysisDraftSummary {
+                    run_key: row_string(&row, 0)?,
+                    execution_status: row_string(&row, 1)?,
+                    question: row_string(&row, 2)?,
+                    crux_key: row.try_get_by_index::<Option<String>>(3).ok().flatten(),
+                })
+            })
+            .collect()
+    }
+
+    /// Auto-discard failed SQL drafts in scope before submit validation.
+    pub async fn discard_error_draft_runs(&self, scope: MechanicsDraftScope<'_>) -> Result<u32> {
+        let drafts = self.load_draft_runs(scope).await?;
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let mut discarded = 0u32;
+        for draft in drafts {
+            if draft.execution_status == "error" {
+                self.discard_analysis_run(&draft.run_key, &created_at).await?;
+                discarded += 1;
+            }
+        }
+        Ok(discarded)
+    }
+
+    pub async fn load_blocking_draft_runs(
+        &self,
+        scope: MechanicsDraftScope<'_>,
+    ) -> Result<Vec<AnalysisDraftSummary>> {
+        let drafts = self.load_draft_runs(scope).await?;
+        Ok(drafts
+            .into_iter()
+            .filter(|draft| draft.execution_status != "error")
+            .collect())
     }
 
     pub async fn load_analysis_run(&self, run_key: &str) -> Result<Option<AnalysisRunRecord>> {

@@ -126,10 +126,10 @@ Phase 3 — finalize_analysis:
 
 Phase 4 — Repeat for 2–4 focused experiments across different promoted crux mechanics (not all on one crux).
 
-Phase 5 — submit_mechanics_experiments only after:
-- At least 2 promoted experiments exist.
-- At least 2 distinct purposes OR one forward/sensitivity experiment when claims include guidance.
-- On penultimate turn: finalize any pending drafts first. Reserve the final turn for submit_mechanics_experiments or validation fixes.
+Phase 5 — submit_mechanics_experiments:
+- Per-crux fan-out worker: promote 1–2 experiments for your assigned crux only; finish with per_worker true.
+- Lane-complete worker: after ≥2 promoted experiments exist workspace-wide, finish with summary only (per_worker false).
+- On penultimate turn: finalize any pending drafts first.
 
 Arithmetic vs interpretation:
 - Arithmetic rows: kind ratio | arithmetic | series_point | bridge_step with value/formula.
@@ -144,6 +144,16 @@ pub fn mechanics_finalize_example() -> &'static str {
 Forward/sensitivity example:
 {"run_key":"rpo_conversion_sensitivity","experiment":{"experiment_key":"rpo_conversion_to_fund_capex","question":"What annual RPO conversion rate closes the FY27 funding gap at guided capex?","purpose":"sensitivity","period_basis":"annual","crux_key":"rpo_conversion_quality","disposition":"promoted","assumptions":[{"key":"Guided FY27 net capex","value":"~$70B from claims","note":"SEC annual capex may lag; not treated as current"}],"inputs":[{"input_type":"claim","note":"FY27 capex guidance from official release"}],"outputs":[{"kind":"ratio","label":"Implied conversion rate","value":0.12,"unit":"ratio"},{"kind":"interpretation","label":"Sensitivity read","text":"At ~12% annual RPO conversion, backlog could fund guided build-out; below that, external financing dominates."}]}}
 
-sql_body may be omitted — it defaults to the draft run's executed_sql.
+sql_body may be omitted; it defaults to the draft executed_sql.
 Finish lane with submit_mechanics_experiments: {"summary":"..."}"#
+}
+
+pub fn mechanics_per_worker_submit_example() -> &'static str {
+    r#"Per-crux fan-out worker finish:
+{"summary":"Promoted sensitivity experiment for rpo_conversion_to_capex_justification.","per_worker":true,"crux_key":"rpo_conversion_to_capex_justification"}"#
+}
+
+pub fn mechanics_scout_submit_example() -> &'static str {
+    r#"Mechanics scout worker finish:
+{"summary":"Covered debt rollover and dilution cruxes lacking experiments.","per_worker":true,"scout":true}"#
 }

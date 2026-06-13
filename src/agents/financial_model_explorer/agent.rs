@@ -7,7 +7,9 @@ use super::{
     golden_path::{
         crux_triage_golden_path, crux_triage_submit_example, explorer_schema_hint,
         mechanics_experiment_golden_path, mechanics_finalize_example,
+        mechanics_per_worker_submit_example, mechanics_scout_submit_example,
     },
+    prepare_step::mechanics_prepare_step_chain,
     types::{
         AnalysisExperimentInput, CruxTriageOutput, ExplorerMode, MechanicsExperimentsComplete,
     },
@@ -56,6 +58,14 @@ impl FinancialModelExplorerAgent {
 
     pub async fn run(&self, workspace_sqlite: PathBuf, ticker: &str) -> Result<(String, Option<i64>)> {
         let tools = self.build_tool_registry(&workspace_sqlite);
+        let prepare_step = match self.config.mode {
+            ExplorerMode::CruxTriage => None,
+            ExplorerMode::MechanicsExperiment => Some(mechanics_prepare_step_chain(
+                workspace_sqlite.clone(),
+                self.config.focus_crux_key.clone(),
+                self.config.scout_worker,
+            )),
+        };
 
         let response = ToolLoopAgent::default()
             .run(ToolLoopRequest {
@@ -74,7 +84,7 @@ impl FinancialModelExplorerAgent {
                 client_tools: None,
                 max_agent_rounds: Some(self.config.max_agent_rounds),
                 submit_tool_name: Some(self.config.mode.submit_tool_name().to_string()),
-                prepare_step: None,
+                prepare_step,
                 stop_when: None,
             })
             .await?;
@@ -276,8 +286,24 @@ impl FinancialModelExplorerAgent {
             ExplorerMode::MechanicsExperiment => mechanics_experiment_golden_path(),
         };
         let submit_shape = match self.config.mode {
-            ExplorerMode::CruxTriage => crux_triage_submit_example(),
-            ExplorerMode::MechanicsExperiment => mechanics_finalize_example(),
+            ExplorerMode::CruxTriage => crux_triage_submit_example().to_string(),
+            ExplorerMode::MechanicsExperiment => {
+                if self.config.scout_worker {
+                    format!(
+                        "{}\n\n{}",
+                        mechanics_finalize_example(),
+                        mechanics_scout_submit_example()
+                    )
+                } else if self.config.prompt_prefix.is_some() {
+                    format!(
+                        "{}\n\n{}",
+                        mechanics_finalize_example(),
+                        mechanics_per_worker_submit_example()
+                    )
+                } else {
+                    mechanics_finalize_example().to_string()
+                }
+            }
         };
 
         Ok(format!(

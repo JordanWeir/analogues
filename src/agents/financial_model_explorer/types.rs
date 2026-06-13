@@ -110,6 +110,15 @@ pub struct DataGapInput {
 pub struct MechanicsExperimentsComplete {
     #[serde(default)]
     pub summary: String,
+    /// When true, skip lane-level experiment minimums (per-crux fan-out worker).
+    #[serde(default)]
+    pub per_worker: bool,
+    /// Assigned crux for per-crux fan-out workers; omit when `scout` is true.
+    #[serde(default)]
+    pub crux_key: Option<String>,
+    /// Mechanics scout worker covering cruxes that still lack promoted experiments.
+    #[serde(default)]
+    pub scout: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

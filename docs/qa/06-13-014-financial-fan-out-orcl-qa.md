@@ -246,3 +246,142 @@ Compared to `06-13-013`'s verdict on run 21 ("gates effective, modelling still u
 `init_workspace` (4) · `build_catalog` (3) · `build_narrative_map` (5) · `financial_fan_out` (14):
 
 `crux_candidates_present`, `crux_candidates_falsifiable`, `crux_coverage_vs_narrative`, `supporting_metrics_present`, `promoted_metrics_have_rationale`, `narrative_context_present`, `experiments_have_questions`, `min_promoted_experiments`, `experiment_purpose_diversity`, `arithmetic_vs_interpretation_split`, `inputs_and_units_recorded`, `period_shape_labeled`, `promoted_linked_to_sources`, `rejected_experiments_explained`.
+
+---
+
+## Appendix: Case Study — RPO Conversion vs. $70B Capex
+
+This walkthrough traces one finding from narrative framing through fan-out triage to a promoted sensitivity experiment. It is representative of the threads that *did* receive financial analysis in run 24 (3 of 11 promoted cruxes). Cruxes without experiments follow the same triage path but stop before Phase 5.
+
+### The question
+
+Narrative crux #1 (`narrative_map_items`, `item_order = 1`):
+
+> Can Oracle convert its $638B RPO into GAAP revenue and cash flow at margins that justify the ~$70B net capex investment?
+
+Upstream claims that feed this tension:
+
+| Claim | Side | Hook | Role in the mechanic |
+|-------|------|------|----------------------|
+| #16 | bull | `RPO_Q4FY2026_approx_638B` | Q4 backlog figure (earnings release, not yet in SEC) |
+| #17 | bear | `capex_net_FY2027_guide_70B` | FY2027 capex guidance driving the funding gap |
+| #5 | bull | `RPO=552600000000` | Last SEC-filed RPO (Q3 FY2026) |
+| #19 | bear | `FCF_negative_FY2026` | Cash-flow consequence of capex step-up |
+
+### Lifecycle
+
+```mermaid
+flowchart TD
+    A[init_workspace] --> B[build_catalog]
+    B --> C[build_narrative_map]
+    C --> D["financial_fan_out<br/>per-crux worker (crux #1)"]
+    D --> E[crux_candidates + supporting_metrics + quality_flags]
+    E --> F["financial_fan_out<br/>mechanics worker"]
+    F --> G[run_analysis_draft]
+    G --> H[finalize_analysis]
+    H --> I[analysis_experiments + analysis_runs]
+    I --> J[quality gates]
+```
+
+| Stage | Lane / worker | What happened | Persisted artifacts |
+|-------|---------------|---------------|---------------------|
+| 1 | `init_workspace` | Ingested 25,369 `sec_raw_facts`; latest RPO `period_end` = 2026-02-28 ($552.6B) | `sec_raw_facts`, `fundamentals`, `data_gaps.starter_financials` |
+| 2 | `build_catalog` | Indexed RPO, OCF, capex into `concept_catalog_entries` with tags (`backlog`, `capex`, `conversion`) | `concept_catalog_entries` (516 concepts) |
+| 3 | `build_narrative_map` | Narrative researcher drafted crux #1 and claims #5, #16, #17, #19 | `narrative_map_items`, `claims`, `sources` |
+| 4 | `financial_fan_out` (crux #1) | Dedicated triage agent received `FOCUS:` prefix for crux #1 only; searched catalog, confirmed SEC facts, submitted triage | `crux_candidates` id=1, 3× `supporting_metric_selections`, 4× `data_quality_flags` on RPO staleness |
+| 5 | `financial_fan_out` (mechanics) | Single mechanics agent loaded all promoted cruxes; drafted and finalized sensitivity for crux #1 | `analysis_experiments.rpo_conversion_sensitivity_fy27`, `analysis_runs` (finalized) |
+
+Worker telemetry for this thread:
+
+| Step | `worker_runs.id` | Mode | Rounds | Cost | Latency |
+|------|------------------|------|--------|------|---------|
+| Crux triage (crux #1) | 2 | `crux_triage` | 9 | ~$0.011 | ~119s |
+| Mechanics (all cruxes) | 12 | `mechanics_experiment` | 15 | ~$0.024 | ~233s |
+
+### Stage 4 output — crux triage
+
+The per-crux worker promoted `rpo_conversion_to_capex_justification` with bridge archetype `backlog_to_cash_conversion`:
+
+- **Watch:** RPO/revenue multiple expanding without matching OCF growth
+- **Confirming:** OCF inflects above capex run-rate within 3–4 quarters
+- **Breaking:** OCF stays below ~$25B annualized while capex reaches guided $70B
+
+Three supporting metrics were persisted with rationale tying each SEC concept to the crux:
+
+1. `RevenueRemainingPerformanceObligation` (instant) — backlog driver
+2. `NetCashProvidedByUsedInOperatingActivities` (ytd) — cash conversion outcome
+3. `PaymentsToAcquirePropertyPlantAndEquipment` (ytd) — capex investment
+
+The worker also wrote staleness flags because SEC RPO ($552.6B, filed 2026-03-11) lags narrative claims ($638B Q4):
+
+```
+sec_rpo_stale (warning): "SEC RPO ends at $552.6B … Narrative claims $638B at Q4 FY2026"
+```
+
+`payload_json` records `linked_claim_ids: [4, 5, 9, 10, 15, 16, 17, 19]` and cluster members (RPO → driver, OCF → outcome, capex → investment).
+
+### Stage 5 output — mechanics experiment
+
+The mechanics worker ran two experiments on crux #1; one was promoted, one backgrounded:
+
+| `experiment_key` | `purpose` | `disposition` | Question |
+|------------------|-----------|---------------|----------|
+| `rpo_conversion_sensitivity_fy27` | `sensitivity` | **promoted** | What annual RPO conversion rate funds FY2027 guided net capex (~$70B) given trailing OCF (~$23B)? |
+| `rpo_conversion_velocity_trend` | `historical_investigation` | background | How has implied conversion changed as backlog surged? |
+
+**Draft → finalize flow** for the promoted experiment:
+
+1. `run_analysis_draft` — executed SQL against `sec_raw_facts` + param CTE for claim-sourced guidance
+2. `finalize_analysis` — split outputs into arithmetic/ratio rows and a separate `interpretation` row (gate: `arithmetic_vs_interpretation_split`)
+3. Row persisted to `analysis_runs` with `status = finalized`
+
+**Inputs** (`inputs_json`) mix SEC concepts and claim-typed guidance:
+
+- `RevenueRemainingPerformanceObligation` (SEC, USD)
+- `RevenueFromContractWithCustomerExcludingAssessedTax` (SEC, USD)
+- `capex_guidance_fy2027` (`input_type: claim` — ~$70B from earnings call)
+- `ocf_trajectory_estimate` (`input_type: claim` — ~$23B growth assumption)
+
+**Assumptions** explicitly document the SEC/claim boundary:
+
+| Key | Value | Note |
+|-----|-------|------|
+| Guided FY27 net capex | ~$70B | From management claims; SEC annual capex lags |
+| Trailing OCF | ~$23B | FY2025 actual $20.8B + growth; not FY2026 actual $32.0B |
+| Current RPO | $552.6B | SEC filed 2026-03-11, `period_end` 2026-02-28 |
+
+**Arithmetic outputs** (from `outputs_json`):
+
+| Output | Value | Formula / source |
+|--------|-------|------------------|
+| Funding gap | $47B | $70B guided capex − $23B trailing OCF |
+| Implied RPO conversion to close gap | **8.51%** | ($70B − $23B) / $552.6B |
+| Historical conversion (FY2025 / current RPO) | 10.39% | $57.4B / $552.6B |
+| RPO-to-revenue multiple | 9.6× | $552.6B / $57.4B |
+
+**Interpretation** (separate row, not buried in arithmetic):
+
+> At ~8.5% annual RPO conversion … approximately $47B of backlog would convert to revenue — closing the $70B capex funding gap if combined with $23B OCF. However, this would require that ALL converted revenue flows through as cash … External debt/equity funding will be required.
+
+### What the gates checked on this thread
+
+| Gate | Evidence from this case |
+|------|-------------------------|
+| `crux_coverage_vs_narrative` | Narrative crux #1 → promoted `crux_candidates` row |
+| `supporting_metrics_present` | 3 metrics with `rationale` on crux id=1 |
+| `experiment_purpose_diversity` | `sensitivity` experiment satisfies guidance-claim requirement |
+| `arithmetic_vs_interpretation_split` | 6 arithmetic/ratio rows + 1 `interpretation` row |
+| `inputs_and_units_recorded` | SEC concepts + claim inputs in `inputs_json` |
+| `promoted_linked_to_sources` | `assumptions_json` cites SEC filing date and claim source |
+
+### What this case exposes
+
+**Works as designed:** Narrative tension → falsifiable crux → catalog-grounded supporting metrics → SQL sensitivity with explicit SEC/claim provenance → auditable outputs. Staleness is visible in both `data_quality_flags` (triage) and `assumptions_json` (experiment).
+
+**Still fragile:**
+
+- Sensitivity anchors on **Q3 SEC RPO** ($552.6B), not **Q4 claim RPO** ($638B) — implied conversion would be ~7.4% at the claim base, materially lower.
+- OCF baseline uses **~$23B estimate**, not **FY2026 actual $32.0B** from the earnings release — understates internal funding capacity.
+- The companion historical experiment (`rpo_conversion_velocity_trend`) was **backgrounded**, so the promoted sensitivity stands alone without a filed-data trend anchor on the same crux.
+
+Eight other promoted cruxes completed Stage 4 (triage) but never reached Stage 5 — same pipeline, no `analysis_experiments` row attached.
