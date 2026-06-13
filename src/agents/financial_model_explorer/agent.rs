@@ -20,9 +20,9 @@ use chrono::Utc;
 use loco_rs::prelude::*;
 use std::{collections::BTreeMap, path::PathBuf};
 
-pub const CRUX_TRIAGE_PREAMBLE: &str = "You are the Financial Model Explorer in crux-triage mode. Connect SEC concept catalogs to the narrative map and identify a small set of falsifiable crux candidates. Use workspace_sql following the golden path. Search concept_catalog_entries before sec_raw_facts. Promote supporting metrics only when they confirm, complicate, or contradict a narrative. When finished, call submit_crux_triage — do not end with a plain assistant message. Fix validation errors and resubmit.";
+pub const CRUX_TRIAGE_PREAMBLE: &str = "You are the Financial Model Explorer in crux-triage mode. Connect SEC concept catalogs to the narrative map and identify a small set of falsifiable crux candidates. Use workspace_sql following the golden path. Search concept_catalog_entries before sec_raw_facts. Promote supporting metrics only when they confirm, complicate, or contradict a narrative. When finished, call submit_crux_triage — do not end with a plain assistant message. Fix validation errors and resubmit. You have a limited step budget; after each tool round the user message reports steps remaining. On the penultimate turn, call submit_crux_triage so the last turn can fix validation gaps.";
 
-pub const MECHANICS_EXPERIMENT_PREAMBLE: &str = "You are the Financial Model Explorer in mechanics-experiment mode. Test how crux mechanics affect revenue, margins, cash flow, and funding pressure using focused SQLite calculations. Use run_analysis_draft to execute SQL and inspect results before judging them. Use finalize_analysis to promote, reject, or background an experiment based on the draft results. Separate arithmetic outputs from interpretation outputs. When at least one promoted experiment exists, call submit_mechanics_experiments to finish.";
+pub const MECHANICS_EXPERIMENT_PREAMBLE: &str = "You are the Financial Model Explorer in mechanics-experiment mode. Test how crux mechanics affect revenue, margins, cash flow, and funding pressure using focused SQLite calculations. Use run_analysis_draft to execute SQL and inspect results before judging them. Use finalize_analysis to promote, reject, or background an experiment based on the draft results. Separate arithmetic outputs from interpretation outputs. When at least one promoted experiment exists, call submit_mechanics_experiments to finish. You have a limited step budget; after each tool round the user message reports steps remaining. On the penultimate turn, call submit_mechanics_experiments so the last turn can fix validation gaps.";
 
 #[derive(Debug, Clone)]
 pub struct FinancialModelExplorerAgent {
@@ -67,6 +67,8 @@ impl FinancialModelExplorerAgent {
                 client_tools: None,
                 max_agent_rounds: Some(self.config.max_agent_rounds),
                 submit_tool_name: Some(self.config.mode.submit_tool_name().to_string()),
+                prepare_step: None,
+                stop_when: None,
             })
             .await?;
 

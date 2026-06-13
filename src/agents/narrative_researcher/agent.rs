@@ -66,10 +66,8 @@ impl NarrativeResearcherAgent {
             tools = tools.with_web_search(WebSearchConfig::concept_validation_defaults());
         }
 
-        // @TODO: This agent would benefit a lot from us being able to insert a "Task Status" with the net-finished and still-to-be-done work lists
-        // @TODO: Lets update the ToolLoopAgent with preStep and postStep hooks, where these lifecycle hooks can be used to handle things like:
-        // 1. Emit a message at the Nth step, the penultimate step, even steps, etc.  Just need a step param to do this
-        // 2. Emit messages about the current job state.  eg: if 5 tool calls must be called in the overall loop, we should be able to emit a TODO list of finished and pending jobs.
+        // @TODO: Add a custom `prepare_step` hook that injects a task-status checklist (finished vs pending
+        // capture_* tools) using `ctx.steps` and workspace snapshot counts.
         let response = ToolLoopAgent::default()
             .run(ToolLoopRequest {
                 worker_name: WORKER_NAME.to_string(),
@@ -91,6 +89,8 @@ impl NarrativeResearcherAgent {
                 client_tools: None,
                 max_agent_rounds: Some(self.config.max_agent_rounds),
                 submit_tool_name: Some("finalize_narrative_research".to_string()),
+                prepare_step: None,
+                stop_when: None,
             })
             .await?;
 

@@ -1,4 +1,7 @@
-use crate::services::usage_snapshot::UsageSnapshot;
+use crate::services::{
+    tool_loop_control::{any_stop_condition, merge_prepare_step_result},
+    usage_snapshot::UsageSnapshot,
+};
 use async_trait::async_trait;
 use loco_rs::prelude::*;
 use openrouter_rs::{
@@ -86,7 +89,17 @@ pub struct ChatCompletionOptions {
     pub max_agent_rounds: Option<usize>,
     /// When set, penultimate-step nudges tell the model to call this tool (e.g. submit_concept_review).
     pub submit_tool_name: Option<String>,
+    /// Runs before each model turn. Defaults to [`StepBudgetPrepareStep`] when unset.
+    pub prepare_step: Option<Arc<dyn PrepareStepHook>>,
+    /// Evaluated after each tool-bearing step; loop stops when any condition matches.
+    pub stop_when: Option<Vec<Arc<dyn StopCondition>>>,
 }
+
+pub use crate::services::tool_loop_control::{
+    agent_step_budget_message, apply_step_budget_prepare, has_tool_call, step_count_is,
+    AgentStep, AgentToolCall, ChainedPrepareStep, PrepareStepContext, PrepareStepHook,
+    PrepareStepResult, StepBudgetPrepareStep, StopCondition, StopConditionContext,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ChatCompletionResult {
@@ -184,18 +197,36 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
     let client = build_openrouter_client()?;
     let mut messages = options.messages;
     let max_agent_rounds = options.max_agent_rounds.unwrap_or(DEFAULT_MAX_AGENT_ROUNDS);
-    let submit_tool_name = options.submit_tool_name.as_deref();
+    let stop_when = options.stop_when.unwrap_or_default();
+    let prepare_step: Arc<dyn PrepareStepHook> = options
+        .prepare_step
+        .clone()
+        .unwrap_or_else(|| {
+            Arc::new(StepBudgetPrepareStep::new(options.submit_tool_name.clone()))
+        });
+    let mut model = options.model.clone();
+    let mut tools = options.tools.clone();
+    let mut steps: Vec<AgentStep> = Vec::new();
     let mut total_usage = UsageSnapshot::default();
     let mut total_client_tool_calls = 0u32;
     let mut last_finish_reason = None;
     let mut last_text = String::new();
 
     for round in 0..max_agent_rounds {
+        let prepare_result = prepare_step.prepare_step(PrepareStepContext {
+            step_number: round,
+            max_steps: max_agent_rounds,
+            steps: &steps,
+            messages: &messages,
+            model: &model,
+        });
+        merge_prepare_step_result(&mut messages, &mut model, &mut tools, prepare_result);
+
         let (response, raw_payload) = send_completion(
             &client,
-            &options.model,
+            &model,
             &messages,
-            options.tools.as_deref(),
+            tools.as_deref(),
             false,
         )
         .await?;
@@ -219,13 +250,22 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
                 tool_calls.to_vec(),
             ));
 
+            let mut step_tool_calls = Vec::new();
+            let mut step_tool_results = Vec::new();
+
             for tool_call in tool_calls {
+                let arguments = tool_call.arguments_json().to_string();
                 match handler
                     .execute(tool_call.name(), tool_call.arguments_json())
                     .await
                 {
                     Ok(ClientToolExecuteResult::Complete(text)) => {
                         total_client_tool_calls += 1;
+                        step_tool_calls.push(AgentToolCall {
+                            tool_name: tool_call.name().to_string(),
+                            arguments,
+                            succeeded: true,
+                        });
                         messages.push(Message::tool_response_named(
                             tool_call.id(),
                             tool_call.name(),
@@ -241,6 +281,12 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
                     }
                     Ok(ClientToolExecuteResult::Response(result)) => {
                         total_client_tool_calls += 1;
+                        step_tool_calls.push(AgentToolCall {
+                            tool_name: tool_call.name().to_string(),
+                            arguments,
+                            succeeded: true,
+                        });
+                        step_tool_results.push(result.clone());
                         messages.push(Message::tool_response_named(
                             tool_call.id(),
                             tool_call.name(),
@@ -254,10 +300,17 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
                             "client tool call failed; returning error to model"
                         );
                         total_client_tool_calls += 1;
+                        let payload = client_tool_error_payload(tool_call.name(), &err);
+                        step_tool_calls.push(AgentToolCall {
+                            tool_name: tool_call.name().to_string(),
+                            arguments,
+                            succeeded: false,
+                        });
+                        step_tool_results.push(payload.clone());
                         messages.push(Message::tool_response_named(
                             tool_call.id(),
                             tool_call.name(),
-                            client_tool_error_payload(tool_call.name(), &err),
+                            payload,
                         ));
                     }
                 }
@@ -266,12 +319,39 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
             if !assistant_text.trim().is_empty() {
                 last_text = assistant_text.to_string();
             }
-            append_step_budget_message(
-                &mut messages,
-                round + 1,
-                max_agent_rounds,
-                submit_tool_name,
-            );
+
+            steps.push(AgentStep {
+                step_number: round,
+                tool_calls: step_tool_calls,
+                tool_results: step_tool_results,
+                usage: round_usage.clone(),
+                assistant_text: if assistant_text.trim().is_empty() {
+                    None
+                } else {
+                    Some(assistant_text.to_string())
+                },
+            });
+
+            if !stop_when.is_empty() {
+                let stop_ctx = StopConditionContext {
+                    steps: &steps,
+                    total_usage: &total_usage,
+                    max_steps: max_agent_rounds,
+                };
+                if any_stop_condition(&stop_when, &stop_ctx) {
+                    if !last_text.trim().is_empty() {
+                        return Ok(ChatCompletionResult {
+                            text: last_text,
+                            finish_reason: last_finish_reason,
+                            usage: total_usage,
+                            agent_rounds: round + 1,
+                            client_tool_calls: total_client_tool_calls,
+                        });
+                    }
+                    break;
+                }
+            }
+
             continue;
         }
 
@@ -300,66 +380,6 @@ pub async fn run_client_tool_loop(options: ChatCompletionOptions) -> Result<Chat
     ))
 }
 
-fn append_step_budget_message(
-    messages: &mut Vec<Message>,
-    steps_used: usize,
-    max_rounds: usize,
-    submit_tool_name: Option<&str>,
-) {
-    if steps_used >= max_rounds {
-        return;
-    }
-    let steps_remaining = max_rounds - steps_used;
-    let content =
-        agent_step_budget_message(steps_used, max_rounds, steps_remaining, submit_tool_name);
-    messages.push(Message::new(
-        openrouter_rs::types::Role::User,
-        content.as_str(),
-    ));
-}
-
-pub fn agent_step_budget_message(
-    steps_used: usize,
-    max_rounds: usize,
-    steps_remaining: usize,
-    submit_tool_name: Option<&str>,
-) -> String {
-    let submit_tool = submit_tool_name.unwrap_or("submit_concept_review");
-    match steps_remaining {
-        0 => format!(
-            "[Agent budget] Step {steps_used}/{max_rounds} complete. No steps remaining."
-        ),
-        1 => {
-            if submit_tool_name.is_some() {
-                format!(
-                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 1 (final turn). \
-                     Call {submit_tool} now with corrected decisions if your previous submission failed validation."
-                )
-            } else {
-                format!(
-                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 1 (final turn)."
-                )
-            }
-        }
-        2 => {
-            if submit_tool_name.is_some() {
-                format!(
-                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 2. \
-                     This is your penultimate turn — call {submit_tool} now with your final decisions. \
-                     Reserve the last turn to fix validation errors and resubmit if needed."
-                )
-            } else {
-                format!(
-                    "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 2 (penultimate turn)."
-                )
-            }
-        }
-        _ => format!(
-            "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: {steps_remaining}."
-        ),
-    }
-}
-
 pub async fn run_simple_chat_completion(
     model: &str,
     messages: Vec<Message>,
@@ -373,6 +393,8 @@ pub async fn run_simple_chat_completion(
         client_tools: None,
         max_agent_rounds: None,
         submit_tool_name: None,
+        prepare_step: None,
+        stop_when: None,
     })
     .await
 }

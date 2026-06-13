@@ -93,6 +93,8 @@ impl ModelClient for OpenRouterModelClient {
                 client_tools: request.client_tools.clone(),
                 max_agent_rounds: None,
                 submit_tool_name: None,
+                prepare_step: None,
+                stop_when: None,
             })
             .await?;
 
