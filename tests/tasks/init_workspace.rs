@@ -62,6 +62,7 @@ async fn test_initializes_workspace_directories_and_database() {
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
         build_narrative_map: false,
         build_financial_analysis: false,
+        build_scenario_generation: false,
     };
 
     let paths = initialize_workspace(&request).await.unwrap();
@@ -185,6 +186,7 @@ async fn test_allocates_next_index_without_overwriting() {
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
         build_narrative_map: false,
         build_financial_analysis: false,
+        build_scenario_generation: false,
     };
 
     let first = initialize_workspace(&request).await.unwrap();

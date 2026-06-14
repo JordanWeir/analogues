@@ -23,6 +23,7 @@ async fn test_can_run_generate_report() {
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
         build_narrative_map: false,
         build_financial_analysis: false,
+        build_scenario_generation: false,
     };
     let paths = initialize_workspace(&init_request).await.unwrap();
     let db = open_run_db_rw(&paths.sqlite_path).await;
@@ -206,9 +207,9 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
     execute_sql(
         db,
         "INSERT INTO scenario_assumptions (
-            scenario_order, name, stance, probability, description, assumption_summary
+            scenario_order, scenario_key, name, stance, probability, description, assumption_summary
          ) VALUES (
-            1, 'Scenario One', 'bullish', 1.0, 'Growth improves modestly.', 'Revenue growth and margin are stable.'
+            1, 'scenario_one', 'Scenario One', 'bullish', 1.0, 'Growth improves modestly.', 'Revenue growth and margin are stable.'
          )",
     )
     .await

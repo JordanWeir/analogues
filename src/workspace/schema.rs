@@ -363,6 +363,7 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS scenario_assumptions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         scenario_order INTEGER NOT NULL UNIQUE,
+        scenario_key TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         stance TEXT NOT NULL CHECK (stance IN ('bullish', 'neutral', 'bearish', 'mixed')),
         probability REAL CHECK (probability IS NULL OR probability >= 0),
@@ -374,13 +375,16 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         scenario_id INTEGER NOT NULL,
         crux_order INTEGER NOT NULL,
+        crux_key TEXT,
+        experiment_key TEXT,
         crux TEXT NOT NULL,
         assumption TEXT NOT NULL,
         impact TEXT,
         source_id INTEGER,
         UNIQUE(scenario_id, crux_order),
         FOREIGN KEY(scenario_id) REFERENCES scenario_assumptions(id),
-        FOREIGN KEY(source_id) REFERENCES sources(id)
+        FOREIGN KEY(source_id) REFERENCES sources(id),
+        FOREIGN KEY(experiment_key) REFERENCES analysis_experiments(experiment_key)
     )",
     "CREATE TABLE IF NOT EXISTS scenario_sensitivities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -408,6 +412,8 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
         scenario_id INTEGER NOT NULL,
         period_order INTEGER NOT NULL,
         label TEXT NOT NULL,
+        period_end TEXT,
+        period_type TEXT NOT NULL DEFAULT 'quarter',
         revenue REAL,
         revenue_growth REAL,
         diluted_shares REAL,
@@ -603,4 +609,9 @@ pub const SCHEMA_MIGRATION_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_av_raw_facts_field_period
         ON av_raw_facts(endpoint, field_name, period_end, report_type)",
+    "ALTER TABLE scenario_assumptions ADD COLUMN scenario_key TEXT",
+    "ALTER TABLE scenario_periods ADD COLUMN period_end TEXT",
+    "ALTER TABLE scenario_periods ADD COLUMN period_type TEXT DEFAULT 'quarter'",
+    "ALTER TABLE scenario_crux_assumptions ADD COLUMN crux_key TEXT",
+    "ALTER TABLE scenario_crux_assumptions ADD COLUMN experiment_key TEXT",
 ];

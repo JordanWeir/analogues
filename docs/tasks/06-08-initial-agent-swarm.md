@@ -197,9 +197,11 @@ Setup a simple linear track, see where agents break down, iterate.
     - More SQL/calculation-heavy than crux triage
     - Draft → finalize tool flow; gates on promoted experiment structure
 
-13. **`scenario_builder` agent**
+13. **`scenario_builder` agent** ✅
 
-14. **`scenario_generation` lane + gates**
+14. **`scenario_generation` lane + gates** ✅
+    - Fan-out: blueprint → per-scenario detail → Monte Carlo / valuation bands
+    - Defers HTML report rendering (`scenario_artifacts` / `report_synthesis`)
 
 15. **`scenario_artifacts` lane (deterministic) + gates**
     - Refactor `generate_report` math/render (Monte Carlo, valuation bands, HTML)

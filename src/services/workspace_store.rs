@@ -18,7 +18,7 @@ pub struct WorkspaceStore;
 
 pub const DEFAULT_REPORT_ROOT: &str = "reports/stock-narrative-research";
 pub const RUN_DB_FILENAME: &str = "run.sqlite";
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub async fn execute_schema(db: &sea_orm::DatabaseConnection) -> Result<()> {
     for statement in SCHEMA_STATEMENTS {

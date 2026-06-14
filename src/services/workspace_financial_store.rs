@@ -1094,6 +1094,7 @@ mod tests {
                 ),
                 build_narrative_map: false,
                 build_financial_analysis: false,
+                build_scenario_generation: false,
             },
             &WorkspacePaths {
                 run_slug: "MSFT-2026-06-07-1".to_string(),

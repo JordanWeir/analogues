@@ -113,6 +113,7 @@ async fn test_lane_context() -> (LaneContext, PathBuf) {
             mapping_strategy: None,
             build_narrative_map: false,
             build_financial_analysis: false,
+            build_scenario_generation: false,
         },
         &paths,
     )

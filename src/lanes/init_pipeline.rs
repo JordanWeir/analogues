@@ -1,7 +1,7 @@
 use super::{
     build_catalog::{BuildCatalogLane, CatalogResolutionStrategy},
     build_narrative_map::BuildNarrativeMapLane,
-    init_workspace::InitWorkspaceLane, lane::Lane, research_pipeline::financial_analysis_lanes,
+    init_workspace::InitWorkspaceLane, lane::Lane, research_pipeline::{financial_analysis_lanes, scenario_lanes},
 };
 use crate::{
     lanes::build_narrative_map::strategy::NarrativeMapStrategy, workspace::InitWorkspaceRequest,
@@ -23,6 +23,9 @@ pub fn lanes_for_request(request: &InitWorkspaceRequest) -> Vec<Arc<dyn Lane>> {
             }
             if request.build_financial_analysis {
                 lanes.extend(financial_analysis_lanes());
+            }
+            if request.build_scenario_generation {
+                lanes.extend(scenario_lanes());
             }
         }
     }
@@ -60,6 +63,7 @@ mod tests {
                 "build_catalog",
                 "build_narrative_map",
                 "financial_fan_out",
+                "scenario_generation",
             ]
         );
     }
@@ -69,6 +73,7 @@ mod tests {
         let mut request = base_request();
         request.build_narrative_map = false;
         request.build_financial_analysis = false;
+        request.build_scenario_generation = false;
         let names = lane_names(&request);
         assert_eq!(names, vec!["init_workspace", "build_catalog"]);
     }
@@ -77,10 +82,27 @@ mod tests {
     fn financial_analysis_can_be_disabled_while_keeping_narrative_map() {
         let mut request = base_request();
         request.build_financial_analysis = false;
+        request.build_scenario_generation = false;
         let names = lane_names(&request);
         assert_eq!(
             names,
             vec!["init_workspace", "build_catalog", "build_narrative_map"]
+        );
+    }
+
+    #[test]
+    fn scenario_generation_can_be_disabled_while_keeping_financial_analysis() {
+        let mut request = base_request();
+        request.build_scenario_generation = false;
+        let names = lane_names(&request);
+        assert_eq!(
+            names,
+            vec![
+                "init_workspace",
+                "build_catalog",
+                "build_narrative_map",
+                "financial_fan_out",
+            ]
         );
     }
 }
