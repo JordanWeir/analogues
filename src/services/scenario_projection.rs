@@ -1,7 +1,7 @@
 //! Deterministic scenario roll-forward, valuation bands, and Monte Carlo persistence.
-//! Used by `scenario_generation` lane; `generate_report` may converge here later.
+//! Used by `scenario_generation` lane; consumed by `report_artifacts` / `scenario_artifacts`.
 
-use crate::services::workspace_sql::{execute_sql, sql_number, sql_quote, sql_value};
+use crate::services::workspace_sql::{execute_sql, scalar_i64, sql_number, sql_quote, sql_value};
 use chrono::Utc;
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, QueryResult, Statement};
@@ -136,8 +136,13 @@ struct StockInfo {
     currency: Option<String>,
 }
 
-/// Compute scenario valuation bands and persist Monte Carlo outputs.
-pub async fn compute_and_persist_monte_carlo(db: &sea_orm::DatabaseConnection) -> Result<Value> {
+/// Whether Monte Carlo summary rows exist for this workspace.
+pub async fn monte_carlo_is_persisted(db: &sea_orm::DatabaseConnection) -> Result<bool> {
+    Ok(scalar_i64(db, "SELECT COUNT(*) AS count FROM monte_carlo_summary").await? > 0)
+}
+
+/// Build scenario roll-forward JSON without sampling or persisting Monte Carlo.
+pub async fn build_scenario_data_json(db: &sea_orm::DatabaseConnection) -> Result<Value> {
     let stock = load_stock_info(db).await?;
     let mut fundamentals = load_fundamentals(db).await?;
     enhance_baseline_from_av(db, &mut fundamentals).await?;
@@ -153,9 +158,108 @@ pub async fn compute_and_persist_monte_carlo(db: &sea_orm::DatabaseConnection) -
             )));
         }
     }
-
     let config = load_monte_carlo_config(db).await?;
-    let scenario_data = build_scenario_data(&stock, &fundamentals, &scenarios, &config)?;
+    build_scenario_data(&stock, &fundamentals, &scenarios, &config)
+}
+
+/// Load persisted Monte Carlo outputs as report-ready JSON.
+pub async fn load_persisted_monte_carlo_json(db: &sea_orm::DatabaseConnection) -> Result<Value> {
+    let summary = query_one_required(
+        db,
+        "SELECT iterations, seed, bins, price_field, probability_basis,
+                normal_distribution_basis, methodology,
+                summary_min, summary_p10, summary_p25, summary_median, summary_mean,
+                summary_p75, summary_p90, summary_max, summary_stdev
+         FROM monte_carlo_summary WHERE id = 1",
+    )
+    .await?;
+
+    let mut summary_map = BTreeMap::new();
+    for (index, key) in [
+        "min", "p10", "p25", "median", "mean", "p75", "p90", "max", "stdev",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if let Some(value) = row_opt_f64(&summary, 7 + index)? {
+            summary_map.insert((*key).to_string(), value);
+        }
+    }
+
+    let histogram_rows = query_all(
+        db,
+        "SELECT low, high, midpoint, count, probability
+         FROM monte_carlo_histogram_bins ORDER BY bin_order",
+    )
+    .await?;
+    let histogram = histogram_rows
+        .iter()
+        .map(|row| {
+            Ok(json!({
+                "low": row_f64(row, 0)?,
+                "high": row_f64(row, 1)?,
+                "midpoint": row_f64(row, 2)?,
+                "count": row_i64(row, 3)?,
+                "probability": row_f64(row, 4)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let probability_rows = query_all(
+        db,
+        "SELECT p.scenario_id, s.name, p.input_probability, p.normalized_probability,
+                p.sample_count, p.observed_probability
+         FROM monte_carlo_scenario_probabilities p
+         JOIN scenario_assumptions s ON s.id = p.scenario_id
+         ORDER BY s.scenario_order",
+    )
+    .await?;
+    let scenario_probabilities = probability_rows
+        .iter()
+        .map(|row| {
+            Ok(json!({
+                "name": row_string(row, 1)?,
+                "input_probability": row_opt_f64(row, 2)?,
+                "normalized_probability": row_f64(row, 3)?,
+                "sample_count": row_i64(row, 4)?,
+                "observed_probability": row_f64(row, 5)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(json!({
+        "iterations": row_i64(&summary, 0)? as usize,
+        "seed": row_i64(&summary, 1)? as u64,
+        "bins": row_i64(&summary, 2)? as usize,
+        "price_field": row_opt_string(&summary, 3)?,
+        "probability_basis": row_opt_string(&summary, 4)?,
+        "normal_distribution_basis": row_opt_string(&summary, 5)?,
+        "methodology": row_opt_string(&summary, 6)?,
+        "summary": summary_map,
+        "histogram": histogram,
+        "scenario_probabilities": scenario_probabilities,
+    }))
+}
+
+/// Scenario projection data with Monte Carlo, reading persisted outputs when present.
+pub async fn scenario_data_with_monte_carlo(db: &sea_orm::DatabaseConnection) -> Result<Value> {
+    if monte_carlo_is_persisted(db).await? {
+        let mut scenario_data = build_scenario_data_json(db).await?;
+        let monte_carlo = load_persisted_monte_carlo_json(db).await?;
+        if let Some(obj) = scenario_data.as_object_mut() {
+            obj.insert("monte_carlo".to_string(), monte_carlo);
+        }
+        Ok(scenario_data)
+    } else {
+        compute_and_persist_monte_carlo(db).await
+    }
+}
+
+/// Compute scenario valuation bands and persist Monte Carlo outputs.
+pub async fn compute_and_persist_monte_carlo(db: &sea_orm::DatabaseConnection) -> Result<Value> {
+    let scenario_data = build_scenario_data_json(db).await?;
+    let scenarios = load_scenarios(db).await?;
+    let config = load_monte_carlo_config(db).await?;
     let scenario_outputs = scenario_outputs_from_value(&scenario_data, &scenarios);
     let monte_carlo = build_monte_carlo(&config, &scenario_outputs);
     persist_monte_carlo(db, &monte_carlo).await?;
@@ -822,6 +926,11 @@ fn row_opt_string(row: &QueryResult, index: usize) -> Result<Option<String>> {
 fn row_i64(row: &QueryResult, index: usize) -> Result<i64> {
     row.try_get_by_index::<i64>(index)
         .map_err(|err| Error::string(&format!("read i64 col {index}: {err}")))
+}
+
+fn row_f64(row: &QueryResult, index: usize) -> Result<f64> {
+    row.try_get_by_index::<f64>(index)
+        .map_err(|err| Error::string(&format!("read f64 col {index}: {err}")))
 }
 
 fn row_opt_f64(row: &QueryResult, index: usize) -> Result<Option<f64>> {

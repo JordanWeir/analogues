@@ -203,8 +203,9 @@ Setup a simple linear track, see where agents break down, iterate.
     - Fan-out: blueprint → per-scenario detail → Monte Carlo / valuation bands
     - Defers HTML report rendering (`scenario_artifacts` / `report_synthesis`)
 
-15. **`scenario_artifacts` lane (deterministic) + gates**
-    - Refactor `generate_report` math/render (Monte Carlo, valuation bands, HTML)
+15. **`scenario_artifacts` lane (deterministic) + gates** ✅
+    - View layer: compile report payload + render HTML from persisted Monte Carlo / scenario data
+    - `src/services/report_artifacts.rs`; `generateReport` task delegates here
 
 16. **`content_manager` agent**
 

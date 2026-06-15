@@ -64,6 +64,7 @@ mod tests {
                 "build_narrative_map",
                 "financial_fan_out",
                 "scenario_generation",
+                "scenario_artifacts",
             ]
         );
     }

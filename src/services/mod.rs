@@ -16,6 +16,7 @@ pub mod tool_loop_control;
 pub(crate) mod openrouter_chat;
 pub mod scenario_projection;
 pub mod scenario_store;
+pub mod report_artifacts;
 pub mod quality_gate_store;
 pub mod sec_facts_provider;
 pub mod usage_snapshot;
