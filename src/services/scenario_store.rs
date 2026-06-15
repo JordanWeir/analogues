@@ -254,15 +254,34 @@ impl<'a> ScenarioStore<'a> {
     }
 
     pub async fn load_scenario_keys(&self) -> Result<Vec<(String, String, String)>> {
+        self.load_scenario_rows(
+            "SELECT scenario_key, name, description
+             FROM scenario_assumptions ORDER BY scenario_order",
+        )
+        .await
+    }
+
+    /// Scenarios from the persisted blueprint that have no `scenario_periods` rows yet.
+    pub async fn load_scenarios_needing_detail(&self) -> Result<Vec<(String, String, String)>> {
+        self.load_scenario_rows(
+            "SELECT sa.scenario_key, sa.name, sa.description
+             FROM scenario_assumptions sa
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM scenario_periods sp WHERE sp.scenario_id = sa.id
+             )
+             ORDER BY sa.scenario_order",
+        )
+        .await
+    }
+
+    async fn load_scenario_rows(&self, sql: &str) -> Result<Vec<(String, String, String)>> {
         self.db
             .query_all(Statement::from_string(
                 DatabaseBackend::Sqlite,
-                "SELECT scenario_key, name, description
-                 FROM scenario_assumptions ORDER BY scenario_order"
-                    .to_string(),
+                sql.to_string(),
             ))
             .await
-            .map_err(|e| Error::string(&format!("load scenario keys: {e}")))?
+            .map_err(|e| Error::string(&format!("load scenario rows: {e}")))?
             .into_iter()
             .map(|row| {
                 Ok((

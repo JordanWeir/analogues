@@ -734,6 +734,12 @@ fn client_tool_error_payload(tool_name: &str, err: &Error) -> String {
     .to_string()
 }
 
+pub const EMPTY_COMPLETION_ERROR_MARKER: &str = "OpenRouter returned no assistant text after";
+
+pub fn is_empty_completion_error(err: &Error) -> bool {
+    err.to_string().contains(EMPTY_COMPLETION_ERROR_MARKER)
+}
+
 fn empty_completion_error(
     finish_reason: &Option<String>,
     text: &str,
@@ -747,7 +753,7 @@ fn empty_completion_error(
         text.chars().take(240).collect()
     };
     Error::string(&format!(
-        "OpenRouter returned no assistant text after {max_agent_rounds} agent steps (finish_reason={finish_reason:?}, web_search_requests={web_search_requests}, client_tool_calls={client_tool_calls}, preview={preview})"
+        "{EMPTY_COMPLETION_ERROR_MARKER} {max_agent_rounds} agent steps (finish_reason={finish_reason:?}, web_search_requests={web_search_requests}, client_tool_calls={client_tool_calls}, preview={preview})"
     ))
 }
 
@@ -867,6 +873,13 @@ mod tests {
             web_search_server_tool(json!({})),
         ];
         assert!(has_server_tools(Some(&tools)));
+    }
+
+    #[test]
+    fn empty_completion_error_is_detected() {
+        let err = empty_completion_error(&None, "", 0, 3, 32);
+        assert!(is_empty_completion_error(&err));
+        assert!(err.to_string().contains(EMPTY_COMPLETION_ERROR_MARKER));
     }
 
     #[test]

@@ -58,11 +58,20 @@ impl ScenarioBuilderAgent {
                 prompt: self.agent_prompt(&workspace_sqlite).await?,
                 json_mode: false,
                 tools,
-                metadata: BTreeMap::from([
-                    ("lane".to_string(), self.config.mode.worker_lane().to_string()),
-                    ("ticker".to_string(), ticker.to_string()),
-                    ("mode".to_string(), self.config.mode.mode_label().to_string()),
-                ]),
+                metadata: {
+                    let mut metadata = BTreeMap::from([
+                        ("lane".to_string(), self.config.mode.worker_lane().to_string()),
+                        ("ticker".to_string(), ticker.to_string()),
+                        ("mode".to_string(), self.config.mode.mode_label().to_string()),
+                    ]);
+                    if let Some(scenario_key) = &self.config.focus_scenario_key {
+                        metadata.insert(
+                            "focus_scenario_key".to_string(),
+                            scenario_key.clone(),
+                        );
+                    }
+                    metadata
+                },
                 workspace_sqlite: Some(workspace_sqlite),
                 client_tools: None,
                 max_agent_rounds: Some(self.config.max_agent_rounds),
