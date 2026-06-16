@@ -175,6 +175,12 @@ pub async fn run_workspace_ingest(
         "Ingested {} Alpha Vantage av_raw_facts observations.",
         av_ingest.raw_facts.len()
     ));
+    if !av_ingest.daily_prices.is_empty() {
+        source_notes.push(format!(
+            "Persisted {} daily OHLC bars from Alpha Vantage.",
+            av_ingest.daily_prices.len()
+        ));
+    }
     let alpha_vantage_persisted = true;
     let av_raw_fact_count = av_ingest.raw_facts.len();
 

@@ -1,8 +1,8 @@
 use crate::{
     services::{financial_run::FinancialRun, http_json::fetch_json},
-    workspace::{AvRawFact, MarketHeadlines, StarterFundamentals},
+    workspace::{AvRawFact, DailyPriceBar, MarketHeadlines, StarterFundamentals},
 };
-use chrono::Utc;
+use chrono::{Duration, NaiveDate, Utc};
 use loco_rs::prelude::*;
 use serde_json::Value;
 use std::env;
@@ -13,6 +13,8 @@ const OVERVIEW_FUNCTION: &str = "OVERVIEW";
 const INCOME_STATEMENT_FUNCTION: &str = "INCOME_STATEMENT";
 const BALANCE_SHEET_FUNCTION: &str = "BALANCE_SHEET";
 const CASH_FLOW_FUNCTION: &str = "CASH_FLOW";
+const DAILY_TIME_SERIES_FUNCTION: &str = "TIME_SERIES_DAILY_ADJUSTED";
+const DEFAULT_DAILY_PRICE_LOOKBACK_DAYS: i64 = 365 * 5;
 
 const REPORT_META_KEYS: &[&str] = &["fiscalDateEnding", "reportedCurrency"];
 
@@ -42,8 +44,15 @@ pub struct AlphaVantageIngestResult {
     pub currency: Option<String>,
     pub raw_facts: Vec<AvRawFact>,
     pub market_headlines: MarketHeadlines,
+    pub daily_prices: Vec<DailyPriceBar>,
     pub data_sources: Vec<String>,
     pub source_notes: Vec<String>,
+}
+
+impl AlphaVantageIngestResult {
+    pub fn latest_daily_close(&self) -> Option<f64> {
+        self.daily_prices.last().map(|bar| bar.close)
+    }
 }
 
 impl AlphaVantageFundamentalsProvider {
@@ -151,8 +160,46 @@ impl AlphaVantageFundamentalsProvider {
             ));
         }
 
+        let mut data_sources = vec![
+            format!("{ALPHA_VANTAGE_SOURCE} {OVERVIEW_FUNCTION}"),
+            format!("{ALPHA_VANTAGE_SOURCE} {INCOME_STATEMENT_FUNCTION}"),
+            format!("{ALPHA_VANTAGE_SOURCE} {BALANCE_SHEET_FUNCTION}"),
+            format!("{ALPHA_VANTAGE_SOURCE} {CASH_FLOW_FUNCTION}"),
+        ];
+        let mut source_notes = vec![
+            "Ingested Alpha Vantage fundamentals time series into av_raw_facts.".to_string(),
+        ];
+
+        let mut daily_prices = Vec::new();
+        match self.fetch_daily_prices(ticker).await {
+            Ok(prices) => {
+                if prices.is_empty() {
+                    source_notes.push(
+                        "Alpha Vantage daily price series returned no bars in lookback window."
+                            .to_string(),
+                    );
+                } else {
+                    data_sources.push(format!(
+                        "{ALPHA_VANTAGE_SOURCE} {DAILY_TIME_SERIES_FUNCTION}"
+                    ));
+                    source_notes.push(format!(
+                        "Fetched {} daily OHLC bars from Alpha Vantage (last {} days).",
+                        prices.len(),
+                        daily_price_lookback_days()
+                    ));
+                    daily_prices = prices;
+                }
+            }
+            Err(err) => {
+                source_notes.push(format!("Alpha Vantage daily price fetch failed: {err}"));
+            }
+        }
+
         let starter = starter_from_overview(&overview, &period_end);
-        let market_headlines = build_market_headlines_from_overview(&overview, &starter);
+        let mut market_headlines = build_market_headlines_from_overview(&overview, &starter);
+        if let Some(close) = daily_prices.last().map(|bar| bar.close) {
+            market_headlines.current_price = Some(close);
+        }
 
         Ok(AlphaVantageIngestResult {
             ticker: ticker.to_uppercase(),
@@ -161,16 +208,24 @@ impl AlphaVantageFundamentalsProvider {
             currency,
             raw_facts,
             market_headlines,
-            data_sources: vec![
-                format!("{ALPHA_VANTAGE_SOURCE} {OVERVIEW_FUNCTION}"),
-                format!("{ALPHA_VANTAGE_SOURCE} {INCOME_STATEMENT_FUNCTION}"),
-                format!("{ALPHA_VANTAGE_SOURCE} {BALANCE_SHEET_FUNCTION}"),
-                format!("{ALPHA_VANTAGE_SOURCE} {CASH_FLOW_FUNCTION}"),
-            ],
-            source_notes: vec![
-                "Ingested Alpha Vantage fundamentals time series into av_raw_facts.".to_string(),
-            ],
+            daily_prices,
+            data_sources,
+            source_notes,
         })
+    }
+
+    pub async fn fetch_daily_prices(&self, ticker: &str) -> Result<Vec<DailyPriceBar>> {
+        let payload = self.fetch_daily_time_series(ticker, "full").await?;
+        ensure_av_payload(&payload, DAILY_TIME_SERIES_FUNCTION)?;
+        parse_daily_prices(&payload, daily_price_lookback_days())
+    }
+
+    async fn fetch_daily_time_series(&self, ticker: &str, outputsize: &str) -> Result<Value> {
+        let url = format!(
+            "{ALPHA_VANTAGE_BASE_URL}?function={DAILY_TIME_SERIES_FUNCTION}&symbol={ticker}&outputsize={outputsize}&apikey={}",
+            self.api_key
+        );
+        fetch_json(&self.client, &url, None).await
     }
 
     async fn fetch_function(&self, ticker: &str, function: &str) -> Result<Value> {
@@ -332,7 +387,62 @@ fn ensure_av_payload(payload: &Value, function: &str) -> Result<()> {
             "Alpha Vantage {function} response did not include financial statement payload"
         )));
     }
+    if function == DAILY_TIME_SERIES_FUNCTION && payload.get("Time Series (Daily)").is_none() {
+        return Err(Error::string(&format!(
+            "Alpha Vantage {function} response did not include daily time series"
+        )));
+    }
     Ok(())
+}
+
+fn daily_price_lookback_days() -> i64 {
+    std::env::var("ALPHA_VANTAGE_DAILY_PRICE_LOOKBACK_DAYS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|days: &i64| *days > 0)
+        .unwrap_or(DEFAULT_DAILY_PRICE_LOOKBACK_DAYS)
+}
+
+fn parse_daily_prices(payload: &Value, lookback_days: i64) -> Result<Vec<DailyPriceBar>> {
+    let series = payload
+        .get("Time Series (Daily)")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            Error::string("Alpha Vantage daily time series response did not include price bars")
+        })?;
+
+    let cutoff = Utc::now().date_naive() - Duration::days(lookback_days);
+    let mut bars = series
+        .iter()
+        .filter_map(|(trade_date, values)| parse_daily_price_bar(trade_date, values))
+        .filter(|bar| {
+            NaiveDate::parse_from_str(&bar.trade_date, "%Y-%m-%d")
+                .map(|date| date >= cutoff)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    bars.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
+    Ok(bars)
+}
+
+fn parse_daily_price_bar(trade_date: &str, values: &Value) -> Option<DailyPriceBar> {
+    let open = numeric_field(values, "1. open")?;
+    let high = numeric_field(values, "2. high")?;
+    let low = numeric_field(values, "3. low")?;
+    let close = numeric_field(values, "4. close")?;
+    let adjusted_close = numeric_field(values, "5. adjusted close");
+    let volume = numeric_field(values, "6. volume")
+        .or_else(|| numeric_field(values, "5. volume"))?;
+
+    Some(DailyPriceBar {
+        trade_date: trade_date.to_string(),
+        open,
+        high,
+        low,
+        close,
+        volume,
+        adjusted_close,
+    })
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -433,5 +543,71 @@ mod tests {
     fn rejects_rate_limit_payload() {
         let payload = json!({"Note": "Thank you for using Alpha Vantage!"});
         assert!(ensure_av_payload(&payload, OVERVIEW_FUNCTION).is_err());
+    }
+
+    #[test]
+    fn parses_daily_price_series_within_lookback() {
+        let payload = json!({
+            "Time Series (Daily)": {
+                "2025-01-02": {
+                    "1. open": "100.0",
+                    "2. high": "101.0",
+                    "3. low": "99.0",
+                    "4. close": "100.5",
+                    "5. adjusted close": "100.5",
+                    "6. volume": "1000000"
+                },
+                "2099-01-02": {
+                    "1. open": "200.0",
+                    "2. high": "201.0",
+                    "3. low": "199.0",
+                    "4. close": "200.5",
+                    "5. adjusted close": "200.5",
+                    "6. volume": "2000000"
+                }
+            }
+        });
+
+        let bars = parse_daily_prices(&payload, 365).expect("bars");
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].trade_date, "2099-01-02");
+        assert_eq!(bars[0].close, 200.5);
+    }
+
+    #[test]
+    fn ingest_prefers_latest_daily_close_for_current_price() {
+        let overview = json!({
+            "MarketCapitalization": "3100000000000",
+            "SharesOutstanding": "7430000000"
+        });
+        let starter = starter_from_overview(&overview, "2025-03-31");
+        let daily_prices = vec![DailyPriceBar {
+            trade_date: "2026-06-11".to_string(),
+            open: 412.0,
+            high: 418.0,
+            low: 411.0,
+            close: 417.25,
+            volume: 1_100_000.0,
+            adjusted_close: Some(417.25),
+        }];
+        let mut market_headlines = build_market_headlines_from_overview(&overview, &starter);
+        if let Some(close) = daily_prices.last().map(|bar| bar.close) {
+            market_headlines.current_price = Some(close);
+        }
+
+        let ingest = AlphaVantageIngestResult {
+            ticker: "MSFT".to_string(),
+            fetched_at: "2026-06-11T00:00:00Z".to_string(),
+            company_name: Some("Microsoft Corporation".to_string()),
+            currency: Some("USD".to_string()),
+            raw_facts: Vec::new(),
+            market_headlines,
+            daily_prices,
+            data_sources: Vec::new(),
+            source_notes: Vec::new(),
+        };
+
+        assert_eq!(ingest.latest_daily_close(), Some(417.25));
+        assert_eq!(ingest.market_headlines.current_price, Some(417.25));
     }
 }

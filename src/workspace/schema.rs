@@ -245,6 +245,21 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
         ON fundamental_observations(as_of_date)",
     "CREATE INDEX IF NOT EXISTS idx_fundamental_observations_canonical
         ON fundamental_observations(canonical_key, period_end)",
+    "CREATE TABLE IF NOT EXISTS daily_price_bars (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_date TEXT NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL,
+        adjusted_close REAL,
+        source_type TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        UNIQUE(trade_date)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_daily_price_bars_trade_date
+        ON daily_price_bars(trade_date)",
     "CREATE VIEW IF NOT EXISTS canonical_fundamental_observations AS
         SELECT *
         FROM fundamental_observations

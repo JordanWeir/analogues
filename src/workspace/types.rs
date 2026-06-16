@@ -127,6 +127,18 @@ pub struct MarketQuoteSnapshot {
     pub source_notes: Vec<String>,
 }
 
+/// One daily OHLCV bar from a market data provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DailyPriceBar {
+    pub trade_date: String,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub adjusted_close: Option<f64>,
+}
+
 /// Market-derived headline scalars (price, cap, valuation ratios).
 #[derive(Debug, Clone, Default)]
 pub struct MarketHeadlines {

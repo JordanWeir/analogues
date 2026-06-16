@@ -6,8 +6,8 @@ use crate::{
         workspace_store::execute_schema,
     },
     workspace::{
-        AvRawFact, CanonicalMapping, ConceptCatalogEntry, FundamentalObservation, MarketQuoteSnapshot,
-        SecRawFact,
+        AvRawFact, CanonicalMapping, ConceptCatalogEntry, DailyPriceBar, FundamentalObservation,
+        MarketQuoteSnapshot, SecRawFact,
     },
 };
 use loco_rs::prelude::*;
@@ -217,7 +217,15 @@ impl<'a> WorkspaceFinancialStore<'a> {
         .await?;
         Self::insert_raw_av_facts(self.db, &ingest.raw_facts).await?;
         if include_implied_price {
-            if let Some(price) = ingest.market_headlines.current_price {
+            let current_price = ingest
+                .latest_daily_close()
+                .or(ingest.market_headlines.current_price);
+            if let Some(price) = current_price {
+                let source_note = if ingest.latest_daily_close().is_some() {
+                    format!("{ALPHA_VANTAGE_SOURCE} latest daily close")
+                } else {
+                    format!("{ALPHA_VANTAGE_SOURCE} implied from market cap and shares")
+                };
                 Self::insert_fundamental(
                     self.db,
                     &FundamentalInsert {
@@ -226,15 +234,71 @@ impl<'a> WorkspaceFinancialStore<'a> {
                         value: Some(price),
                         text: None,
                         unit: currency,
-                        period: None,
-                        source_note: Some(format!(
-                            "{ALPHA_VANTAGE_SOURCE} implied from market cap and shares"
-                        )),
+                        period: ingest
+                            .daily_prices
+                            .last()
+                            .map(|bar| bar.trade_date.clone()),
+                        source_note: Some(source_note),
                     },
                     fetched_at,
                 )
                 .await?;
             }
+        }
+        if !ingest.daily_prices.is_empty() {
+            Self::insert_daily_price_bars(
+                self.db,
+                &ingest.daily_prices,
+                ALPHA_VANTAGE_SOURCE,
+                fetched_at,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn load_daily_price_bars(&self) -> Result<Vec<DailyPriceBar>> {
+        let rows = query_all(
+            self.db,
+            "SELECT trade_date, open, high, low, close, volume, adjusted_close
+             FROM daily_price_bars
+             ORDER BY trade_date",
+        )
+        .await?;
+        rows.into_iter().map(row_to_daily_price_bar).collect()
+    }
+
+    pub async fn insert_daily_price_bars(
+        db: &impl ConnectionTrait,
+        bars: &[DailyPriceBar],
+        source_type: &str,
+        fetched_at: &str,
+    ) -> Result<()> {
+        for chunk in bars.chunks(BULK_INSERT_CHUNK_SIZE) {
+            let values = chunk
+                .iter()
+                .map(|bar| daily_price_bar_values(bar, source_type, fetched_at))
+                .collect::<Vec<_>>()
+                .join(",\n");
+            execute_sql(
+                db,
+                &format!(
+                    "INSERT INTO daily_price_bars (
+                        trade_date, open, high, low, close, volume, adjusted_close, source_type, fetched_at
+                    ) VALUES
+                    {values}
+                    ON CONFLICT(trade_date) DO UPDATE SET
+                        open = excluded.open,
+                        high = excluded.high,
+                        low = excluded.low,
+                        close = excluded.close,
+                        volume = excluded.volume,
+                        adjusted_close = excluded.adjusted_close,
+                        source_type = excluded.source_type,
+                        fetched_at = excluded.fetched_at"
+                ),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1020,6 +1084,33 @@ fn concept_review_decision_values(decision: &ConceptReviewDecisionRecord) -> Str
     )
 }
 
+fn row_to_daily_price_bar(row: QueryResult) -> Result<DailyPriceBar> {
+    Ok(DailyPriceBar {
+        trade_date: row_string(&row, "trade_date")?,
+        open: row_f64(&row, "open")?,
+        high: row_f64(&row, "high")?,
+        low: row_f64(&row, "low")?,
+        close: row_f64(&row, "close")?,
+        volume: row_f64(&row, "volume")?,
+        adjusted_close: row_opt_f64(&row, "adjusted_close")?,
+    })
+}
+
+fn daily_price_bar_values(bar: &DailyPriceBar, source_type: &str, fetched_at: &str) -> String {
+    format!(
+        "('{}', {}, {}, {}, {}, {}, {}, '{}', '{}')",
+        sql_quote(&bar.trade_date),
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+        bar.volume,
+        sql_number(bar.adjusted_close),
+        sql_quote(source_type),
+        sql_quote(fetched_at),
+    )
+}
+
 fn observation_values(observation: &FundamentalObservation, updated_at: &str) -> String {
     format!(
         "({}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}, {}, {}, '{}', {}, {}, {}, {}, {}, {}, '{}')",
@@ -1105,6 +1196,66 @@ mod tests {
         .await
         .expect("seed");
         db
+    }
+
+    #[tokio::test]
+    async fn persist_av_raw_ingest_writes_daily_price_bars() {
+        use crate::services::alpha_vantage_fundamentals_provider::{
+            AlphaVantageIngestResult, ALPHA_VANTAGE_SOURCE,
+        };
+        use crate::workspace::{DailyPriceBar, MarketHeadlines};
+
+        let db = test_db().await;
+        let store = WorkspaceFinancialStore::new(&db);
+        let ingest = AlphaVantageIngestResult {
+            ticker: "MSFT".to_string(),
+            fetched_at: "2026-06-11T00:00:00Z".to_string(),
+            company_name: Some("Microsoft Corporation".to_string()),
+            currency: Some("USD".to_string()),
+            raw_facts: Vec::new(),
+            market_headlines: MarketHeadlines {
+                current_price: Some(417.25),
+                ..MarketHeadlines::default()
+            },
+            daily_prices: vec![DailyPriceBar {
+                trade_date: "2026-06-11".to_string(),
+                open: 412.0,
+                high: 418.0,
+                low: 411.0,
+                close: 417.25,
+                volume: 1_100_000.0,
+                adjusted_close: Some(417.25),
+            }],
+            data_sources: vec![ALPHA_VANTAGE_SOURCE.to_string()],
+            source_notes: vec![],
+        };
+
+        store
+            .persist_av_raw_ingest(&ingest, Some("Microsoft Corporation"), Some("USD"), "test", true)
+            .await
+            .expect("persist av ingest");
+
+        let bars = store.load_daily_price_bars().await.expect("load bars");
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].close, 417.25);
+
+        let row = db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT metric_value, period, source_note
+                 FROM fundamentals
+                 WHERE metric_key = 'current_price'"
+                    .to_string(),
+            ))
+            .await
+            .expect("query")
+            .expect("row");
+        let price: f64 = row.try_get("", "metric_value").expect("price");
+        let period: String = row.try_get("", "period").expect("period");
+        let source_note: String = row.try_get("", "source_note").expect("source note");
+        assert_eq!(price, 417.25);
+        assert_eq!(period, "2026-06-11");
+        assert!(source_note.contains("latest daily close"));
     }
 
     #[tokio::test]
