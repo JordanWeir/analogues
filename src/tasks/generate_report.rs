@@ -1422,12 +1422,22 @@ fn historical_growth_json(observations: &[FundamentalObservationRow]) -> Value {
     let tracked_metrics = [
         "revenue_quarter",
         "revenue_ttm",
+        "revenue_per_share_quarter",
+        "revenue_per_share_ttm",
         "gross_margin",
         "operating_margin",
         "net_margin",
         "eps_quarter",
         "eps_ttm",
         "diluted_shares_quarter",
+        "price_quarter_open",
+        "price_quarter_high",
+        "price_quarter_low",
+        "price_quarter_close",
+        "pe_quarter_min",
+        "pe_quarter_max",
+        "price_to_revenue_quarter_min",
+        "price_to_revenue_quarter_max",
     ];
     let mut series = Map::new();
     for metric_key in tracked_metrics {
@@ -1466,7 +1476,7 @@ fn historical_growth_json(observations: &[FundamentalObservationRow]) -> Value {
         Value::Null
     } else {
         json!({
-            "summary": "Historical growth is sourced from the normalized SEC/Yahoo observation timeline. Derived margins and TTM rows are period-aligned before inclusion.",
+            "summary": "Historical growth and valuation bands are sourced from normalized fundamental observations, including Alpha Vantage derived TTM windows, quarter price HLOC, and P/E bands.",
             "series": series,
         })
     }

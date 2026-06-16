@@ -1,5 +1,6 @@
 pub mod alpha_vantage_fundamentals_provider;
 pub mod av_canonical_mapping;
+pub mod av_derived_time_series;
 pub mod av_fundamental_deriver;
 pub mod canonical_mapping;
 pub mod concept_catalog;
