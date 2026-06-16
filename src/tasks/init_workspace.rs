@@ -42,6 +42,13 @@ impl Task for InitWorkspace {
     }
 }
 
+fn lane_enabled(vars: &task::Vars, key: &str) -> bool {
+    vars.cli
+        .get(key)
+        .map(|value| !matches!(value.as_str(), "false" | "0" | "no" | "skip"))
+        .unwrap_or(true)
+}
+
 impl InitWorkspaceRequest {
     pub fn from_vars(vars: &task::Vars) -> Result<Self> {
         let ticker = vars
@@ -79,10 +86,8 @@ impl InitWorkspaceRequest {
                 |value| crate::services::canonical_mapping::ConceptMappingStrategy::from_var(value),
             )?;
 
-        let build_narrative_map = vars
-            .cli
-            .get("build_narrative_map")
-            .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes"));
+        let build_narrative_map = lane_enabled(vars, "build_narrative_map");
+        let build_financial_analysis = lane_enabled(vars, "build_financial_analysis");
 
         Ok(Self {
             ticker: normalize_ticker(ticker)?,
@@ -91,6 +96,7 @@ impl InitWorkspaceRequest {
             fetch_financials,
             mapping_strategy,
             build_narrative_map,
+            build_financial_analysis,
         })
     }
 }

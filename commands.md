@@ -22,7 +22,7 @@ op run --env-file .env -- [command]
 
 ## initWorkspace
 
-Initialize a stock research workspace, create `run.sqlite`, and run the init pipeline (ingest, and optionally catalog + narrative map).
+Initialize a stock research workspace, create `run.sqlite`, and run the init pipeline (ingest, and optionally catalog, narrative map, and financial analysis).
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
@@ -31,7 +31,8 @@ Initialize a stock research workspace, create `run.sqlite`, and run the init pip
 | `base_dir` | no | `reports/stock-narrative-research` | Parent directory for run folders. |
 | `fetch_financials` | no | `true` | Set to `false`, `0`, `no`, or `skip` to skip SEC/quote fetch. |
 | `mapping_strategy` | no | `candidate_scoring` | Canonical mapping strategy. Alias: `concept_mapping_strategy`. |
-| `build_narrative_map` | no | `false` | Set to `true`, `1`, or `yes` to run the narrative-map lane after catalog. Requires `fetch_financials` and a non-`none` mapping strategy. |
+| `build_narrative_map` | no | `true` | Set to `false`, `0`, `no`, or `skip` to skip the narrative-map lane. Requires `fetch_financials` and a non-`none` mapping strategy. |
+| `build_financial_analysis` | no | `true` | Set to `false`, `0`, `no`, or `skip` to skip crux identification and mechanics experiments. Implies `build_narrative_map` when enabled. Requires `fetch_financials` and a non-`none` mapping strategy. |
 
 **`mapping_strategy` values**
 
@@ -44,7 +45,7 @@ Initialize a stock research workspace, create `run.sqlite`, and run the init pip
 **Examples (ORCL)**
 
 ```sh
-# Full init with default mapping (candidate scoring)
+# Full init: ingest, catalog, narrative map, crux triage, and mechanics (defaults)
 cargo loco task initWorkspace ticker:ORCL
 
 # Init for a specific date
@@ -53,12 +54,14 @@ cargo loco task initWorkspace ticker:ORCL date:2026-06-12
 # Ingest only — no mapping or fundamentals
 cargo loco task initWorkspace ticker:ORCL mapping_strategy:none
 
-# LLM-reviewed mapping + narrative map
-cargo loco task initWorkspace ticker:ORCL mapping_strategy:llm_reviewed build_narrative_map:true
+# LLM-reviewed mapping with full default pipeline
+cargo loco task initWorkspace ticker:ORCL mapping_strategy:llm_reviewed
 
-# heuristic mapping + narrative map
-cargo loco task initWorkspace ticker:ORCL mapping_strategy:heuristic build_narrative_map:true
+# Catalog + ingest only (skip agent lanes)
+cargo loco task initWorkspace ticker:ORCL build_narrative_map:false build_financial_analysis:false
 
+# Narrative map only (skip financial model explorer)
+cargo loco task initWorkspace ticker:ORCL build_financial_analysis:false
 
 # Scaffold workspace without network fetch (useful for tests)
 cargo loco task initWorkspace ticker:ORCL fetch_financials:false

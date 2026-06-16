@@ -300,7 +300,12 @@ impl ClientToolHandler for RegistryClientHandler {
                 .iter()
                 .any(|tool| matches!(tool, SharedTool::CruxTriageSubmit))
         {
-            return crux_triage_submit::execute(arguments);
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "submit_crux_triage requires a workspace sqlite path to be configured",
+                )
+            })?;
+            return crux_triage_submit::execute(path, arguments).await;
         }
         if tool_name == ANALYSIS_DRAFT_TOOL_NAME
             && self

@@ -243,6 +243,8 @@ async fn fundamentals_summary(workspace: &WorkspaceHandle) -> Result<String> {
     }
 
     let freshness_sql = "SELECT
+            (SELECT MAX(fetched_at) FROM av_raw_facts) AS max_av_fetched_at,
+            (SELECT MAX(period_end) FROM av_raw_facts) AS max_av_period_end,
             (SELECT MAX(filed_at) FROM sec_raw_facts) AS max_sec_filed_at,
             (SELECT MAX(period_end) FROM sec_raw_facts) AS max_sec_period_end,
             (SELECT MAX(period_end) FROM fundamental_observations WHERE metric_key = 'revenue_quarter') AS max_revenue_quarter_end,
@@ -257,7 +259,9 @@ async fn fundamentals_summary(workspace: &WorkspaceHandle) -> Result<String> {
         .map_err(|err| Error::string(&format!("freshness query failed: {err}")))?
     {
         sections.push(format!(
-            "Filing freshness:\n- max_sec_filed_at: {}\n- max_sec_period_end: {}\n- max_revenue_quarter_end: {}\n- run_created_at: {}\n- financial_fetch_status: {}",
+            "Filing freshness:\n- max_av_fetched_at: {}\n- max_av_period_end: {}\n- max_sec_filed_at: {}\n- max_sec_period_end: {}\n- max_revenue_quarter_end: {}\n- run_created_at: {}\n- financial_fetch_status: {}",
+            row.try_get::<String>("", "max_av_fetched_at").unwrap_or_else(|_| "n/a".to_string()),
+            row.try_get::<String>("", "max_av_period_end").unwrap_or_else(|_| "n/a".to_string()),
             row.try_get::<String>("", "max_sec_filed_at").unwrap_or_else(|_| "n/a".to_string()),
             row.try_get::<String>("", "max_sec_period_end").unwrap_or_else(|_| "n/a".to_string()),
             row.try_get::<String>("", "max_revenue_quarter_end").unwrap_or_else(|_| "n/a".to_string()),

@@ -22,6 +22,7 @@ async fn test_can_run_generate_report() {
         fetch_financials: false,
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
         build_narrative_map: false,
+        build_financial_analysis: false,
     };
     let paths = initialize_workspace(&init_request).await.unwrap();
     let db = open_run_db_rw(&paths.sqlite_path).await;

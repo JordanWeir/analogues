@@ -25,6 +25,7 @@ const X_TITLE: &str = "analogues";
 pub const DEFAULT_MAX_AGENT_ROUNDS: usize = 16;
 pub const CONCEPT_REVIEW_MAX_AGENT_ROUNDS: usize = 20;
 pub const FINANCIAL_EXPLORER_MAX_AGENT_ROUNDS: usize = 24;
+pub const FINANCIAL_MECHANICS_MAX_AGENT_ROUNDS: usize = 36;
 pub const NARRATIVE_RESEARCH_MAX_AGENT_ROUNDS: usize = 28;
 
 /// Backoff delays before each retry after a transient OpenRouter failure.

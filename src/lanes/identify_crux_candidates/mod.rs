@@ -1,6 +1,6 @@
 #[cfg(test)]
-mod fixtures;
-mod gate;
+pub(crate) mod fixtures;
+pub mod gate;
 pub mod strategy;
 mod writes;
 

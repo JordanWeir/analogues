@@ -1,7 +1,7 @@
 /// Tables and metadata available when the narrative researcher runs (post catalog).
 pub fn workspace_schema_hint() -> &'static str {
     r#"Workspace SQLite state at this stage:
-- SEC raw facts, concept catalog, canonical mappings, and starter fundamentals are loaded.
+- Alpha Vantage raw facts drive canonical mappings, fundamental_observations, and fundamentals. SEC raw facts and concept catalog are optional niche inputs for company-specific metrics.
 - sources, claims, narrative_map, and narrative_map_items may already contain durable board state from prior runs — read the Existing narrative board section in your prompt before writing.
 - Never delete or wipe tables; append new evidence and update existing narrative sides/sections as needed.
 
@@ -9,9 +9,9 @@ Table tiers (use in this order):
 1. Context — stock_info(ticker, company_name, currency, sector, industry), run_metadata(ticker, created_at, financial_fetch_status, financial_fetch_error), data_gaps(gap_key, description, status)
 2. Fundamentals — fundamentals(metric_key, metric_value, period, source_note): headline TTM rows (may lag latest quarter)
 3. Observations — fundamental_observations(metric_key, period_end, period_type, filed_at, metric_value, ...): no `period` column (that is on `fundamentals` only). Income-statement flow metrics use period suffixes in metric_key (e.g. revenue_quarter, revenue_ytd, revenue_annual); default to *_quarter for time-series work. Sort by period_end DESC, not period.
-4. Filing freshness — sec_raw_facts(filed_at, period_end, concept_name, metric_value): check MAX(filed_at) and MAX(period_end) before trusting headline metrics
+4. Filing freshness — av_raw_facts(fetched_at, period_end, field_name, metric_value): check MAX(fetched_at) and MAX(period_end) before trusting headline metrics. sec_raw_facts is optional for niche SEC-only concepts.
 5. Narrative board — sources(id, title, url, source_type, published_at, ...), claims(id, claim, source_id, side, metric, notes, ...), narrative_map, narrative_map_items
-6. Catalog signal — concept_catalog_entries(concept_name, label, narrative_tags, latest_period_end, latest_filed_at, series_usability)
+6. Catalog signal — concept_catalog_entries(concept_name, label, narrative_tags, latest_period_end, latest_filed_at, series_usability) for SEC niche metrics only
 7. Avoid overwriting — canonical_metric_mappings and fundamental_observations are inputs, not outputs for this agent
 
 LIMIT rules:
@@ -31,12 +31,13 @@ Identify claims that a newer quarter supersedes; plan corrected replacements (us
 Phase 0.5 — Freshness check (workspace_sql, mandatory first round):
 SELECT ticker, created_at, financial_fetch_status, financial_fetch_error FROM run_metadata;
 SELECT gap_key, description, status FROM data_gaps WHERE status = 'open';
-SELECT MAX(filed_at) AS max_sec_filed_at, MAX(period_end) AS max_sec_period_end FROM sec_raw_facts;
+SELECT MAX(fetched_at) AS max_av_fetched_at, MAX(period_end) AS max_av_period_end FROM av_raw_facts;
 SELECT MAX(period_end) AS max_obs_period_end
   FROM fundamental_observations WHERE metric_key = 'revenue_quarter';
+SELECT MAX(filed_at) AS max_sec_filed_at, MAX(period_end) AS max_sec_period_end FROM sec_raw_facts;
 SELECT MAX(latest_period_end) AS max_catalog_period_end, MAX(latest_filed_at) AS max_catalog_filed_at
   FROM concept_catalog_entries;
-If max_sec_filed_at or max_obs_period_end lags the current catalyst (recent earnings, open ingestion gaps, or run_metadata created_at much later than max_sec_filed_at), you MUST web-search the latest official earnings release / 8-K and capture it before finalize. Log capture_research_gap when workspace ingestion still trails the market.
+If max_av_fetched_at or max_obs_period_end lags the current catalyst (recent earnings, open ingestion gaps, or run_metadata created_at much later than max_av_fetched_at), you MUST web-search the latest official earnings release / 8-K and capture it before finalize. Log capture_research_gap when workspace ingestion still trails the market.
 
 Phase 1 — Orient on latest persisted numbers (workspace_sql):
 SELECT ticker, company_name, currency, sector, industry FROM stock_info;
@@ -56,12 +57,12 @@ SELECT concept_name, label, metric_value, period_end, filed_at
   WHERE concept_name IN ('RevenueRemainingPerformanceObligation')
   ORDER BY period_end DESC, filed_at DESC
   LIMIT 4;
-Prefer observation and sec_raw_facts rows over stale fundamentals TTM when building claims for the latest quarter.
+Prefer observation and av_raw_facts rows over stale fundamentals TTM when building claims for the latest quarter.
 
 Phase 2 — Source discovery (web search, required when Phase 0.5 shows filing lag):
 Search for the latest-quarter official press release, 8-K/exhibit, earnings transcript, and credible bull/bear commentary.
 Call capture_sources for NEW sources (duplicate url/title returns existing id).
-When workspace SEC facts lag, capture at least one Official company source or Filing from the latest reported quarter before finalize.
+When workspace AV facts lag, capture at least one Official company source or Filing from the latest reported quarter before finalize.
 
 Phase 3 — Claims (capture_claims):
 Add claims for the current catalyst quarter. When replacing stale headline metrics, add corrected claims and note superseded claim ids in notes.
@@ -95,6 +96,7 @@ mod tests {
         assert!(hint.contains("Never delete"));
         assert!(hint.contains("period_end"));
         assert!(hint.contains("data_gaps"));
+        assert!(hint.contains("av_raw_facts"));
         assert!(hint.contains("sec_raw_facts"));
     }
 
@@ -103,6 +105,7 @@ mod tests {
         let path = narrative_research_golden_path();
         assert!(path.contains("Review existing board"));
         assert!(path.contains("Phase 0.5"));
+        assert!(path.contains("max_av_fetched_at"));
         assert!(path.contains("max_sec_filed_at"));
         assert!(path.contains("fundamental_observations"));
         assert!(path.contains("superseded"));

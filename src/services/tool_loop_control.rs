@@ -184,6 +184,50 @@ pub fn agent_step_budget_message(
     }
 }
 
+/// Mechanics experiment lane: finalize drafts on penultimate turn, submit on final turn.
+pub fn agent_mechanics_step_budget_message(
+    steps_used: usize,
+    max_rounds: usize,
+    steps_remaining: usize,
+) -> String {
+    match steps_remaining {
+        0 => format!(
+            "[Agent budget] Step {steps_used}/{max_rounds} complete. No steps remaining."
+        ),
+        1 => format!(
+            "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 1 (final turn). \
+             Call submit_mechanics_experiments now (include crux_key and per_worker true for fan-out workers). \
+             If submit failed validation, fix and resubmit."
+        ),
+        2 => format!(
+            "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: 2 (penultimate turn). \
+             Finalize every pending draft with finalize_analysis (promote, background, or rejected) before submitting. \
+             Reserve the last turn for submit_mechanics_experiments."
+        ),
+        _ => format!(
+            "[Agent budget] Step {steps_used}/{max_rounds} complete. Steps remaining: {steps_remaining}. \
+             After run_analysis_draft, always follow with finalize_analysis before starting another draft."
+        ),
+    }
+}
+
+/// Appends mechanics-specific step-budget messages (draft finalize before submit).
+pub fn apply_mechanics_step_budget_prepare(ctx: &PrepareStepContext<'_>) -> PrepareStepResult {
+    let steps_used = ctx.step_number;
+    if steps_used == 0 || steps_used >= ctx.max_steps {
+        return PrepareStepResult::default();
+    }
+
+    let steps_remaining = ctx.max_steps - steps_used;
+    let content = agent_mechanics_step_budget_message(steps_used, ctx.max_steps, steps_remaining);
+    let mut messages = ctx.messages.to_vec();
+    messages.push(Message::new(Role::User, content.as_str()));
+    PrepareStepResult {
+        messages: Some(messages),
+        ..Default::default()
+    }
+}
+
 pub fn merge_prepare_step_result(
     messages: &mut Vec<Message>,
     model: &mut String,

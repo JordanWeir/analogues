@@ -15,6 +15,7 @@ use std::sync::Arc;
 pub fn init_workspace_gates() -> Vec<Arc<dyn Gate>> {
     vec![
         Arc::new(WorkspaceExistsGate),
+        Arc::new(AvProvenanceGate),
         Arc::new(SecProvenanceGate),
         Arc::new(FetchFailuresRecordedGate),
     ]
@@ -48,6 +49,66 @@ impl Gate for WorkspaceExistsGate {
     }
 }
 
+struct AvProvenanceGate;
+
+#[async_trait]
+impl Gate for AvProvenanceGate {
+    fn name(&self) -> &'static str {
+        "av_provenance"
+    }
+
+    async fn check(&self, ctx: &LaneContext, result: &LaneResult) -> GateResult {
+        if result.status == crate::lanes::result::LaneStatus::Skipped {
+            return GateResult::pass(self.name());
+        }
+
+        let count = match scalar_i64(
+            ctx.workspace.connection(),
+            "SELECT COUNT(*) AS count FROM av_raw_facts",
+        )
+        .await
+        {
+            Ok(count) => count,
+            Err(err) => {
+                return GateResult::reject(
+                    self.name(),
+                    format!("failed to count av_raw_facts: {err}"),
+                )
+            }
+        };
+
+        if count == 0 {
+            if result.error_message.is_some() {
+                return GateResult::reject(
+                    self.name(),
+                    "no av_raw_facts persisted after Alpha Vantage fetch failure",
+                );
+            }
+            return GateResult::reject(self.name(), "no av_raw_facts ingested");
+        }
+
+        let incomplete = scalar_i64(
+            ctx.workspace.connection(),
+            "SELECT COUNT(*) AS count FROM av_raw_facts
+             WHERE endpoint IS NULL OR endpoint = ''
+                OR field_name IS NULL OR field_name = ''
+                OR period_end IS NULL OR period_end = ''
+                OR fetched_at IS NULL OR fetched_at = ''
+                OR raw_json IS NULL OR raw_json = ''",
+        )
+        .await;
+
+        match incomplete {
+            Ok(0) => GateResult::pass(self.name()),
+            Ok(missing) => GateResult::reject(
+                self.name(),
+                format!("{missing} av_raw_facts rows missing required provenance fields"),
+            ),
+            Err(err) => GateResult::reject(self.name(), format!("provenance check failed: {err}")),
+        }
+    }
+}
+
 struct SecProvenanceGate;
 
 #[async_trait]
@@ -67,44 +128,16 @@ impl Gate for SecProvenanceGate {
         )
         .await;
 
-        let count = match count {
-            Ok(count) => count,
-            Err(err) => {
-                return GateResult::reject(
-                    self.name(),
-                    format!("failed to count sec_raw_facts: {err}"),
-                )
-            }
-        };
-
-        if count == 0 {
-            if result.error_message.is_some() {
-                return GateResult::warn(
-                    self.name(),
-                    "no sec_raw_facts persisted after fetch failure",
-                );
-            }
-            return GateResult::warn(self.name(), "no sec_raw_facts ingested");
-        }
-
-        let incomplete = scalar_i64(
-            ctx.workspace.connection(),
-            "SELECT COUNT(*) AS count FROM sec_raw_facts
-             WHERE taxonomy IS NULL OR taxonomy = ''
-                OR concept_name IS NULL OR concept_name = ''
-                OR unit IS NULL OR unit = ''
-                OR fetched_at IS NULL OR fetched_at = ''
-                OR raw_json IS NULL OR raw_json = ''",
-        )
-        .await;
-
-        match incomplete {
-            Ok(0) => GateResult::pass(self.name()),
-            Ok(missing) => GateResult::reject(
+        match count {
+            Ok(0) => GateResult::warn(
                 self.name(),
-                format!("{missing} sec_raw_facts rows missing required provenance fields"),
+                "no sec_raw_facts ingested; niche SEC catalog unavailable",
             ),
-            Err(err) => GateResult::reject(self.name(), format!("provenance check failed: {err}")),
+            Ok(_) => GateResult::pass(self.name()),
+            Err(err) => GateResult::warn(
+                self.name(),
+                format!("failed to count sec_raw_facts: {err}"),
+            ),
         }
     }
 }
@@ -199,17 +232,31 @@ mod tests {
     use crate::{
         lanes::{context::LaneConfig, result::LaneWritesSummary},
         services::{
-            sec_facts_provider::extract_raw_facts_from_root,
             workspace_financial_store::{RawIngestPersist, WorkspaceFinancialStore},
             workspace_store::{execute_schema, WorkspaceStore},
         },
-        workspace::{seed_database, InitWorkspaceRequest, WorkspacePaths},
+        workspace::{seed_database, AvRawFact, InitWorkspaceRequest, WorkspacePaths},
     };
     use sea_orm::Database;
-    use serde_json::json;
     use std::path::PathBuf;
 
-    async fn gate_context_with_facts(facts: bool) -> LaneContext {
+    fn sample_av_facts() -> Vec<AvRawFact> {
+        vec![AvRawFact {
+            endpoint: "INCOME_STATEMENT".to_string(),
+            report_type: "annual".to_string(),
+            field_name: "totalRevenue".to_string(),
+            label: None,
+            period_end: "2025-12-31".to_string(),
+            period_type: "annual".to_string(),
+            unit: "USD".to_string(),
+            currency: Some("USD".to_string()),
+            value: 100.0,
+            raw_json: "{}".to_string(),
+            fetched_at: "2026-06-09T00:00:00Z".to_string(),
+        }]
+    }
+
+    async fn gate_context_with_av_facts() -> LaneContext {
         let path = std::env::temp_dir().join(format!(
             "analogues-init-gate-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -233,33 +280,24 @@ mod tests {
                 fetch_financials: false,
                 mapping_strategy: None,
                 build_narrative_map: false,
+                build_financial_analysis: false,
             },
             &paths,
         )
         .await
         .expect("seed");
 
-        if facts {
-            let facts_root = json!({
-                "us-gaap": {
-                    "Revenues": {
-                        "label": "Revenues",
-                        "units": { "USD": [{"form":"10-K","start":"2025-01-01","end":"2025-12-31","filed":"2026-02-15","val":100.0}]}
-                    }
-                }
-            });
-            let raw_facts = extract_raw_facts_from_root(&facts_root, "2026-06-09T00:00:00Z");
-            WorkspaceFinancialStore::new(&db)
-                .persist_raw_ingest(&RawIngestPersist {
-                    fetched_at: "2026-06-09T00:00:00Z",
-                    company_name: Some("Example Corp"),
-                    currency: Some("USD"),
-                    source_note: "test",
-                    raw_sec_facts: &raw_facts,
-                })
-                .await
-                .expect("persist");
-        }
+        WorkspaceFinancialStore::new(&db)
+            .persist_raw_ingest(&RawIngestPersist {
+                fetched_at: "2026-06-09T00:00:00Z",
+                company_name: Some("Example Corp"),
+                currency: Some("USD"),
+                source_note: "test",
+                raw_av_facts: &sample_av_facts(),
+                raw_sec_facts: &[],
+            })
+            .await
+            .expect("persist");
 
         db.close().await.expect("close");
         let workspace = WorkspaceStore.open_workspace(&path).await.expect("open");
@@ -268,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_exists_gate_passes_for_seeded_workspace() {
-        let ctx = gate_context_with_facts(false).await;
+        let ctx = gate_context_with_av_facts().await;
         let result = LaneResult::success("init_workspace", LaneWritesSummary::default());
         let gate = WorkspaceExistsGate;
         assert_eq!(
@@ -279,10 +317,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sec_provenance_gate_passes_when_facts_have_required_fields() {
-        let ctx = gate_context_with_facts(true).await;
+    async fn av_provenance_gate_passes_when_facts_have_required_fields() {
+        let ctx = gate_context_with_av_facts().await;
         let result = LaneResult::success("init_workspace", LaneWritesSummary::default());
-        let gate = SecProvenanceGate;
+        let gate = AvProvenanceGate;
         assert_eq!(
             gate.check(&ctx, &result).await.status,
             crate::lanes::gate::GateStatus::Pass
@@ -300,7 +338,8 @@ mod tests {
             fetch_financials: true,
             mapping_strategy: None,
             build_narrative_map: false,
+            build_financial_analysis: false,
         });
-        assert_eq!(Lane::gates(&lane).len(), 3);
+        assert_eq!(Lane::gates(&lane).len(), 4);
     }
 }

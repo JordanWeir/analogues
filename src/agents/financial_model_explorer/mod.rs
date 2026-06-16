@@ -1,6 +1,8 @@
 pub mod agent;
 pub mod config;
+pub mod explorer_context;
 pub mod golden_path;
+pub mod prepare_step;
 pub mod types;
 
 pub use agent::{

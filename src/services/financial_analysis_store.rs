@@ -33,6 +33,23 @@ pub struct AnalysisRunRecord {
     pub run_key: String,
     pub status: String,
     pub execution_status: String,
+    pub executed_sql: String,
+    pub period_basis: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnalysisDraftSummary {
+    pub run_key: String,
+    pub execution_status: String,
+    pub question: String,
+    pub crux_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MechanicsDraftScope<'a> {
+    CruxKey(&'a str),
+    ScoutGaps,
+    Workspace,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +74,32 @@ impl<'a> FinancialAnalysisStore<'a> {
         scalar_i64(
             self.db,
             "SELECT COUNT(*) AS count FROM analysis_experiments WHERE disposition = 'promoted'",
+        )
+        .await
+    }
+
+    pub async fn count_promoted_non_historical_experiments(&self) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            "SELECT COUNT(*) AS count FROM analysis_experiments
+             WHERE disposition = 'promoted'
+               AND purpose IN ('sensitivity', 'forward_projection', 'scenario_validation')",
+        )
+        .await
+    }
+
+    pub async fn count_supporting_metrics(&self) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            "SELECT COUNT(*) AS count FROM supporting_metric_selections",
+        )
+        .await
+    }
+
+    pub async fn count_narrative_cruxes(&self) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            "SELECT COUNT(*) AS count FROM narrative_map_items WHERE item_type = 'crux'",
         )
         .await
     }
@@ -350,11 +393,88 @@ impl<'a> FinancialAnalysisStore<'a> {
         Ok(())
     }
 
+    pub async fn load_draft_runs(&self, scope: MechanicsDraftScope<'_>) -> Result<Vec<AnalysisDraftSummary>> {
+        let sql = match scope {
+            MechanicsDraftScope::CruxKey(crux_key) => format!(
+                "SELECT ar.run_key, ar.execution_status, ar.question, cc.crux_key
+                 FROM analysis_runs ar
+                 INNER JOIN crux_candidates cc ON ar.crux_id = cc.id
+                 WHERE ar.status = 'draft' AND cc.crux_key = {}
+                 ORDER BY ar.id",
+                sql_str(crux_key)
+            ),
+            MechanicsDraftScope::ScoutGaps => {
+                "SELECT ar.run_key, ar.execution_status, ar.question, cc.crux_key
+                 FROM analysis_runs ar
+                 LEFT JOIN crux_candidates cc ON ar.crux_id = cc.id
+                 WHERE ar.status = 'draft'
+                   AND (
+                     ar.crux_id IS NULL
+                     OR ar.crux_id IN (
+                       SELECT cc2.id FROM crux_candidates cc2
+                       WHERE cc2.disposition = 'promoted' AND cc2.status = 'active'
+                         AND cc2.id NOT IN (
+                           SELECT DISTINCT crux_id FROM analysis_experiments
+                           WHERE disposition = 'promoted' AND crux_id IS NOT NULL
+                         )
+                     )
+                   )
+                 ORDER BY ar.id"
+                    .to_string()
+            }
+            MechanicsDraftScope::Workspace => {
+                "SELECT ar.run_key, ar.execution_status, ar.question, cc.crux_key
+                 FROM analysis_runs ar
+                 LEFT JOIN crux_candidates cc ON ar.crux_id = cc.id
+                 WHERE ar.status = 'draft'
+                 ORDER BY ar.id"
+                    .to_string()
+            }
+        };
+
+        let rows = query_all(self.db, &sql).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(AnalysisDraftSummary {
+                    run_key: row_string(&row, 0)?,
+                    execution_status: row_string(&row, 1)?,
+                    question: row_string(&row, 2)?,
+                    crux_key: row.try_get_by_index::<Option<String>>(3).ok().flatten(),
+                })
+            })
+            .collect()
+    }
+
+    /// Auto-discard failed SQL drafts in scope before submit validation.
+    pub async fn discard_error_draft_runs(&self, scope: MechanicsDraftScope<'_>) -> Result<u32> {
+        let drafts = self.load_draft_runs(scope).await?;
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let mut discarded = 0u32;
+        for draft in drafts {
+            if draft.execution_status == "error" {
+                self.discard_analysis_run(&draft.run_key, &created_at).await?;
+                discarded += 1;
+            }
+        }
+        Ok(discarded)
+    }
+
+    pub async fn load_blocking_draft_runs(
+        &self,
+        scope: MechanicsDraftScope<'_>,
+    ) -> Result<Vec<AnalysisDraftSummary>> {
+        let drafts = self.load_draft_runs(scope).await?;
+        Ok(drafts
+            .into_iter()
+            .filter(|draft| draft.execution_status != "error")
+            .collect())
+    }
+
     pub async fn load_analysis_run(&self, run_key: &str) -> Result<Option<AnalysisRunRecord>> {
         let rows = query_all(
             self.db,
             &format!(
-                "SELECT run_key, status, execution_status
+                "SELECT run_key, status, execution_status, executed_sql, period_basis
                  FROM analysis_runs WHERE run_key = {} LIMIT 1",
                 sql_value(Some(run_key))
             ),
@@ -367,6 +487,8 @@ impl<'a> FinancialAnalysisStore<'a> {
             run_key: row_string(&rows[0], 0)?,
             status: row_string(&rows[0], 1)?,
             execution_status: row_string(&rows[0], 2)?,
+            executed_sql: row_string(&rows[0], 3)?,
+            period_basis: row_string(&rows[0], 4)?,
         }))
     }
 

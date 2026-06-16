@@ -6,7 +6,7 @@ use crate::{
         workspace_store::execute_schema,
     },
     workspace::{
-        CanonicalMapping, ConceptCatalogEntry, DailyPriceBar, FundamentalObservation,
+        AvRawFact, CanonicalMapping, ConceptCatalogEntry, DailyPriceBar, FundamentalObservation,
         MarketQuoteSnapshot, SecRawFact,
     },
 };
@@ -34,12 +34,13 @@ pub struct FundamentalInsert<'a> {
     pub source_note: Option<String>,
 }
 
-/// Phase 1 persistence: raw SEC facts and stock metadata only.
+/// Phase 1 persistence: raw AV/SEC facts and stock metadata only.
 pub struct RawIngestPersist<'a> {
     pub fetched_at: &'a str,
     pub company_name: Option<&'a str>,
     pub currency: Option<&'a str>,
     pub source_note: &'a str,
+    pub raw_av_facts: &'a [AvRawFact],
     pub raw_sec_facts: &'a [SecRawFact],
 }
 
@@ -184,73 +185,43 @@ impl<'a> WorkspaceFinancialStore<'a> {
         )
         .await?;
 
+        Self::insert_raw_av_facts(db, input.raw_av_facts).await?;
         Self::insert_raw_sec_facts(db, input.raw_sec_facts).await?;
         Ok(())
     }
 
-    pub async fn persist_catalog_entries(
+    /// Phase-1 Alpha Vantage raw time-series persistence.
+    pub async fn persist_av_raw_ingest(
         &self,
-        entries: &[ConceptCatalogEntry],
-        updated_at: &str,
-    ) -> Result<()> {
-        Self::insert_concept_catalog_entries(self.db, entries, updated_at).await
-    }
-
-    /// Phase-1 market quote persistence: observations and headline current price.
-    pub async fn persist_market_snapshot(&self, market: &MarketQuoteSnapshot) -> Result<()> {
-        let fetched_at = market.fetched_at.as_str();
-        if !market.observations.is_empty() {
-            Self::insert_observations(self.db, &market.observations, fetched_at).await?;
-        }
-        if let Some(price) = market.headlines.current_price {
-            Self::insert_fundamental(
-                self.db,
-                &FundamentalInsert {
-                    key: "current_price",
-                    label: "Current price",
-                    value: Some(price),
-                    text: None,
-                    unit: market.currency.as_deref(),
-                    period: None,
-                    source_note: Some("Yahoo chart endpoint".to_string()),
-                },
-                fetched_at,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// Phase-1 Alpha Vantage fundamentals persistence (upsert without clearing SEC layers).
-    pub async fn persist_alpha_vantage_snapshot(
-        &self,
-        snapshot: &crate::services::alpha_vantage_fundamentals_provider::AlphaVantageFundamentalsSnapshot,
+        ingest: &crate::services::alpha_vantage_fundamentals_provider::AlphaVantageIngestResult,
+        company_name: Option<&str>,
+        currency: Option<&str>,
+        source_note: &str,
         include_implied_price: bool,
     ) -> Result<()> {
-        use crate::services::alpha_vantage_fundamentals_provider::{
-            alpha_vantage_financial_run, ALPHA_VANTAGE_SOURCE,
-        };
+        use crate::services::alpha_vantage_fundamentals_provider::ALPHA_VANTAGE_SOURCE;
 
-        let fetched_at = snapshot.fetched_at.as_str();
-        if !snapshot.derived.observations.is_empty() {
-            Self::insert_observations(self.db, &snapshot.derived.observations, fetched_at).await?;
-        }
-        for flag in &snapshot.derived.quality_flags {
-            Self::insert_data_quality_flag(self.db, flag, fetched_at).await?;
-        }
-        let run = alpha_vantage_financial_run(snapshot);
-        for metric in run.fundamental_metrics() {
-            if metric.key == "current_price" {
-                continue;
-            }
-            Self::insert_fundamental(self.db, &metric, fetched_at).await?;
-        }
+        let fetched_at = ingest.fetched_at.as_str();
+        execute_sql(
+            self.db,
+            &format!(
+                "UPDATE stock_info
+                 SET company_name = {}, currency = {}, source_note = {}, updated_at = '{}'
+                 WHERE id = 1",
+                sql_value(company_name),
+                sql_value(currency),
+                sql_value(Some(source_note)),
+                sql_quote(fetched_at),
+            ),
+        )
+        .await?;
+        Self::insert_raw_av_facts(self.db, &ingest.raw_facts).await?;
         if include_implied_price {
-            let current_price = snapshot
+            let current_price = ingest
                 .latest_daily_close()
-                .or(snapshot.market_headlines.current_price);
+                .or(ingest.market_headlines.current_price);
             if let Some(price) = current_price {
-                let source_note = if snapshot.latest_daily_close().is_some() {
+                let source_note = if ingest.latest_daily_close().is_some() {
                     format!("{ALPHA_VANTAGE_SOURCE} latest daily close")
                 } else {
                     format!("{ALPHA_VANTAGE_SOURCE} implied from market cap and shares")
@@ -262,8 +233,8 @@ impl<'a> WorkspaceFinancialStore<'a> {
                         label: "Current price",
                         value: Some(price),
                         text: None,
-                        unit: snapshot.currency.as_deref(),
-                        period: snapshot
+                        unit: currency,
+                        period: ingest
                             .daily_prices
                             .last()
                             .map(|bar| bar.trade_date.clone()),
@@ -274,10 +245,10 @@ impl<'a> WorkspaceFinancialStore<'a> {
                 .await?;
             }
         }
-        if !snapshot.daily_prices.is_empty() {
+        if !ingest.daily_prices.is_empty() {
             Self::insert_daily_price_bars(
                 self.db,
-                &snapshot.daily_prices,
+                &ingest.daily_prices,
                 ALPHA_VANTAGE_SOURCE,
                 fetched_at,
             )
@@ -332,40 +303,37 @@ impl<'a> WorkspaceFinancialStore<'a> {
         Ok(())
     }
 
-    pub async fn load_alpha_vantage_starter(
+    pub async fn persist_catalog_entries(
         &self,
-    ) -> Result<crate::workspace::StarterFundamentals> {
-        let rows = query_all(
-            self.db,
-            "SELECT metric_key, metric_value, period
-             FROM fundamentals
-             WHERE source_note LIKE '%Alpha Vantage%'",
-        )
-        .await?;
-        let mut starter = crate::workspace::StarterFundamentals::default();
-        for row in rows {
-            let key = row_string(&row, "metric_key")?;
-            let value = row_opt_f64(&row, "metric_value")?;
-            let period = row_opt_string(&row, "period")?;
-            if period.is_some() && starter.fundamental_period_end.is_none() {
-                starter.fundamental_period_end = period;
-            }
-            match key.as_str() {
-                "shares_outstanding" => starter.shares_outstanding = value,
-                "revenue_ttm" => starter.revenue_ttm = value,
-                "net_income_ttm" => starter.net_income_ttm = value,
-                "gross_profit_ttm" => starter.gross_profit_ttm = value,
-                "operating_income_ttm" => starter.operating_income_ttm = value,
-                "gross_margin" => starter.gross_margin = value,
-                "operating_margin" => starter.operating_margin = value,
-                "net_margin" => starter.net_margin = value,
-                "eps_ttm" => starter.eps_ttm = value,
-                "cash" => starter.cash = value,
-                "total_debt" => starter.total_debt = value,
-                _ => {}
-            }
+        entries: &[ConceptCatalogEntry],
+        updated_at: &str,
+    ) -> Result<()> {
+        Self::insert_concept_catalog_entries(self.db, entries, updated_at).await
+    }
+
+    /// Phase-1 market quote persistence: observations and headline current price.
+    pub async fn persist_market_snapshot(&self, market: &MarketQuoteSnapshot) -> Result<()> {
+        let fetched_at = market.fetched_at.as_str();
+        if !market.observations.is_empty() {
+            Self::insert_observations(self.db, &market.observations, fetched_at).await?;
         }
-        Ok(starter)
+        if let Some(price) = market.headlines.current_price {
+            Self::insert_fundamental(
+                self.db,
+                &FundamentalInsert {
+                    key: "current_price",
+                    label: "Current price",
+                    value: Some(price),
+                    text: None,
+                    unit: market.currency.as_deref(),
+                    period: None,
+                    source_note: Some("Yahoo chart endpoint".to_string()),
+                },
+                fetched_at,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn persist_ingestion(&self, input: &IngestPersist<'_>) -> Result<()> {
@@ -546,6 +514,18 @@ impl<'a> WorkspaceFinancialStore<'a> {
         Ok(())
     }
 
+    pub async fn load_av_raw_facts(&self) -> Result<Vec<AvRawFact>> {
+        let rows = query_all(
+            self.db,
+            "SELECT endpoint, report_type, field_name, label, period_end, period_type, unit,
+                    currency, metric_value, raw_json, fetched_at
+             FROM av_raw_facts
+             ORDER BY id",
+        )
+        .await?;
+        rows.into_iter().map(row_to_av_raw_fact).collect()
+    }
+
     pub async fn load_sec_raw_facts(&self) -> Result<Vec<SecRawFact>> {
         let rows = query_all(
             self.db,
@@ -612,6 +592,32 @@ impl<'a> WorkspaceFinancialStore<'a> {
         rows.into_iter()
             .map(row_to_fundamental_observation)
             .collect()
+    }
+
+    pub async fn insert_raw_av_facts(
+        db: &impl ConnectionTrait,
+        facts: &[AvRawFact],
+    ) -> Result<()> {
+        for chunk in facts.chunks(BULK_INSERT_CHUNK_SIZE) {
+            let values = chunk
+                .iter()
+                .map(av_raw_fact_values)
+                .collect::<Vec<_>>()
+                .join(",\n");
+            execute_sql(
+                db,
+                &format!(
+                    "INSERT INTO av_raw_facts (
+                        endpoint, report_type, field_name, label, period_end, period_type, unit,
+                        currency, metric_value, raw_json, fetched_at
+                    ) VALUES
+                    {values}"
+                ),
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 
     pub async fn insert_raw_sec_facts(
@@ -976,6 +982,39 @@ fn row_opt_f64(row: &QueryResult, column: &str) -> Result<Option<f64>> {
         .map_err(|err| Error::string(&format!("missing column {column}: {err}")))
 }
 
+fn av_raw_fact_values(fact: &AvRawFact) -> String {
+    format!(
+        "('{}', '{}', '{}', {}, '{}', '{}', '{}', {}, {}, '{}', '{}')",
+        sql_quote(&fact.endpoint),
+        sql_quote(&fact.report_type),
+        sql_quote(&fact.field_name),
+        sql_value(fact.label.as_deref()),
+        sql_quote(&fact.period_end),
+        sql_quote(&fact.period_type),
+        sql_quote(&fact.unit),
+        sql_value(fact.currency.as_deref()),
+        fact.value,
+        sql_quote(&fact.raw_json),
+        sql_quote(&fact.fetched_at),
+    )
+}
+
+fn row_to_av_raw_fact(row: QueryResult) -> Result<AvRawFact> {
+    Ok(AvRawFact {
+        endpoint: row_string(&row, "endpoint")?,
+        report_type: row_string(&row, "report_type")?,
+        field_name: row_string(&row, "field_name")?,
+        label: row_opt_string(&row, "label")?,
+        period_end: row_string(&row, "period_end")?,
+        period_type: row_string(&row, "period_type")?,
+        unit: row_string(&row, "unit")?,
+        currency: row_opt_string(&row, "currency")?,
+        value: row_f64(&row, "metric_value")?,
+        raw_json: row_string(&row, "raw_json")?,
+        fetched_at: row_string(&row, "fetched_at")?,
+    })
+}
+
 fn raw_sec_fact_values(fact: &SecRawFact) -> String {
     format!(
         "('{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', '{}')",
@@ -1145,6 +1184,7 @@ mod tests {
                     crate::services::canonical_mapping::ConceptMappingStrategy::CandidateScoring,
                 ),
                 build_narrative_map: false,
+                build_financial_analysis: false,
             },
             &WorkspacePaths {
                 run_slug: "MSFT-2026-06-07-1".to_string(),
@@ -1159,20 +1199,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_alpha_vantage_snapshot_writes_daily_price_bars() {
+    async fn persist_av_raw_ingest_writes_daily_price_bars() {
         use crate::services::alpha_vantage_fundamentals_provider::{
-            AlphaVantageFundamentalsSnapshot, ALPHA_VANTAGE_SOURCE,
+            AlphaVantageIngestResult, ALPHA_VANTAGE_SOURCE,
         };
-        use crate::workspace::{DailyPriceBar, DerivedFundamentals, MarketHeadlines};
+        use crate::workspace::{DailyPriceBar, MarketHeadlines};
 
         let db = test_db().await;
         let store = WorkspaceFinancialStore::new(&db);
-        let snapshot = AlphaVantageFundamentalsSnapshot {
+        let ingest = AlphaVantageIngestResult {
             ticker: "MSFT".to_string(),
             fetched_at: "2026-06-11T00:00:00Z".to_string(),
             company_name: Some("Microsoft Corporation".to_string()),
             currency: Some("USD".to_string()),
-            derived: DerivedFundamentals::default(),
+            raw_facts: Vec::new(),
             market_headlines: MarketHeadlines {
                 current_price: Some(417.25),
                 ..MarketHeadlines::default()
@@ -1191,9 +1231,9 @@ mod tests {
         };
 
         store
-            .persist_alpha_vantage_snapshot(&snapshot, true)
+            .persist_av_raw_ingest(&ingest, Some("Microsoft Corporation"), Some("USD"), "test", true)
             .await
-            .expect("persist alpha vantage");
+            .expect("persist av ingest");
 
         let bars = store.load_daily_price_bars().await.expect("load bars");
         assert_eq!(bars.len(), 1);
