@@ -6,6 +6,7 @@ pub mod concept_catalog;
 pub mod concept_review;
 pub mod financial_analysis_store;
 pub mod financial_run;
+pub mod mechanics_review;
 pub mod fundamental_deriver;
 pub(crate) mod http_json;
 pub mod market_quote_provider;
