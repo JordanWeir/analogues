@@ -17,6 +17,7 @@ pub fn scenario_generation_gates() -> Vec<Arc<dyn Gate>> {
     vec![
         Arc::new(ScenariosPresentGate),
         Arc::new(ScenarioStanceCoverageGate),
+        Arc::new(ScenarioProjectionCalendarGate),
         Arc::new(ScenarioPeriodsPresentGate),
         Arc::new(QuarterlyCadenceGate),
         Arc::new(MonteCarloPersistedGate),
@@ -80,6 +81,66 @@ impl Gate for ScenarioStanceCoverageGate {
         }
         GateResult::pass(self.name())
     }
+}
+
+struct ScenarioProjectionCalendarGate;
+
+#[async_trait]
+impl Gate for ScenarioProjectionCalendarGate {
+    fn name(&self) -> &'static str {
+        "scenario_projection_calendar_present"
+    }
+
+    async fn check(&self, ctx: &LaneContext, result: &LaneResult) -> GateResult {
+        if result.status == LaneStatus::Skipped {
+            return GateResult::pass(self.name());
+        }
+        let store = ScenarioStore::new(ctx.workspace.connection());
+        if !store.has_projection_calendar().await.unwrap_or(false) {
+            return GateResult::reject(
+                self.name(),
+                "scenario_projection_config not persisted from blueprint",
+            );
+        }
+        let calendar = store
+            .load_projection_calendar()
+            .await
+            .ok()
+            .flatten();
+        let Some(calendar) = calendar else {
+            return GateResult::reject(self.name(), "scenario_projection_periods empty");
+        };
+        if calendar.periods.is_empty() {
+            return GateResult::reject(self.name(), "scenario_projection_periods empty");
+        }
+        let terminal = scalar_i64(
+            ctx.workspace.connection(),
+            &format!(
+                "SELECT COUNT(*) AS count FROM (
+                    SELECT MAX(period_end) AS terminal_end
+                    FROM scenario_periods
+                    GROUP BY scenario_id
+                 ) WHERE terminal_end != {}",
+                sql_quote(&calendar.terminal_period_end),
+            ),
+        )
+        .await
+        .unwrap_or(0);
+        if terminal > 0 {
+            return GateResult::reject(
+                self.name(),
+                format!(
+                    "{terminal} scenario(s) have a terminal period_end other than {}",
+                    calendar.terminal_period_end
+                ),
+            );
+        }
+        GateResult::pass(self.name())
+    }
+}
+
+fn sql_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 struct ScenarioPeriodsPresentGate;

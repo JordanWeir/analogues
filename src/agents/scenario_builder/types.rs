@@ -30,8 +30,23 @@ impl ScenarioBuilderMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenarioProjectionCalendarSpec {
+    pub forward_quarters: usize,
+    #[serde(default)]
+    pub historical_quarters: Option<usize>,
+}
+
+impl ScenarioProjectionCalendarSpec {
+    pub fn historical_quarters(&self) -> usize {
+        self.historical_quarters
+            .unwrap_or(HISTORICAL_QUARTERS_TARGET)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioBlueprintOutput {
     pub scenarios: Vec<ScenarioBlueprint>,
+    pub projection_calendar: ScenarioProjectionCalendarSpec,
     #[serde(default)]
     pub projection_notes: Vec<String>,
 }

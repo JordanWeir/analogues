@@ -15,7 +15,8 @@ pub fn openrouter_tool() -> Tool {
         .description(
             "Submit 4–6 company-specific scenario blueprints after workspace exploration. \
              Probabilities should sum to ~1.0. Include bullish, neutral, and bearish stances. \
-             Link crux_keys and experiment_keys; detail workers write quarterly periods.",
+             Link crux_keys and experiment_keys. Include projection_calendar.forward_quarters (12–20); \
+             the system aligns historical/terminal period_end dates from AV before detail workers run.",
         )
         .parameters(json!({
             "type": "object",
@@ -37,12 +38,26 @@ pub fn openrouter_tool() -> Tool {
                         "required": ["scenario_key", "name", "stance", "probability", "description"]
                     }
                 },
+                "projection_calendar": {
+                    "type": "object",
+                    "properties": {
+                        "forward_quarters": {
+                            "type": "integer",
+                            "description": "Forward quarterly periods to project (12–20). Historical anchor comes from AV."
+                        },
+                        "historical_quarters": {
+                            "type": "integer",
+                            "description": "Optional trailing historical quarters to anchor (default 4)."
+                        }
+                    },
+                    "required": ["forward_quarters"]
+                },
                 "projection_notes": {
                     "type": "array",
                     "items": { "type": "string" }
                 }
             },
-            "required": ["scenarios"]
+            "required": ["scenarios", "projection_calendar"]
         }))
         .build()
         .expect("submit_scenario_blueprint tool definition should be valid")

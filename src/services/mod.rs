@@ -15,6 +15,7 @@ pub mod narrative_research_store;
 pub mod tool_loop_control;
 pub(crate) mod openrouter_chat;
 pub mod scenario_projection;
+pub mod scenario_projection_calendar;
 pub mod scenario_store;
 pub mod report_artifacts;
 pub mod quality_gate_store;

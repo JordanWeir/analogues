@@ -104,6 +104,7 @@ impl Lane for ScenarioGenerationLane {
                 with_periods,
                 "scenario_generation resuming existing blueprint"
             );
+            store.ensure_projection_calendar().await?;
         }
 
         let scenarios_needing_detail = store.load_scenarios_needing_detail().await?;
@@ -289,7 +290,8 @@ fn detail_prompt_prefix(scenario_key: &str, name: &str, description: &str) -> St
     format!(
         "FOCUS: Build quarterly projection detail for scenario `{scenario_key}` only.\n\
          Name: {name}\nDescription: {description}\n\n\
-         Anchor ~4 historical quarters on av_raw_facts; project 12–20 forward quarters. \
+         Use the Projection calendar from workspace context for every period_order and period_end. \
+         Submit exactly one row per calendar period with matching period_end dates. \
          Finish with submit_scenario_detail, per_worker true.\n\n"
     )
 }

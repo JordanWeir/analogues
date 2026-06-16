@@ -18,6 +18,7 @@ use crate::{
     },
     services::{
         model_client::extract_json_blob,
+        scenario_projection_calendar::validate_projection_calendar_spec,
         scenario_store::ScenarioStore,
     },
 };
@@ -27,7 +28,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 pub const SCENARIO_BLUEPRINT_PREAMBLE: &str = "You are the Scenario Builder in blueprint mode. Design 4–6 company-specific conditional scenarios from the narrative map, promoted cruxes, and financial experiments. Use AlphaVantage quarterly data (av_raw_facts) as the primary time-series source for understanding recent trajectory; use SEC and experiments for crux bridges only. Use workspace_sql and web_search when claims contradict AV or SEC. Finish with submit_scenario_blueprint — do not end with plain prose. Fix validation errors and resubmit.";
 
-pub const SCENARIO_DETAIL_PREAMBLE: &str = "You are the Scenario Builder in detail mode. Build quarterly projection paths for ONE assigned scenario. Anchor ~4 historical quarters on AlphaVantage actuals (av_raw_facts, report_type='quarterly'). Project 12–20 forward quarters on a quarterly cadence. Use analysis_experiments and claims to shape forward assumptions; interpolate where needed. Set valuation bands on the terminal forward quarter only. Reuse existing sources.id values when citing crux assumptions — do not invent source ids. Use workspace_sql and web_search for contradictions. Finish with submit_scenario_detail and per_worker true.";
+pub const SCENARIO_DETAIL_PREAMBLE: &str = "You are the Scenario Builder in detail mode. Build quarterly projection paths for ONE assigned scenario on the shared projection calendar from workspace context. Use the exact period_order and period_end values from that calendar for every row. Anchor historical quarters on AlphaVantage actuals (av_raw_facts, report_type='quarterly') matching those period_end dates. Use analysis_experiments and claims to shape forward assumptions; interpolate where needed. Set valuation bands on the terminal calendar period only. Reuse existing sources.id values when citing crux assumptions — do not invent source ids. Use workspace_sql and web_search for contradictions. Finish with submit_scenario_detail and per_worker true.";
 
 #[derive(Debug, Clone)]
 pub struct ScenarioBuilderAgent {
@@ -112,6 +113,8 @@ impl ScenarioBuilderAgent {
     }
 
     pub fn validate_blueprint_output(output: &ScenarioBlueprintOutput) -> Result<()> {
+        validate_projection_calendar_spec(&output.projection_calendar)?;
+
         let count = output.scenarios.len();
         if count < SCENARIO_BLUEPRINT_MIN || count > SCENARIO_BLUEPRINT_MAX {
             return Err(Error::string(&format!(
@@ -284,6 +287,7 @@ impl ScenarioBuilderAgent {
                 experiment_summary: String::new(),
                 av_coverage_summary: String::new(),
                 blueprint_summary: String::new(),
+                projection_calendar_summary: String::new(),
                 sources_summary: String::new(),
             });
         let context_section = format_scenario_context_section(&workspace_context);
@@ -323,7 +327,7 @@ Submit shape:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::scenario_builder::types::ScenarioBlueprint;
+    use crate::agents::scenario_builder::types::{ScenarioBlueprint, ScenarioProjectionCalendarSpec};
 
     #[test]
     fn validates_blueprint_stance_coverage() {
@@ -334,6 +338,10 @@ mod tests {
                 blueprint("bear", "bearish", 0.25),
                 blueprint("mixed", "mixed", 0.0),
             ],
+            projection_calendar: ScenarioProjectionCalendarSpec {
+                forward_quarters: 12,
+                historical_quarters: None,
+            },
             projection_notes: vec![],
         };
         ScenarioBuilderAgent::validate_blueprint_output(&output).expect("valid");

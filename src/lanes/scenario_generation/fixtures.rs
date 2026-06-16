@@ -10,8 +10,39 @@ pub async fn persist_fixture_scenarios(ctx: &mut LaneContext) -> Result<()> {
         "DELETE FROM scenario_crux_assumptions",
         "DELETE FROM scenario_periods",
         "DELETE FROM scenario_assumptions",
+        "DELETE FROM scenario_projection_periods",
+        "DELETE FROM scenario_projection_config",
     ] {
         execute_sql(db, sql).await?;
+    }
+
+    let mut calendar_periods: Vec<(i64, String)> = Vec::new();
+    for period_order in 1..=16_i64 {
+        let month = ((period_order - 1) % 12) + 1;
+        let year = 2024 + (period_order - 1) / 12;
+        calendar_periods.push((period_order, format!("{year}-{month:02}-28")));
+    }
+    let historical_anchor_end = calendar_periods[3].1.clone();
+    let terminal_period_end = calendar_periods[15].1.clone();
+    execute_sql(
+        db,
+        &format!(
+            "INSERT INTO scenario_projection_config (
+                id, historical_quarters, forward_quarters, historical_anchor_end, terminal_period_end
+             ) VALUES (1, 4, 12, '{historical_anchor_end}', '{terminal_period_end}')"
+        ),
+    )
+    .await?;
+    for (period_order, period_end) in &calendar_periods {
+        execute_sql(
+            db,
+            &format!(
+                "INSERT INTO scenario_projection_periods (period_order, period_end, is_historical)
+                 VALUES ({period_order}, '{period_end}', {})",
+                if *period_order <= 4 { 1 } else { 0 }
+            ),
+        )
+        .await?;
     }
 
     for (order, key, stance, prob) in [
@@ -35,10 +66,8 @@ pub async fn persist_fixture_scenarios(ctx: &mut LaneContext) -> Result<()> {
     }
 
     for scenario_id in 1..=4 {
-        for period_order in 1..=16 {
-            let is_terminal = period_order == 16;
-            let month = ((period_order - 1) % 12) + 1;
-            let year = 2024 + (period_order - 1) / 12;
+        for (period_order, period_end) in &calendar_periods {
+            let is_terminal = *period_order == 16;
             let ps_vals = if is_terminal {
                 "8.0, 9.0, 10.0, 30.0, 35.0, 40.0"
             } else {
@@ -54,7 +83,7 @@ pub async fn persist_fixture_scenarios(ctx: &mut LaneContext) -> Result<()> {
                         blend_ps_weight, blend_pe_weight
                      ) VALUES (
                         {scenario_id}, {period_order}, 'Q{period_order}',
-                        '{year}-{month:02}-28', 'quarter',
+                        '{period_end}', 'quarter',
                         0.02, 100000000.0, 0.20,
                         {ps_vals}, 0.5, 0.5
                      )"

@@ -17,9 +17,9 @@ pub fn openrouter_tool() -> Tool {
     Tool::builder()
         .name(TOOL_NAME)
         .description(
-            "Submit quarterly projection detail for one scenario. Anchor historical quarters on \
-             AlphaVantage av_raw_facts; project 12–20 forward quarters. Terminal period needs \
-             ps_median. Fan-out workers set per_worker true.",
+            "Submit quarterly projection detail for one scenario. Use the shared projection \
+             calendar period_order and period_end values exactly. Terminal period needs ps_median. \
+             Fan-out workers set per_worker true.",
         )
         .parameters(json!({
             "type": "object",

@@ -1,6 +1,12 @@
 use crate::{
     agents::scenario_builder::types::{ScenarioBlueprintOutput, ScenarioDetailOutput},
-    services::workspace_sql::{execute_sql, scalar_i64, sql_i64, sql_literal, sql_number, sql_value},
+    services::{
+        scenario_projection_calendar::{
+            build_from_av, has_calendar, load_calendar, persist_calendar,
+            validate_detail_periods, ScenarioProjectionCalendar,
+        },
+        workspace_sql::{execute_sql, scalar_i64, sql_i64, sql_literal, sql_number, sql_value},
+    },
 };
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
@@ -22,6 +28,8 @@ impl<'a> ScenarioStore<'a> {
             "DELETE FROM scenario_crux_assumptions",
             "DELETE FROM scenario_periods",
             "DELETE FROM scenario_assumptions",
+            "DELETE FROM scenario_projection_periods",
+            "DELETE FROM scenario_projection_config",
             "DELETE FROM monte_carlo_histogram_bins",
             "DELETE FROM monte_carlo_scenario_probabilities",
             "DELETE FROM monte_carlo_summary",
@@ -69,7 +77,35 @@ impl<'a> ScenarioStore<'a> {
             )
             .await?;
         }
-        Ok(())
+
+        let calendar = build_from_av(self.db, &output.projection_calendar).await?;
+        persist_calendar(self.db, &calendar).await
+    }
+
+    pub async fn has_projection_calendar(&self) -> Result<bool> {
+        has_calendar(self.db).await
+    }
+
+    pub async fn load_projection_calendar(&self) -> Result<Option<ScenarioProjectionCalendar>> {
+        load_calendar(self.db).await
+    }
+
+    pub async fn ensure_projection_calendar(&self) -> Result<()> {
+        if has_calendar(self.db).await? {
+            return Ok(());
+        }
+        use crate::agents::scenario_builder::types::{
+            ScenarioProjectionCalendarSpec, FORWARD_QUARTERS_MIN, HISTORICAL_QUARTERS_TARGET,
+            MIN_TOTAL_QUARTERLY_PERIODS,
+        };
+        let forward_quarters = (MIN_TOTAL_QUARTERLY_PERIODS - HISTORICAL_QUARTERS_TARGET)
+            .max(FORWARD_QUARTERS_MIN);
+        let spec = ScenarioProjectionCalendarSpec {
+            forward_quarters,
+            historical_quarters: Some(HISTORICAL_QUARTERS_TARGET),
+        };
+        let calendar = build_from_av(self.db, &spec).await?;
+        persist_calendar(self.db, &calendar).await
     }
 
     pub async fn validate_detail_references(
@@ -100,6 +136,10 @@ impl<'a> ScenarioStore<'a> {
                     )));
                 }
             }
+        }
+
+        if let Some(calendar) = load_calendar(db).await? {
+            validate_detail_periods(&calendar, &output.periods)?;
         }
 
         Ok(())

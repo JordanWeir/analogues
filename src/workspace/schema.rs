@@ -614,4 +614,16 @@ pub const SCHEMA_MIGRATION_STATEMENTS: &[&str] = &[
     "ALTER TABLE scenario_periods ADD COLUMN period_type TEXT DEFAULT 'quarter'",
     "ALTER TABLE scenario_crux_assumptions ADD COLUMN crux_key TEXT",
     "ALTER TABLE scenario_crux_assumptions ADD COLUMN experiment_key TEXT",
+    "CREATE TABLE IF NOT EXISTS scenario_projection_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        historical_quarters INTEGER NOT NULL,
+        forward_quarters INTEGER NOT NULL,
+        historical_anchor_end TEXT NOT NULL,
+        terminal_period_end TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS scenario_projection_periods (
+        period_order INTEGER PRIMARY KEY,
+        period_end TEXT NOT NULL,
+        is_historical INTEGER NOT NULL DEFAULT 0 CHECK (is_historical IN (0, 1))
+    )",
 ];

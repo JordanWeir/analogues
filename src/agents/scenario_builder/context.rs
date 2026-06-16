@@ -1,4 +1,7 @@
-use crate::services::workspace_sql::scalar_i64;
+use crate::services::{
+    scenario_projection_calendar::{format_calendar_summary, load_calendar},
+    workspace_sql::scalar_i64,
+};
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::path::Path;
@@ -13,6 +16,7 @@ pub struct ScenarioWorkspaceContext {
     pub experiment_summary: String,
     pub av_coverage_summary: String,
     pub blueprint_summary: String,
+    pub projection_calendar_summary: String,
     pub sources_summary: String,
 }
 
@@ -55,6 +59,7 @@ pub async fn load_scenario_context_from_db(
         experiment_summary: summarize_experiments(db).await?,
         av_coverage_summary: summarize_av_coverage(db).await?,
         blueprint_summary: summarize_blueprint(db).await?,
+        projection_calendar_summary: summarize_projection_calendar(db).await?,
         sources_summary: summarize_sources(db).await?,
     })
 }
@@ -69,7 +74,8 @@ pub fn format_scenario_context_section(ctx: &ScenarioWorkspaceContext) -> String
          Key experiments:\n{experiment_summary}\n\n\
          AV quarterly coverage:\n{av_coverage_summary}\n\n\
          Sources board (reuse id in crux_assumptions.source_id):\n{sources_summary}\n\n\
-         Scenario blueprint (if present):\n{blueprint_summary}",
+         Scenario blueprint (if present):\n{blueprint_summary}\n\n\
+         Projection calendar (detail workers must follow exactly):\n{projection_calendar_summary}",
         promoted_crux_count = ctx.promoted_crux_count,
         promoted_experiment_count = ctx.promoted_experiment_count,
         av_quarter_count = ctx.av_quarter_count,
@@ -79,6 +85,7 @@ pub fn format_scenario_context_section(ctx: &ScenarioWorkspaceContext) -> String
         av_coverage_summary = ctx.av_coverage_summary,
         sources_summary = ctx.sources_summary,
         blueprint_summary = ctx.blueprint_summary,
+        projection_calendar_summary = ctx.projection_calendar_summary,
     )
 }
 
@@ -172,6 +179,13 @@ async fn summarize_av_coverage(db: &sea_orm::DatabaseConnection) -> Result<Strin
             ))
         }
         None => Ok("(no AV quarterly revenue)".to_string()),
+    }
+}
+
+async fn summarize_projection_calendar(db: &sea_orm::DatabaseConnection) -> Result<String> {
+    match load_calendar(db).await? {
+        Some(calendar) => Ok(format_calendar_summary(&calendar)),
+        None => Ok("(calendar not built yet — blueprint must submit projection_calendar.forward_quarters)".to_string()),
     }
 }
 
