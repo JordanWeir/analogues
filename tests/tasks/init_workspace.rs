@@ -62,6 +62,7 @@ async fn test_initializes_workspace_directories_and_database() {
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
         build_narrative_map: false,
         build_financial_analysis: false,
+        checkpoints: false,
     };
 
     let paths = initialize_workspace(&request).await.unwrap();
@@ -185,6 +186,7 @@ async fn test_allocates_next_index_without_overwriting() {
         mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
         build_narrative_map: false,
         build_financial_analysis: false,
+        checkpoints: false,
     };
 
     let first = initialize_workspace(&request).await.unwrap();
@@ -194,6 +196,30 @@ async fn test_allocates_next_index_without_overwriting() {
     assert_eq!(second.run_slug, "MSFT-2026-06-04-2");
     assert!(first.sqlite_path.is_file());
     assert!(second.sqlite_path.is_file());
+
+    fs::remove_dir_all(base_dir).unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_checkpoints_flag_saves_lane_snapshots() {
+    let base_dir = temp_report_root();
+    let request = InitWorkspaceRequest {
+        ticker: "MSFT".to_string(),
+        date: "2026-06-04".to_string(),
+        base_dir: base_dir.clone(),
+        fetch_financials: false,
+        mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
+        build_narrative_map: false,
+        build_financial_analysis: false,
+        checkpoints: true,
+    };
+
+    let paths = initialize_workspace(&request).await.unwrap();
+    let checkpoints_dir = paths.workspace_dir.join("checkpoints");
+
+    assert!(checkpoints_dir.is_dir());
+    assert!(checkpoints_dir.join("init_workspace.sqlite").is_file());
 
     fs::remove_dir_all(base_dir).unwrap();
 }

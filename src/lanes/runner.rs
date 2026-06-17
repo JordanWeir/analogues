@@ -4,7 +4,9 @@ use crate::lanes::{
     lane::Lane,
     result::{LaneResult, LinearRunReport},
 };
-use crate::services::quality_gate_store::QualityGateStore;
+use crate::services::{
+    quality_gate_store::QualityGateStore, workspace_checkpoint_store::WorkspaceCheckpointStore,
+};
 use loco_rs::prelude::*;
 use std::sync::Arc;
 
@@ -70,6 +72,17 @@ impl LinearRunner {
             }
 
             report.lane_results.push(result);
+
+            if let Some(checkpoints_dir) =
+                ctx.config.checkpoints_dir(&ctx.workspace.paths.workspace_dir)
+            {
+                WorkspaceCheckpointStore::save_lane_checkpoint(
+                    ctx.workspace.connection(),
+                    &checkpoints_dir,
+                    lane.name(),
+                )
+                .await?;
+            }
         }
 
         Ok(report)

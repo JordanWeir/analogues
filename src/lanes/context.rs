@@ -28,6 +28,7 @@ impl LaneContext {
 #[derive(Debug, Clone, Default)]
 pub struct LaneConfig {
     pub ticker: String,
+    pub checkpoints: bool,
     #[allow(dead_code)]
     pub extra: BTreeMap<String, String>,
 }
@@ -36,7 +37,21 @@ impl LaneConfig {
     pub fn new(ticker: impl Into<String>) -> Self {
         Self {
             ticker: ticker.into(),
+            checkpoints: false,
             extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_checkpoints(mut self, checkpoints: bool) -> Self {
+        self.checkpoints = checkpoints;
+        self
+    }
+
+    pub fn checkpoints_dir(&self, workspace_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        if self.checkpoints {
+            Some(workspace_dir.join("checkpoints"))
+        } else {
+            None
         }
     }
 }

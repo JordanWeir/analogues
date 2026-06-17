@@ -33,6 +33,7 @@ Initialize a stock research workspace, create `run.sqlite`, and run the init pip
 | `mapping_strategy` | no | `candidate_scoring` | Canonical mapping strategy. Alias: `concept_mapping_strategy`. |
 | `build_narrative_map` | no | `true` | Set to `false`, `0`, `no`, or `skip` to skip the narrative-map lane. Requires `fetch_financials` and a non-`none` mapping strategy. |
 | `build_financial_analysis` | no | `true` | Set to `false`, `0`, `no`, or `skip` to skip crux identification and mechanics experiments. Implies `build_narrative_map` when enabled. Requires `fetch_financials` and a non-`none` mapping strategy. |
+| `checkpoints` | no | `false` | Set to `true`, `1`, or `yes` to save a SQLite snapshot in `checkpoints/` after each lane completes. |
 
 **`mapping_strategy` values**
 
@@ -65,6 +66,9 @@ cargo loco task initWorkspace ticker:ORCL build_financial_analysis:false
 
 # Scaffold workspace without network fetch (useful for tests)
 cargo loco task initWorkspace ticker:ORCL fetch_financials:false
+
+# Save a SQLite checkpoint after each lane completes
+cargo loco task initWorkspace ticker:ORCL checkpoints:true
 ```
 
 ---
