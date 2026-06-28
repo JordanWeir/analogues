@@ -88,15 +88,17 @@ impl Gate for RejectGate {
 }
 
 async fn test_lane_context() -> (LaneContext, PathBuf) {
-    let path = std::env::temp_dir().join(format!(
-        "analogues-lane-runner-{}.sqlite",
+    let workspace_dir = std::env::temp_dir().join(format!(
+        "analogues-lane-runner-{}",
         uuid::Uuid::new_v4()
     ));
+    std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+    let path = workspace_dir.join("run.sqlite");
     let paths = WorkspacePaths {
         run_slug: "TEST-2026-06-08-1".to_string(),
-        workspace_dir: path.parent().unwrap().to_path_buf(),
+        workspace_dir: workspace_dir.clone(),
         sqlite_path: path.clone(),
-        generated_dir: path.parent().unwrap().join("generated"),
+        generated_dir: workspace_dir.join("generated"),
     };
 
     let db = Database::connect(crate::services::workspace_store::sqlite_uri(&path))
@@ -113,6 +115,7 @@ async fn test_lane_context() -> (LaneContext, PathBuf) {
             mapping_strategy: None,
             build_narrative_map: false,
             build_financial_analysis: false,
+            checkpoints: false,
         },
         &paths,
     )
@@ -126,6 +129,16 @@ async fn test_lane_context() -> (LaneContext, PathBuf) {
         .expect("open workspace");
     let ctx = LaneContext::new(workspace, LaneConfig::new("TEST"));
     (ctx, path)
+}
+
+async fn test_lane_context_with_checkpoints(checkpoints: bool) -> (LaneContext, PathBuf) {
+    let (mut ctx, path) = test_lane_context().await;
+    ctx.config.checkpoints = checkpoints;
+    let checkpoints_dir = ctx.workspace.paths.workspace_dir.join("checkpoints");
+    if checkpoints {
+        std::fs::create_dir_all(&checkpoints_dir).expect("checkpoints dir");
+    }
+    (ctx, checkpoints_dir)
 }
 
 #[tokio::test]
@@ -196,4 +209,32 @@ async fn linear_runner_stops_on_failed_lane_status() {
     assert!(report.stopped_early);
     assert_eq!(report.lane_results.len(), 1);
     assert_eq!(report.lane_results[0].status, LaneStatus::Failed);
+}
+
+#[tokio::test]
+async fn linear_runner_saves_checkpoints_after_each_completed_lane() {
+    let (mut ctx, checkpoints_dir) = test_lane_context_with_checkpoints(true).await;
+    let runner = LinearRunner::new(vec![
+        Arc::new(StubLane::new("lane_a", LaneStatus::Success)),
+        Arc::new(StubLane::new("lane_b", LaneStatus::Success)),
+    ]);
+
+    let report = runner.run(&mut ctx).await.expect("run");
+
+    assert!(report.completed_all_lanes());
+    assert!(checkpoints_dir.join("lane_a.sqlite").is_file());
+    assert!(checkpoints_dir.join("lane_b.sqlite").is_file());
+}
+
+#[tokio::test]
+async fn linear_runner_does_not_save_checkpoints_when_disabled() {
+    let (mut ctx, checkpoints_dir) = test_lane_context_with_checkpoints(false).await;
+    let runner = LinearRunner::new(vec![Arc::new(StubLane::new(
+        "lane_a",
+        LaneStatus::Success,
+    ))]);
+
+    runner.run(&mut ctx).await.expect("run");
+
+    assert!(!checkpoints_dir.exists());
 }

@@ -19,6 +19,7 @@ pub mod quality_gate_store;
 pub mod sec_facts_provider;
 pub mod usage_snapshot;
 pub mod worker_run_store;
+pub mod workspace_checkpoint_store;
 pub mod workspace_financial_store;
 pub mod workspace_ingest;
 pub mod workspace_phases;
