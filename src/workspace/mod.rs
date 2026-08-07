@@ -7,7 +7,7 @@ pub use request::InitWorkspaceRequest;
 pub use schema::{SCHEMA_MIGRATION_STATEMENTS, SCHEMA_STATEMENTS};
 pub use seed::seed_database;
 pub use types::{
-    AvRawFact, CanonicalMapping, ConceptCatalogEntry, DerivedFundamentals, FundamentalObservation,
-    MarketHeadlines, MarketQuoteSnapshot, SecIngestionResult, SecRawFact, StarterFundamentals,
-    WorkspacePaths,
+    AvRawFact, CanonicalMapping, ConceptCatalogEntry, DailyPriceBar, DerivedFundamentals,
+    FundamentalObservation, MarketHeadlines, MarketQuoteSnapshot, SecIngestionResult, SecRawFact,
+    StarterFundamentals, WorkspacePaths,
 };

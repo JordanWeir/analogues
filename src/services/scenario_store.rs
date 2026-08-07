@@ -1,9 +1,12 @@
 use crate::{
-    agents::scenario_builder::types::{ScenarioBlueprintOutput, ScenarioDetailOutput},
+    agents::scenario_builder::types::{
+        ScenarioBlueprintOutput, ScenarioCruxAssumptionInput, ScenarioDetailMetadataOutput,
+        ScenarioDetailOutput, ScenarioPeriodInput,
+    },
     services::{
         scenario_projection_calendar::{
             build_from_av, has_calendar, load_calendar, persist_calendar,
-            validate_detail_periods, ScenarioProjectionCalendar,
+            validate_detail_periods, validate_detail_valuation, ScenarioProjectionCalendar,
         },
         workspace_sql::{execute_sql, scalar_i64, sql_i64, sql_literal, sql_number, sql_value},
     },
@@ -112,11 +115,25 @@ impl<'a> ScenarioStore<'a> {
         db: &impl ConnectionTrait,
         output: &ScenarioDetailOutput,
     ) -> Result<()> {
+        Self::validate_metadata_references(db, &output.crux_assumptions).await?;
+
+        if let Some(calendar) = load_calendar(db).await? {
+            validate_detail_periods(&calendar, &output.periods)?;
+            validate_detail_valuation(&calendar, &output.periods)?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn validate_metadata_references(
+        db: &impl ConnectionTrait,
+        crux_assumptions: &[ScenarioCruxAssumptionInput],
+    ) -> Result<()> {
         let sources = load_source_rows(db).await?;
         let source_ids: HashSet<i64> = sources.iter().map(|(id, _)| *id).collect();
         let experiment_keys = load_experiment_key_set(db).await?;
 
-        for crux in &output.crux_assumptions {
+        for crux in crux_assumptions {
             if let Some(source_id) = crux.source_id {
                 if !source_ids.contains(&source_id) {
                     return Err(Error::string(&format!(
@@ -138,11 +155,198 @@ impl<'a> ScenarioStore<'a> {
             }
         }
 
-        if let Some(calendar) = load_calendar(db).await? {
-            validate_detail_periods(&calendar, &output.periods)?;
+        Ok(())
+    }
+
+    pub async fn persist_detail_metadata(&self, output: &ScenarioDetailMetadataOutput) -> Result<()> {
+        Self::validate_metadata_references(self.db, &output.crux_assumptions).await?;
+        let txn = self.db.begin().await.map_err(|err| {
+            Error::string(&format!("failed to begin scenario metadata transaction: {err}"))
+        })?;
+        self.persist_detail_metadata_in(&txn, output).await?;
+        txn.commit().await.map_err(|err| {
+            Error::string(&format!("failed to commit scenario metadata transaction: {err}"))
+        })?;
+        Ok(())
+    }
+
+    async fn persist_detail_metadata_in(
+        &self,
+        db: &impl ConnectionTrait,
+        output: &ScenarioDetailMetadataOutput,
+    ) -> Result<()> {
+        let scenario_id = self.scenario_id_for_key_in(db, &output.scenario_key).await?;
+        execute_sql(
+            db,
+            &format!(
+                "UPDATE scenario_assumptions
+                 SET assumption_summary = {}
+                 WHERE id = {}",
+                sql_literal(Some(&output.assumption_summary)),
+                scenario_id,
+            ),
+        )
+        .await?;
+
+        for table in [
+            "scenario_signals",
+            "scenario_sensitivities",
+            "scenario_crux_assumptions",
+        ] {
+            execute_sql(
+                db,
+                &format!("DELETE FROM {table} WHERE scenario_id = {scenario_id}"),
+            )
+            .await?;
+        }
+
+        for (index, crux) in output.crux_assumptions.iter().enumerate() {
+            execute_sql(
+                db,
+                &format!(
+                    "INSERT INTO scenario_crux_assumptions (
+                        scenario_id, crux_order, crux_key, experiment_key, crux, assumption, impact, source_id
+                     ) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+                    scenario_id,
+                    index as i64 + 1,
+                    sql_literal(Some(&crux.crux_key)),
+                    sql_value(crux.experiment_key.as_deref()),
+                    sql_literal(Some(&crux.crux)),
+                    sql_literal(Some(&crux.assumption)),
+                    sql_value(crux.impact.as_deref()),
+                    sql_i64(crux.source_id),
+                ),
+            )
+            .await?;
+        }
+
+        for (index, body) in output.sensitivities.iter().enumerate() {
+            execute_sql(
+                db,
+                &format!(
+                    "INSERT INTO scenario_sensitivities (scenario_id, sensitivity_order, body)
+                     VALUES ({}, {}, {})",
+                    scenario_id,
+                    index as i64 + 1,
+                    sql_literal(Some(body)),
+                ),
+            )
+            .await?;
+        }
+
+        for (index, body) in output.confirming_signals.iter().enumerate() {
+            execute_sql(
+                db,
+                &format!(
+                    "INSERT INTO scenario_signals (scenario_id, signal_order, signal_type, body)
+                     VALUES ({}, {}, 'confirming', {})",
+                    scenario_id,
+                    index as i64 + 1,
+                    sql_literal(Some(body)),
+                ),
+            )
+            .await?;
+        }
+
+        for (index, body) in output.breaking_signals.iter().enumerate() {
+            execute_sql(
+                db,
+                &format!(
+                    "INSERT INTO scenario_signals (scenario_id, signal_order, signal_type, body)
+                     VALUES ({}, {}, 'breaking', {})",
+                    scenario_id,
+                    index as i64 + 1,
+                    sql_literal(Some(body)),
+                ),
+            )
+            .await?;
         }
 
         Ok(())
+    }
+
+    pub async fn upsert_period(
+        &self,
+        scenario_key: &str,
+        period: &ScenarioPeriodInput,
+    ) -> Result<(i64, i64)> {
+        let scenario_id = self.scenario_id_for_key_in(self.db, scenario_key).await?;
+        execute_sql(
+            self.db,
+            &format!(
+                "DELETE FROM scenario_periods
+                 WHERE scenario_id = {scenario_id} AND period_order = {}",
+                period.period_order,
+            ),
+        )
+        .await?;
+        self.insert_period(self.db, scenario_id, period).await?;
+        let submitted = self.count_periods_for_scenario_id(scenario_id).await?;
+        let required = self.expected_period_count().await?;
+        Ok((submitted, required))
+    }
+
+    pub async fn expected_period_count(&self) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            "SELECT COUNT(*) AS count FROM scenario_projection_periods",
+        )
+        .await
+    }
+
+    pub async fn count_periods_for_scenario_key(&self, scenario_key: &str) -> Result<i64> {
+        let scenario_id = self.scenario_id_for_key_in(self.db, scenario_key).await?;
+        self.count_periods_for_scenario_id(scenario_id).await
+    }
+
+    async fn count_periods_for_scenario_id(&self, scenario_id: i64) -> Result<i64> {
+        scalar_i64(
+            self.db,
+            &format!(
+                "SELECT COUNT(*) AS count FROM scenario_periods WHERE scenario_id = {scenario_id}"
+            ),
+        )
+        .await
+    }
+
+    pub async fn assemble_detail_output(&self, scenario_key: &str) -> Result<ScenarioDetailOutput> {
+        let scenario_id = self.scenario_id_for_key_in(self.db, scenario_key).await?;
+        let row = self
+            .db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT assumption_summary FROM scenario_assumptions WHERE id = {scenario_id}"
+                ),
+            ))
+            .await
+            .map_err(|e| Error::string(&format!("load scenario assumption_summary: {e}")))?
+            .ok_or_else(|| Error::string(&format!("unknown scenario_key '{scenario_key}'")))?;
+        let assumption_summary: String = row
+            .try_get_by_index(0)
+            .map_err(|e| Error::string(&e.to_string()))?;
+
+        let crux_assumptions = self.load_crux_assumptions(scenario_id).await?;
+        let sensitivities = self.load_sensitivity_bodies(scenario_id).await?;
+        let (confirming_signals, breaking_signals) = self.load_signal_bodies(scenario_id).await?;
+        let periods = self.load_period_inputs(scenario_id).await?;
+
+        Ok(ScenarioDetailOutput {
+            scenario_key: scenario_key.to_string(),
+            assumption_summary,
+            crux_assumptions,
+            sensitivities,
+            confirming_signals,
+            breaking_signals,
+            periods,
+            per_worker: true,
+        })
+    }
+
+    pub async fn verify_detail_complete(&self, scenario_key: &str) -> Result<()> {
+        let detail = self.assemble_detail_output(scenario_key).await?;
+        crate::agents::scenario_builder::ScenarioBuilderAgent::validate_detail_output(&detail)?;
+        Self::validate_detail_references(self.db, &detail).await
     }
 
     pub async fn persist_detail(&self, output: &ScenarioDetailOutput) -> Result<()> {
@@ -251,45 +455,55 @@ impl<'a> ScenarioStore<'a> {
         }
 
         for period in &output.periods {
-            execute_sql(
-                db,
-                &format!(
-                    "INSERT INTO scenario_periods (
-                        scenario_id, period_order, label, period_end, period_type,
-                        revenue, revenue_growth, diluted_shares, gross_margin, operating_margin,
-                        net_margin, net_income, eps, ps_low, ps_median, ps_high,
-                        pe_low, pe_median, pe_high, blend_ps_weight, blend_pe_weight, source_note
-                     ) VALUES (
-                        {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
-                        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
-                     )",
-                    scenario_id,
-                    period.period_order,
-                    sql_literal(Some(&period.label)),
-                    sql_literal(Some(&period.period_end)),
-                    sql_literal(Some(&period.period_type)),
-                    sql_number(period.revenue),
-                    sql_number(period.revenue_growth),
-                    sql_number(period.diluted_shares),
-                    sql_number(period.gross_margin),
-                    sql_number(period.operating_margin),
-                    sql_number(period.net_margin),
-                    sql_number(period.net_income),
-                    sql_number(period.eps),
-                    sql_number(period.ps_low),
-                    sql_number(period.ps_median),
-                    sql_number(period.ps_high),
-                    sql_number(period.pe_low),
-                    sql_number(period.pe_median),
-                    sql_number(period.pe_high),
-                    period.blend_ps_weight,
-                    period.blend_pe_weight,
-                    sql_value(period.source_note.as_deref()),
-                ),
-            )
-            .await?;
+            self.insert_period(db, scenario_id, period).await?;
         }
 
+        Ok(())
+    }
+
+    async fn insert_period(
+        &self,
+        db: &impl ConnectionTrait,
+        scenario_id: i64,
+        period: &ScenarioPeriodInput,
+    ) -> Result<()> {
+        execute_sql(
+            db,
+            &format!(
+                "INSERT INTO scenario_periods (
+                    scenario_id, period_order, label, period_end, period_type,
+                    revenue, revenue_growth, diluted_shares, gross_margin, operating_margin,
+                    net_margin, net_income, eps, ps_low, ps_median, ps_high,
+                    pe_low, pe_median, pe_high, blend_ps_weight, blend_pe_weight, source_note
+                 ) VALUES (
+                    {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+                    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+                 )",
+                scenario_id,
+                period.period_order,
+                sql_literal(Some(&period.label)),
+                sql_literal(Some(&period.period_end)),
+                sql_literal(Some(&period.period_type)),
+                sql_number(period.revenue),
+                sql_number(period.revenue_growth),
+                sql_number(period.diluted_shares),
+                sql_number(period.gross_margin),
+                sql_number(period.operating_margin),
+                sql_number(period.net_margin),
+                sql_number(period.net_income),
+                sql_number(period.eps),
+                sql_number(period.ps_low),
+                sql_number(period.ps_median),
+                sql_number(period.ps_high),
+                sql_number(period.pe_low),
+                sql_number(period.pe_median),
+                sql_number(period.pe_high),
+                period.blend_ps_weight,
+                period.blend_pe_weight,
+                sql_value(period.source_note.as_deref()),
+            ),
+        )
+        .await?;
         Ok(())
     }
 
@@ -301,14 +515,26 @@ impl<'a> ScenarioStore<'a> {
         .await
     }
 
-    /// Scenarios from the persisted blueprint that have no `scenario_periods` rows yet.
+    /// Scenarios from the persisted blueprint missing detail metadata or calendar periods.
     pub async fn load_scenarios_needing_detail(&self) -> Result<Vec<(String, String, String)>> {
         self.load_scenario_rows(
             "SELECT sa.scenario_key, sa.name, sa.description
              FROM scenario_assumptions sa
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM scenario_periods sp WHERE sp.scenario_id = sa.id
-             )
+             LEFT JOIN (
+                 SELECT scenario_id, COUNT(*) AS period_count
+                 FROM scenario_periods
+                 GROUP BY scenario_id
+             ) sp ON sp.scenario_id = sa.id
+             LEFT JOIN (
+                 SELECT scenario_id, COUNT(*) AS crux_count
+                 FROM scenario_crux_assumptions
+                 GROUP BY scenario_id
+             ) sc ON sc.scenario_id = sa.id
+             CROSS JOIN (
+                 SELECT COUNT(*) AS expected_periods FROM scenario_projection_periods
+             ) cal
+             WHERE COALESCE(sp.period_count, 0) < cal.expected_periods
+                OR COALESCE(sc.crux_count, 0) = 0
              ORDER BY sa.scenario_order",
         )
         .await
@@ -358,6 +584,136 @@ impl<'a> ScenarioStore<'a> {
             })?;
         row.try_get_by_index(0)
             .map_err(|e| Error::string(&format!("read scenario id: {e}")))
+    }
+
+    async fn load_crux_assumptions(
+        &self,
+        scenario_id: i64,
+    ) -> Result<Vec<ScenarioCruxAssumptionInput>> {
+        let rows = self
+            .db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT crux_key, crux, assumption, impact, experiment_key, source_id
+                     FROM scenario_crux_assumptions
+                     WHERE scenario_id = {scenario_id}
+                     ORDER BY crux_order"
+                ),
+            ))
+            .await
+            .map_err(|e| Error::string(&format!("load crux assumptions: {e}")))?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ScenarioCruxAssumptionInput {
+                    crux_key: row.try_get_by_index(0).map_err(|e| Error::string(&e.to_string()))?,
+                    crux: row.try_get_by_index(1).map_err(|e| Error::string(&e.to_string()))?,
+                    assumption: row
+                        .try_get_by_index(2)
+                        .map_err(|e| Error::string(&e.to_string()))?,
+                    impact: row.try_get_by_index(3).ok(),
+                    experiment_key: row.try_get_by_index(4).ok(),
+                    source_id: row.try_get_by_index(5).ok(),
+                })
+            })
+            .collect()
+    }
+
+    async fn load_sensitivity_bodies(&self, scenario_id: i64) -> Result<Vec<String>> {
+        let rows = self
+            .db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT body FROM scenario_sensitivities
+                     WHERE scenario_id = {scenario_id}
+                     ORDER BY sensitivity_order"
+                ),
+            ))
+            .await
+            .map_err(|e| Error::string(&format!("load sensitivities: {e}")))?;
+        rows.into_iter()
+            .map(|row| row.try_get_by_index(0).map_err(|e| Error::string(&e.to_string())))
+            .collect()
+    }
+
+    async fn load_signal_bodies(
+        &self,
+        scenario_id: i64,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let rows = self
+            .db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT signal_type, body FROM scenario_signals
+                     WHERE scenario_id = {scenario_id}
+                     ORDER BY signal_order"
+                ),
+            ))
+            .await
+            .map_err(|e| Error::string(&format!("load signals: {e}")))?;
+
+        let mut confirming = Vec::new();
+        let mut breaking = Vec::new();
+        for row in rows {
+            let signal_type: String = row.try_get_by_index(0).map_err(|e| Error::string(&e.to_string()))?;
+            let body: String = row.try_get_by_index(1).map_err(|e| Error::string(&e.to_string()))?;
+            match signal_type.as_str() {
+                "confirming" => confirming.push(body),
+                "breaking" => breaking.push(body),
+                _ => {}
+            }
+        }
+        Ok((confirming, breaking))
+    }
+
+    async fn load_period_inputs(&self, scenario_id: i64) -> Result<Vec<ScenarioPeriodInput>> {
+        let rows = self
+            .db
+            .query_all(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!(
+                    "SELECT period_order, label, period_end, period_type,
+                            revenue, revenue_growth, diluted_shares, gross_margin, operating_margin,
+                            net_margin, net_income, eps, ps_low, ps_median, ps_high,
+                            pe_low, pe_median, pe_high, blend_ps_weight, blend_pe_weight, source_note
+                     FROM scenario_periods
+                     WHERE scenario_id = {scenario_id}
+                     ORDER BY period_order"
+                ),
+            ))
+            .await
+            .map_err(|e| Error::string(&format!("load scenario periods: {e}")))?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ScenarioPeriodInput {
+                    period_order: row.try_get_by_index(0).map_err(|e| Error::string(&e.to_string()))?,
+                    label: row.try_get_by_index(1).map_err(|e| Error::string(&e.to_string()))?,
+                    period_end: row.try_get_by_index(2).map_err(|e| Error::string(&e.to_string()))?,
+                    period_type: row.try_get_by_index(3).map_err(|e| Error::string(&e.to_string()))?,
+                    revenue: row.try_get_by_index(4).ok(),
+                    revenue_growth: row.try_get_by_index(5).ok(),
+                    diluted_shares: row.try_get_by_index(6).ok(),
+                    gross_margin: row.try_get_by_index(7).ok(),
+                    operating_margin: row.try_get_by_index(8).ok(),
+                    net_margin: row.try_get_by_index(9).ok(),
+                    net_income: row.try_get_by_index(10).ok(),
+                    eps: row.try_get_by_index(11).ok(),
+                    ps_low: row.try_get_by_index(12).ok(),
+                    ps_median: row.try_get_by_index(13).ok(),
+                    ps_high: row.try_get_by_index(14).ok(),
+                    pe_low: row.try_get_by_index(15).ok(),
+                    pe_median: row.try_get_by_index(16).ok(),
+                    pe_high: row.try_get_by_index(17).ok(),
+                    blend_ps_weight: row.try_get_by_index(18).unwrap_or(0.5),
+                    blend_pe_weight: row.try_get_by_index(19).unwrap_or(0.5),
+                    source_note: row.try_get_by_index(20).ok(),
+                })
+            })
+            .collect()
     }
 }
 

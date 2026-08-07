@@ -196,12 +196,12 @@ async fn run_detail_fan_out(
             Ok(Ok((text, _))) => {
                 match ScenarioBuilderAgent::parse_detail_output(&text) {
                     Ok(detail) => {
-                        if let Err(err) = store.persist_detail(&detail).await {
+                        if let Err(err) = store.verify_detail_complete(&detail.scenario_key).await {
                             detail_failed += 1;
                             tracing::warn!(
                                 worker = %label,
                                 error = %err,
-                                "scenario detail persist failed"
+                                "scenario detail verification failed"
                             );
                         } else {
                             detail_ok += 1;
@@ -291,8 +291,8 @@ fn detail_prompt_prefix(scenario_key: &str, name: &str, description: &str) -> St
         "FOCUS: Build quarterly projection detail for scenario `{scenario_key}` only.\n\
          Name: {name}\nDescription: {description}\n\n\
          Use the Projection calendar from workspace context for every period_order and period_end. \
-         Submit exactly one row per calendar period with matching period_end dates. \
-         Finish with submit_scenario_detail, per_worker true.\n\n"
+         Submit metadata with submit_scenario_detail, then one submit_scenario_period per calendar row, \
+         then complete_scenario_detail with per_worker true.\n\n"
     )
 }
 
@@ -379,12 +379,35 @@ mod tests {
         }
         execute_sql(
             &db,
+            "INSERT INTO scenario_projection_config (
+                id, historical_quarters, forward_quarters, historical_anchor_end, terminal_period_end
+             ) VALUES (1, 1, 0, '2026-05-31', '2026-05-31')",
+        )
+        .await
+        .expect("projection config");
+        execute_sql(
+            &db,
+            "INSERT INTO scenario_projection_periods (period_order, period_end, is_historical)
+             VALUES (1, '2026-05-31', 1)",
+        )
+        .await
+        .expect("projection period");
+        execute_sql(
+            &db,
             "INSERT INTO scenario_periods (
                 scenario_id, period_order, label, period_end, period_type, revenue_growth
              ) VALUES (1, 1, 'Q1', '2026-05-31', 'quarter', 0.1)",
         )
         .await
         .expect("period");
+        execute_sql(
+            &db,
+            "INSERT INTO scenario_crux_assumptions (
+                scenario_id, crux_order, crux_key, crux, assumption
+             ) VALUES (1, 1, 'test_crux', 'Crux', 'Assumption')",
+        )
+        .await
+        .expect("crux");
 
         let store = ScenarioStore::new(&db);
         let pending = store

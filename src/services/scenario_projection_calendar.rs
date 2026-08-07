@@ -353,33 +353,119 @@ pub fn validate_detail_periods(
     Ok(())
 }
 
+/// Forward projection periods must carry valuation bands so the report can chart implied paths.
+pub fn validate_detail_valuation(
+    calendar: &ScenarioProjectionCalendar,
+    periods: &[crate::agents::scenario_builder::types::ScenarioPeriodInput],
+) -> Result<()> {
+    let terminal_order = calendar
+        .periods
+        .iter()
+        .map(|period| period.period_order)
+        .max()
+        .unwrap_or(0);
+    let terminal = periods
+        .iter()
+        .find(|period| period.period_order == terminal_order)
+        .ok_or_else(|| Error::string("terminal period missing from scenario detail"))?;
+    if terminal.ps_median.is_none() {
+        return Err(Error::string(
+            "terminal period must include ps_median valuation band",
+        ));
+    }
+
+    for expected in calendar.periods.iter().filter(|period| !period.is_historical) {
+        let actual = periods
+            .iter()
+            .find(|period| period.period_order == expected.period_order)
+            .ok_or_else(|| {
+                Error::string(&format!(
+                    "missing forward period_order {} from scenario detail",
+                    expected.period_order
+                ))
+            })?;
+        if actual.ps_median.is_none() {
+            return Err(Error::string(&format!(
+                "forward period '{}' (period_order {}) must include ps_median — set TTM P/S bands on every projected quarter, not only the terminal period",
+                actual.label, actual.period_order
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a single period submission against the shared projection calendar.
+pub fn validate_period_submit(
+    calendar: &ScenarioProjectionCalendar,
+    period: &crate::agents::scenario_builder::types::ScenarioPeriodInput,
+) -> Result<()> {
+    let expected = calendar
+        .periods
+        .iter()
+        .find(|entry| entry.period_order == period.period_order)
+        .ok_or_else(|| {
+            Error::string(&format!(
+                "period_order {} is not in the blueprint projection calendar",
+                period.period_order
+            ))
+        })?;
+
+    if period.label.trim().is_empty() {
+        return Err(Error::string("period label cannot be empty"));
+    }
+    if period.period_end != expected.period_end {
+        return Err(Error::string(&format!(
+            "period_order {} must use period_end {} per blueprint calendar, got {}",
+            period.period_order, expected.period_end, period.period_end
+        )));
+    }
+    if period.period_type != "quarter" {
+        return Err(Error::string(&format!(
+            "period '{}' must use period_type quarter",
+            period.label
+        )));
+    }
+    if period.revenue.is_none() && period.revenue_growth.is_none() {
+        return Err(Error::string(&format!(
+            "period '{}' needs revenue or revenue_growth",
+            period.label
+        )));
+    }
+    if !expected.is_historical && period.ps_median.is_none() {
+        return Err(Error::string(&format!(
+            "forward period '{}' (period_order {}) must include ps_median",
+            period.label, period.period_order
+        )));
+    }
+
+    Ok(())
+}
+
 pub fn format_calendar_summary(calendar: &ScenarioProjectionCalendar) -> String {
-    let historical: Vec<_> = calendar
+    let period_lines: Vec<_> = calendar
         .periods
         .iter()
-        .filter(|period| period.is_historical)
-        .map(|period| format!("{}={}", period.period_order, period.period_end))
-        .collect();
-    let forward_preview: Vec<_> = calendar
-        .periods
-        .iter()
-        .filter(|period| !period.is_historical)
-        .take(3)
-        .map(|period| format!("{}={}", period.period_order, period.period_end))
+        .map(|period| {
+            let kind = if period.is_historical {
+                "historical"
+            } else {
+                "projected"
+            };
+            format!("{}={} [{kind}]", period.period_order, period.period_end)
+        })
         .collect();
     format!(
         "Historical quarters: {} (anchor end {})\n\
          Forward quarters: {} (terminal {})\n\
-         Historical period_order → period_end: {}\n\
-         Forward preview: {} … {}\n\
-         Detail workers MUST use these exact period_end values for each period_order.",
+         Full period_order → period_end calendar (copy exactly):\n{}\n\
+         Detail workers: call submit_scenario_detail once for metadata, then submit_scenario_period \
+         once per period_order in calendar order, then complete_scenario_detail.",
         calendar.historical_quarters,
         calendar.historical_anchor_end,
         calendar.forward_quarters,
         calendar.terminal_period_end,
-        historical.join(", "),
-        forward_preview.join(", "),
-        calendar.terminal_period_end,
+        period_lines.join("\n"),
     )
 }
 
@@ -448,6 +534,106 @@ mod tests {
             Some("2024-08-31")
         );
         assert_eq!(calendar.terminal_period_end, calendar.periods.last().unwrap().period_end);
+    }
+
+    #[test]
+    fn rejects_forward_periods_missing_ps_median() {
+        let calendar = ScenarioProjectionCalendar {
+            historical_quarters: 1,
+            forward_quarters: 2,
+            historical_anchor_end: "2025-05-31".to_string(),
+            terminal_period_end: "2025-11-30".to_string(),
+            periods: vec![
+                ProjectionPeriod {
+                    period_order: 1,
+                    period_end: "2025-05-31".to_string(),
+                    is_historical: true,
+                },
+                ProjectionPeriod {
+                    period_order: 2,
+                    period_end: "2025-08-31".to_string(),
+                    is_historical: false,
+                },
+                ProjectionPeriod {
+                    period_order: 3,
+                    period_end: "2025-11-30".to_string(),
+                    is_historical: false,
+                },
+            ],
+        };
+        let periods = vec![
+            ScenarioPeriodInput {
+                period_order: 1,
+                label: "Q1".to_string(),
+                period_end: "2025-05-31".to_string(),
+                period_type: "quarter".to_string(),
+                revenue: Some(1.0),
+                revenue_growth: None,
+                diluted_shares: None,
+                gross_margin: None,
+                operating_margin: None,
+                net_margin: None,
+                net_income: None,
+                eps: None,
+                ps_low: None,
+                ps_median: None,
+                ps_high: None,
+                pe_low: None,
+                pe_median: None,
+                pe_high: None,
+                blend_ps_weight: 0.5,
+                blend_pe_weight: 0.5,
+                source_note: None,
+            },
+            ScenarioPeriodInput {
+                period_order: 2,
+                label: "Q2".to_string(),
+                period_end: "2025-08-31".to_string(),
+                period_type: "quarter".to_string(),
+                revenue_growth: Some(0.1),
+                revenue: None,
+                diluted_shares: None,
+                gross_margin: None,
+                operating_margin: None,
+                net_margin: None,
+                net_income: None,
+                eps: None,
+                ps_low: None,
+                ps_median: None,
+                ps_high: None,
+                pe_low: None,
+                pe_median: None,
+                pe_high: None,
+                blend_ps_weight: 0.5,
+                blend_pe_weight: 0.5,
+                source_note: None,
+            },
+            ScenarioPeriodInput {
+                period_order: 3,
+                label: "Q3".to_string(),
+                period_end: "2025-11-30".to_string(),
+                period_type: "quarter".to_string(),
+                revenue_growth: Some(0.1),
+                revenue: None,
+                diluted_shares: None,
+                gross_margin: None,
+                operating_margin: None,
+                net_margin: None,
+                net_income: None,
+                eps: None,
+                ps_low: None,
+                ps_median: Some(5.0),
+                ps_high: None,
+                pe_low: None,
+                pe_median: None,
+                pe_high: None,
+                blend_ps_weight: 0.5,
+                blend_pe_weight: 0.5,
+                source_note: None,
+            },
+        ];
+        let err = validate_detail_valuation(&calendar, &periods).expect_err("missing forward ps");
+        assert!(err.to_string().contains("forward period"));
     }
 
     #[tokio::test]

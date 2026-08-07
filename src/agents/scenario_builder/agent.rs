@@ -3,11 +3,12 @@ use super::{
     context::{format_scenario_context_section, load_scenario_context},
     golden_path::{
         scenario_blueprint_golden_path, scenario_blueprint_submit_example, scenario_detail_golden_path,
-        scenario_detail_submit_example, scenario_schema_hint,
+        scenario_detail_complete_example, scenario_detail_metadata_example,
+        scenario_period_submit_example, scenario_schema_hint,
     },
     types::{
-        ScenarioBlueprintOutput, ScenarioBuilderMode, ScenarioDetailOutput, SCENARIO_BLUEPRINT_MAX,
-        SCENARIO_BLUEPRINT_MIN,
+        ScenarioBlueprintOutput, ScenarioBuilderMode, ScenarioDetailMetadataOutput,
+        ScenarioDetailOutput, SCENARIO_BLUEPRINT_MAX, SCENARIO_BLUEPRINT_MIN,
     },
     WORKER_NAME,
 };
@@ -28,7 +29,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 pub const SCENARIO_BLUEPRINT_PREAMBLE: &str = "You are the Scenario Builder in blueprint mode. Design 4–6 company-specific conditional scenarios from the narrative map, promoted cruxes, and financial experiments. Use AlphaVantage quarterly data (av_raw_facts) as the primary time-series source for understanding recent trajectory; use SEC and experiments for crux bridges only. Use workspace_sql and web_search when claims contradict AV or SEC. Finish with submit_scenario_blueprint — do not end with plain prose. Fix validation errors and resubmit.";
 
-pub const SCENARIO_DETAIL_PREAMBLE: &str = "You are the Scenario Builder in detail mode. Build quarterly projection paths for ONE assigned scenario on the shared projection calendar from workspace context. Use the exact period_order and period_end values from that calendar for every row. Anchor historical quarters on AlphaVantage actuals (av_raw_facts, report_type='quarterly') matching those period_end dates. Use analysis_experiments and claims to shape forward assumptions; interpolate where needed. Set valuation bands on the terminal calendar period only. Reuse existing sources.id values when citing crux assumptions — do not invent source ids. Use workspace_sql and web_search for contradictions. Finish with submit_scenario_detail and per_worker true.";
+pub const SCENARIO_DETAIL_PREAMBLE: &str = "You are the Scenario Builder in detail mode. Build quarterly projection paths for ONE assigned scenario on the shared projection calendar from workspace context. Use the exact period_order and period_end values from the full calendar for every row. Anchor historical quarters on AlphaVantage actuals (av_raw_facts, report_type='quarterly') matching those period_end dates. Use analysis_experiments and claims to shape forward assumptions; interpolate where needed. Set TTM valuation bands (ps_median required) on every forward calendar period, not only the terminal quarter; vary multiples along the path when rerating or compression is part of the narrative. Choose blend_ps_weight and blend_pe_weight explicitly — default 50/50 only when profitable and both multiples are meaningful; lean P/S-heavy when unprofitable, distorted EPS, or revenue is the cleaner anchor. Reuse existing sources.id values when citing crux assumptions — do not invent source ids. Use workspace_sql and web_search for contradictions. Workflow: (1) submit_scenario_detail for metadata, (2) submit_scenario_period once per calendar row in period_order order, (3) complete_scenario_detail with per_worker true.";
 
 #[derive(Debug, Clone)]
 pub struct ScenarioBuilderAgent {
@@ -102,7 +103,7 @@ impl ScenarioBuilderAgent {
     pub fn parse_detail_output(text: &str) -> Result<ScenarioDetailOutput> {
         let json_text = extract_json_blob(text).ok_or_else(|| {
             Error::string(
-                "scenario detail response did not contain JSON; call submit_scenario_detail",
+                "scenario detail response did not contain JSON; call complete_scenario_detail",
             )
         })?;
         let output: ScenarioDetailOutput = serde_json::from_str(json_text).map_err(|err| {
@@ -169,19 +170,42 @@ impl ScenarioBuilderAgent {
         Ok(())
     }
 
-    pub fn validate_detail_output(output: &ScenarioDetailOutput) -> Result<()> {
+    pub fn validate_detail_metadata(output: &ScenarioDetailMetadataOutput) -> Result<()> {
         if output.scenario_key.trim().is_empty() {
             return Err(Error::string("scenario_key cannot be empty"));
         }
         if output.assumption_summary.trim().is_empty() {
             return Err(Error::string("assumption_summary cannot be empty"));
         }
+        if output.crux_assumptions.is_empty() {
+            return Err(Error::string("scenario detail needs at least one crux_assumption"));
+        }
+        if output.sensitivities.is_empty() {
+            return Err(Error::string("scenario detail needs at least one sensitivity"));
+        }
+        if output.confirming_signals.is_empty() || output.breaking_signals.is_empty() {
+            return Err(Error::string(
+                "scenario detail needs confirming and breaking signals",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_detail_output(output: &ScenarioDetailOutput) -> Result<()> {
+        Self::validate_detail_metadata(&ScenarioDetailMetadataOutput {
+            scenario_key: output.scenario_key.clone(),
+            assumption_summary: output.assumption_summary.clone(),
+            crux_assumptions: output.crux_assumptions.clone(),
+            sensitivities: output.sensitivities.clone(),
+            confirming_signals: output.confirming_signals.clone(),
+            breaking_signals: output.breaking_signals.clone(),
+            per_worker: output.per_worker,
+        })?;
         if output.periods.is_empty() {
             return Err(Error::string("scenario detail requires at least one period"));
         }
 
         let mut orders = std::collections::HashSet::new();
-        let mut has_terminal_multiples = false;
         for period in &output.periods {
             if !orders.insert(period.period_order) {
                 return Err(Error::string(&format!(
@@ -204,9 +228,6 @@ impl ScenarioBuilderAgent {
                     period.label
                 )));
             }
-            if period.ps_median.is_some() {
-                has_terminal_multiples = true;
-            }
         }
 
         let max_order = output.periods.iter().map(|p| p.period_order).max().unwrap_or(0);
@@ -218,21 +239,6 @@ impl ScenarioBuilderAgent {
         if terminal.ps_median.is_none() {
             return Err(Error::string(
                 "terminal period must include ps_median valuation band",
-            ));
-        }
-        if !has_terminal_multiples {
-            return Err(Error::string("terminal period needs valuation multiples"));
-        }
-
-        if output.crux_assumptions.is_empty() {
-            return Err(Error::string("scenario detail needs at least one crux_assumption"));
-        }
-        if output.sensitivities.is_empty() {
-            return Err(Error::string("scenario detail needs at least one sensitivity"));
-        }
-        if output.confirming_signals.is_empty() || output.breaking_signals.is_empty() {
-            return Err(Error::string(
-                "scenario detail needs confirming and breaking signals",
             ));
         }
 
@@ -253,7 +259,7 @@ impl ScenarioBuilderAgent {
             .with_web_search(WebSearchConfig::concept_validation_defaults());
         match self.config.mode {
             ScenarioBuilderMode::Blueprint => registry.with_scenario_blueprint_submit(),
-            ScenarioBuilderMode::Detail => registry.with_scenario_detail_submit(),
+            ScenarioBuilderMode::Detail => registry.with_scenario_detail_tools(),
         }
     }
 
@@ -291,14 +297,19 @@ impl ScenarioBuilderAgent {
                 sources_summary: String::new(),
             });
         let context_section = format_scenario_context_section(&workspace_context);
-        let (golden_path, submit_shape) = match self.config.mode {
+        let (golden_path, submit_shape): (&str, String) = match self.config.mode {
             ScenarioBuilderMode::Blueprint => (
                 scenario_blueprint_golden_path(),
-                scenario_blueprint_submit_example(),
+                scenario_blueprint_submit_example().to_string(),
             ),
             ScenarioBuilderMode::Detail => (
                 scenario_detail_golden_path(),
-                scenario_detail_submit_example(),
+                format!(
+                    "Metadata:\n{}\n\nPeriod:\n{}\n\nComplete:\n{}",
+                    scenario_detail_metadata_example(),
+                    scenario_period_submit_example(),
+                    scenario_detail_complete_example(),
+                ),
             ),
         };
 

@@ -67,9 +67,9 @@ pub async fn persist_fixture_scenarios(ctx: &mut LaneContext) -> Result<()> {
 
     for scenario_id in 1..=4 {
         for (period_order, period_end) in &calendar_periods {
-            let is_terminal = *period_order == 16;
-            let ps_vals = if is_terminal {
-                "8.0, 9.0, 10.0, 30.0, 35.0, 40.0"
+            let is_forward = *period_order > 4;
+            let ps_vals = if is_forward {
+                "7.5, 8.5, 9.5, 28.0, 32.0, 36.0"
             } else {
                 "NULL, NULL, NULL, NULL, NULL, NULL"
             };

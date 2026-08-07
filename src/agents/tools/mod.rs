@@ -6,7 +6,9 @@ pub mod fundamentals_lookup;
 pub mod mechanics_complete;
 pub mod narrative_research;
 pub mod scenario_blueprint_submit;
+pub mod scenario_detail_complete;
 pub mod scenario_detail_submit;
+pub mod scenario_period_submit;
 pub mod sql_query;
 pub mod web_search;
 
@@ -19,7 +21,9 @@ use concept_review_submit::TOOL_NAME as CONCEPT_REVIEW_SUBMIT_TOOL_NAME;
 use crux_triage_submit::TOOL_NAME as CRUX_TRIAGE_SUBMIT_TOOL_NAME;
 use fundamentals_lookup::TOOL_NAME as FUNDAMENTALS_LOOKUP_TOOL_NAME;
 use scenario_blueprint_submit::TOOL_NAME as SCENARIO_BLUEPRINT_SUBMIT_TOOL_NAME;
+use scenario_detail_complete::TOOL_NAME as SCENARIO_DETAIL_COMPLETE_TOOL_NAME;
 use scenario_detail_submit::TOOL_NAME as SCENARIO_DETAIL_SUBMIT_TOOL_NAME;
+use scenario_period_submit::TOOL_NAME as SCENARIO_PERIOD_SUBMIT_TOOL_NAME;
 use mechanics_complete::TOOL_NAME as MECHANICS_COMPLETE_TOOL_NAME;
 use narrative_research::NARRATIVE_TOOL_NAMES;
 use sql_query::TOOL_NAME as SQL_QUERY_TOOL_NAME;
@@ -28,7 +32,9 @@ pub use analysis_draft_run::TOOL_NAME as ANALYSIS_DRAFT_TOOL;
 pub use analysis_finalize::TOOL_NAME as ANALYSIS_FINALIZE_TOOL;
 pub use crux_triage_submit::TOOL_NAME as CRUX_TRIAGE_SUBMIT_TOOL;
 pub use scenario_blueprint_submit::TOOL_NAME as SCENARIO_BLUEPRINT_SUBMIT_TOOL;
+pub use scenario_detail_complete::TOOL_NAME as SCENARIO_DETAIL_COMPLETE_TOOL;
 pub use scenario_detail_submit::TOOL_NAME as SCENARIO_DETAIL_SUBMIT_TOOL;
+pub use scenario_period_submit::TOOL_NAME as SCENARIO_PERIOD_SUBMIT_TOOL;
 use std::{path::PathBuf, sync::Arc};
 pub use web_search::WebSearchConfig;
 
@@ -45,6 +51,8 @@ pub enum SharedTool {
     MechanicsComplete,
     ScenarioBlueprintSubmit,
     ScenarioDetailSubmit,
+    ScenarioPeriodSubmit,
+    ScenarioDetailComplete,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -150,11 +158,34 @@ impl ToolRegistry {
         self
     }
 
-    pub fn with_scenario_detail_submit(mut self) -> Self {
-        if !self.tools.iter().any(|t| matches!(t, SharedTool::ScenarioDetailSubmit)) {
+    pub fn with_scenario_detail_tools(mut self) -> Self {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::ScenarioDetailSubmit))
+        {
             self.tools.push(SharedTool::ScenarioDetailSubmit);
         }
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::ScenarioPeriodSubmit))
+        {
+            self.tools.push(SharedTool::ScenarioPeriodSubmit);
+        }
+        if !self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, SharedTool::ScenarioDetailComplete))
+        {
+            self.tools.push(SharedTool::ScenarioDetailComplete);
+        }
         self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_scenario_detail_submit(mut self) -> Self {
+        self.with_scenario_detail_tools()
     }
 
     pub fn with_mechanics_complete(mut self) -> Self {
@@ -179,7 +210,9 @@ impl ToolRegistry {
             | SharedTool::AnalysisFinalize
             | SharedTool::MechanicsComplete
             | SharedTool::ScenarioBlueprintSubmit
-            | SharedTool::ScenarioDetailSubmit => true,
+            | SharedTool::ScenarioDetailSubmit
+            | SharedTool::ScenarioPeriodSubmit
+            | SharedTool::ScenarioDetailComplete => true,
             SharedTool::WebSearch(_) => false,
         })
     }
@@ -232,6 +265,12 @@ impl ToolRegistry {
                 SharedTool::ScenarioDetailSubmit => {
                     CompletionTool::Function(scenario_detail_submit::openrouter_tool())
                 }
+                SharedTool::ScenarioPeriodSubmit => {
+                    CompletionTool::Function(scenario_period_submit::openrouter_tool())
+                }
+                SharedTool::ScenarioDetailComplete => {
+                    CompletionTool::Function(scenario_detail_complete::openrouter_tool())
+                }
                 SharedTool::NarrativeResearch => unreachable!("handled above"),
             })
             .collect()
@@ -263,6 +302,8 @@ impl ToolRegistry {
                     | SharedTool::MechanicsComplete
                     | SharedTool::ScenarioBlueprintSubmit
                     | SharedTool::ScenarioDetailSubmit
+                    | SharedTool::ScenarioPeriodSubmit
+                    | SharedTool::ScenarioDetailComplete
             )
         }) {
             return None;
@@ -404,6 +445,32 @@ impl ClientToolHandler for RegistryClientHandler {
                 )
             })?;
             return scenario_detail_submit::execute(path, arguments).await;
+        }
+        if tool_name == SCENARIO_PERIOD_SUBMIT_TOOL_NAME
+            && self
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, SharedTool::ScenarioPeriodSubmit))
+        {
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "submit_scenario_period requires a workspace sqlite path",
+                )
+            })?;
+            return scenario_period_submit::execute(path, arguments).await;
+        }
+        if tool_name == SCENARIO_DETAIL_COMPLETE_TOOL_NAME
+            && self
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, SharedTool::ScenarioDetailComplete))
+        {
+            let path = self.sqlite_path.as_ref().ok_or_else(|| {
+                loco_rs::prelude::Error::string(
+                    "complete_scenario_detail requires a workspace sqlite path",
+                )
+            })?;
+            return scenario_detail_complete::execute(path, arguments).await;
         }
 
         Err(loco_rs::prelude::Error::string(&format!(

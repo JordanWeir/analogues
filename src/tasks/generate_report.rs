@@ -124,7 +124,11 @@ fn resolve_workspace_paths(request: &GenerateReportRequest) -> Result<crate::wor
                 generated_dir: workspace_dir.join("generated"),
             }
         }
-        None => WorkspaceStore.resolve_latest(&request.base_dir, &request.ticker, &request.date)?,
+        None => WorkspaceStore::default().resolve_latest(
+            &request.base_dir,
+            &request.ticker,
+            &request.date,
+        )?,
     };
 
     if !paths.sqlite_path.is_file() {

@@ -162,7 +162,8 @@ pub async fn render_and_persist_report(
 /// Compile the full report JSON payload from workspace tables.
 pub async fn compile_report_payload(db: &sea_orm::DatabaseConnection) -> Result<Value> {
     let stock = load_stock_info(db).await?;
-    let fundamentals = load_fundamentals(db).await?;
+    let mut fundamentals = load_fundamentals(db).await?;
+    enhance_spot_market_metrics(db, &mut fundamentals).await?;
     let observations = load_fundamental_observations(db).await?;
     let run_metadata = load_run_metadata(db).await?;
     let data_gaps = load_data_gaps(db).await?;
@@ -514,6 +515,51 @@ async fn load_fundamentals(db: &sea_orm::DatabaseConnection) -> Result<Fundament
         }
     }
     Ok(fundamentals)
+}
+
+async fn enhance_spot_market_metrics(
+    db: &sea_orm::DatabaseConnection,
+    fundamentals: &mut Fundamentals,
+) -> Result<()> {
+    use crate::services::workspace_financial_store::resolve_spot_market_snapshot;
+
+    let snapshot = resolve_spot_market_snapshot(
+        db,
+        fundamentals.get("current_price").map(|metric| metric.value),
+        fundamentals.get("market_cap").map(|metric| metric.value),
+        fundamentals
+            .get("shares_outstanding")
+            .map(|metric| metric.value),
+    )
+    .await?;
+
+    if !fundamentals.contains_key("current_price") {
+        if let Some(current_price) = snapshot.current_price {
+            fundamentals.insert(
+                "current_price".to_string(),
+                FundamentalMetric {
+                    value: current_price,
+                    period: snapshot.current_price_period,
+                    source_note: snapshot.current_price_source_note,
+                },
+            );
+        }
+    }
+
+    if !fundamentals.contains_key("market_cap") {
+        if let Some(market_cap) = snapshot.market_cap {
+            fundamentals.insert(
+                "market_cap".to_string(),
+                FundamentalMetric {
+                    value: market_cap,
+                    period: None,
+                    source_note: snapshot.market_cap_source_note,
+                },
+            );
+        }
+    }
+
+    Ok(())
 }
 
 async fn load_fundamental_observations(
@@ -1040,12 +1086,22 @@ fn historical_growth_json(observations: &[FundamentalObservationRow]) -> Value {
     let tracked_metrics = [
         "revenue_quarter",
         "revenue_ttm",
+        "revenue_per_share_quarter",
+        "revenue_per_share_ttm",
         "gross_margin",
         "operating_margin",
         "net_margin",
         "eps_quarter",
         "eps_ttm",
         "diluted_shares_quarter",
+        "price_quarter_open",
+        "price_quarter_high",
+        "price_quarter_low",
+        "price_quarter_close",
+        "pe_quarter_min",
+        "pe_quarter_max",
+        "price_to_revenue_quarter_min",
+        "price_to_revenue_quarter_max",
     ];
     let mut series = Map::new();
     for metric_key in tracked_metrics {
@@ -1084,7 +1140,7 @@ fn historical_growth_json(observations: &[FundamentalObservationRow]) -> Value {
         Value::Null
     } else {
         json!({
-            "summary": "Historical growth is sourced from the normalized SEC/Yahoo observation timeline. Derived margins and TTM rows are period-aligned before inclusion.",
+            "summary": "Historical growth and valuation bands are sourced from normalized fundamental observations, including Alpha Vantage derived TTM windows, quarter price HLOC, and P/E bands.",
             "series": series,
         })
     }

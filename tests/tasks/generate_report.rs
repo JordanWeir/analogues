@@ -238,14 +238,14 @@ async fn seed_minimum_report_data(db: &sea_orm::DatabaseConnection) {
     execute_sql(
         db,
         "INSERT INTO scenario_periods (
-            scenario_id, period_order, label, revenue_growth, diluted_shares,
+            scenario_id, period_order, label, period_type, revenue, diluted_shares,
             net_margin, ps_low, ps_median, ps_high, pe_low, pe_median, pe_high,
             blend_ps_weight, blend_pe_weight
-         ) VALUES (
-            1, 1, '+12 months', 0.10, 100000000.0,
-            0.21, 8.0, 9.0, 10.0, 30.0, 35.0, 40.0,
-            0.5, 0.5
-         )",
+         ) VALUES
+            (1, 1, 'Q1', 'quarter', 250000000.0, 100000000.0, 0.21, NULL, NULL, NULL, NULL, NULL, NULL, 0.5, 0.5),
+            (1, 2, 'Q2', 'quarter', 250000000.0, 100000000.0, 0.21, NULL, NULL, NULL, NULL, NULL, NULL, 0.5, 0.5),
+            (1, 3, 'Q3', 'quarter', 250000000.0, 100000000.0, 0.21, NULL, NULL, NULL, NULL, NULL, NULL, 0.5, 0.5),
+            (1, 4, 'Q4', 'quarter', 250000000.0, 100000000.0, 0.21, 8.0, 9.0, 10.0, 30.0, 35.0, 40.0, 0.5, 0.5)",
     )
     .await
     .unwrap();

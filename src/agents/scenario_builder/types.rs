@@ -17,7 +17,7 @@ impl ScenarioBuilderMode {
     pub fn submit_tool_name(self) -> &'static str {
         match self {
             Self::Blueprint => "submit_scenario_blueprint",
-            Self::Detail => "submit_scenario_detail",
+            Self::Detail => "complete_scenario_detail",
         }
     }
 
@@ -67,6 +67,31 @@ pub struct ScenarioBlueprint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenarioDetailMetadataOutput {
+    pub scenario_key: String,
+    pub assumption_summary: String,
+    pub crux_assumptions: Vec<ScenarioCruxAssumptionInput>,
+    pub sensitivities: Vec<String>,
+    pub confirming_signals: Vec<String>,
+    pub breaking_signals: Vec<String>,
+    #[serde(default)]
+    pub per_worker: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenarioPeriodSubmitInput {
+    pub scenario_key: String,
+    pub period: ScenarioPeriodInput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenarioDetailCompleteInput {
+    pub scenario_key: String,
+    #[serde(default)]
+    pub per_worker: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioDetailOutput {
     pub scenario_key: String,
     pub assumption_summary: String,
@@ -78,6 +103,7 @@ pub struct ScenarioDetailOutput {
     pub confirming_signals: Vec<String>,
     #[serde(default)]
     pub breaking_signals: Vec<String>,
+    #[serde(default)]
     pub periods: Vec<ScenarioPeriodInput>,
     #[serde(default)]
     pub per_worker: bool,

@@ -1,7 +1,12 @@
 //! Deterministic scenario roll-forward, valuation bands, and Monte Carlo persistence.
 //! Used by `scenario_generation` lane; consumed by `report_artifacts` / `scenario_artifacts`.
 
-use crate::services::workspace_sql::{execute_sql, scalar_i64, sql_number, sql_quote, sql_value};
+use crate::services::{
+    scenario_projection_calendar::load_calendar,
+    workspace_financial_store::WorkspaceFinancialStore,
+    workspace_sql::{execute_sql, scalar_i64, sql_number, sql_quote, sql_value},
+};
+use crate::workspace::DailyPriceBar;
 use chrono::Utc;
 use loco_rs::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseBackend, QueryResult, Statement};
@@ -10,6 +15,9 @@ use std::collections::{BTreeMap, HashMap};
 
 const P10_P90_Z_SCORE: f64 = 1.281_551_565_544_600_4;
 const PROJECTION_NOTE: &str = "Scenario projections are illustrative and assumption-driven. They are not predictions, price targets, or investment advice.";
+const TTM_QUARTERS: usize = 4;
+const VALUATION_MULTIPLE_BASIS: &str = "ttm";
+const DEFAULT_BLEND_WEIGHT: f64 = 0.5;
 
 #[derive(Debug, Clone)]
 struct FundamentalMetric {
@@ -20,8 +28,34 @@ struct FundamentalMetric {
 
 type Fundamentals = HashMap<String, FundamentalMetric>;
 
+#[derive(Debug, Clone, Default)]
+struct PeriodMeta {
+    period_order: i64,
+    is_historical: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct QuarterActuals {
+    revenue: Option<f64>,
+    net_income: Option<f64>,
+    gross_profit: Option<f64>,
+    diluted_shares: Option<f64>,
+    market_price: Option<Band>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProjectionContext {
+    historical_quarters: usize,
+    forward_quarters: usize,
+    historical_anchor_end: Option<String>,
+    terminal_period_end: Option<String>,
+    period_meta: HashMap<String, PeriodMeta>,
+    quarter_actuals: HashMap<String, QuarterActuals>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScenarioPeriodRow {
+    pub period_order: i64,
     pub label: String,
     pub period_end: Option<String>,
     pub period_type: Option<String>,
@@ -41,6 +75,7 @@ pub struct ScenarioPeriodRow {
     pub pe_high: Option<f64>,
     pub blend_ps_weight: f64,
     pub blend_pe_weight: f64,
+    pub source_note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +181,7 @@ pub async fn build_scenario_data_json(db: &sea_orm::DatabaseConnection) -> Resul
     let stock = load_stock_info(db).await?;
     let mut fundamentals = load_fundamentals(db).await?;
     enhance_baseline_from_av(db, &mut fundamentals).await?;
+    enhance_spot_market_metrics(db, &mut fundamentals).await?;
     let scenarios = load_scenarios(db).await?;
     if scenarios.is_empty() {
         return Err(Error::string("no scenario_assumptions rows to project"));
@@ -159,7 +195,14 @@ pub async fn build_scenario_data_json(db: &sea_orm::DatabaseConnection) -> Resul
         }
     }
     let config = load_monte_carlo_config(db).await?;
-    build_scenario_data(&stock, &fundamentals, &scenarios, &config)
+    let projection_context = load_projection_context(db).await?;
+    build_scenario_data(
+        &stock,
+        &fundamentals,
+        &scenarios,
+        &config,
+        &projection_context,
+    )
 }
 
 /// Load persisted Monte Carlo outputs as report-ready JSON.
@@ -304,6 +347,51 @@ async fn enhance_baseline_from_av(
     Ok(())
 }
 
+async fn enhance_spot_market_metrics(
+    db: &sea_orm::DatabaseConnection,
+    fundamentals: &mut Fundamentals,
+) -> Result<()> {
+    use crate::services::workspace_financial_store::resolve_spot_market_snapshot;
+
+    let snapshot = resolve_spot_market_snapshot(
+        db,
+        fundamentals.get("current_price").map(|metric| metric.value),
+        fundamentals.get("market_cap").map(|metric| metric.value),
+        fundamentals
+            .get("shares_outstanding")
+            .map(|metric| metric.value),
+    )
+    .await?;
+
+    if !fundamentals.contains_key("current_price") {
+        if let Some(current_price) = snapshot.current_price {
+            fundamentals.insert(
+                "current_price".to_string(),
+                FundamentalMetric {
+                    value: current_price,
+                    period: snapshot.current_price_period,
+                    source_note: snapshot.current_price_source_note,
+                },
+            );
+        }
+    }
+
+    if !fundamentals.contains_key("market_cap") {
+        if let Some(market_cap) = snapshot.market_cap {
+            fundamentals.insert(
+                "market_cap".to_string(),
+                FundamentalMetric {
+                    value: market_cap,
+                    period: None,
+                    source_note: snapshot.market_cap_source_note,
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
 async fn av_trailing_revenue_ttm(db: &sea_orm::DatabaseConnection) -> Result<Option<f64>> {
     let rows = query_all(
         db,
@@ -346,6 +434,7 @@ fn build_scenario_data(
     fundamentals: &Fundamentals,
     scenarios: &[ScenarioInput],
     config: &MonteCarloConfig,
+    projection_context: &ProjectionContext,
 ) -> Result<Value> {
     let baseline_revenue = required_metric(fundamentals, "revenue_ttm")?;
     let baseline_shares = required_metric(fundamentals, "shares_outstanding")?;
@@ -364,6 +453,7 @@ fn build_scenario_data(
             baseline_shares,
             baseline_margin,
             baseline_eps,
+            projection_context,
         )?);
     }
 
@@ -373,8 +463,11 @@ fn build_scenario_data(
         "currency": stock.currency.clone().unwrap_or_else(|| "USD".to_string()),
         "generated_at": Utc::now().to_rfc3339(),
         "projection_note": PROJECTION_NOTE,
+        "valuation_multiple_basis": VALUATION_MULTIPLE_BASIS,
         "base_year": base_year,
         "current_price": metric_value(fundamentals, "current_price"),
+        "projection_calendar": projection_calendar_json(projection_context),
+        "historical_periods": build_historical_periods_json(scenarios, projection_context),
         "baseline": {
             "revenue": baseline_revenue,
             "diluted_shares": baseline_shares,
@@ -392,21 +485,86 @@ fn build_scenario_data(
     }))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct QuarterWindowEntry {
+    revenue: f64,
+    net_income: f64,
+}
+
+fn ttm_valuation_inputs(
+    window: &[QuarterWindowEntry],
+    diluted_shares: f64,
+) -> Option<(f64, f64, f64)> {
+    if window.len() < TTM_QUARTERS || diluted_shares <= 0.0 {
+        return None;
+    }
+    let revenue_ttm: f64 = window.iter().map(|entry| entry.revenue).sum();
+    let net_income_ttm: f64 = window.iter().map(|entry| entry.net_income).sum();
+    Some((
+        revenue_ttm,
+        revenue_ttm / diluted_shares,
+        net_income_ttm / diluted_shares,
+    ))
+}
+
 fn build_scenario_json(
     scenario: &ScenarioInput,
     baseline_revenue: f64,
     baseline_shares: f64,
     baseline_margin: Option<f64>,
     baseline_eps: Option<f64>,
+    projection_context: &ProjectionContext,
 ) -> Result<Value> {
     let mut periods = Vec::new();
     let mut previous_revenue = baseline_revenue;
     let mut previous_shares = baseline_shares;
     let mut previous_margin = baseline_margin;
     let mut previous_eps = baseline_eps;
+    let mut quarter_window: Vec<QuarterWindowEntry> = Vec::with_capacity(TTM_QUARTERS);
 
     for period in &scenario.periods {
-        let revenue = match (period.revenue, period.revenue_growth) {
+        let period_end = period.period_end.clone().unwrap_or_default();
+        let meta = projection_context
+            .period_meta
+            .get(&period_end)
+            .cloned()
+            .unwrap_or(PeriodMeta {
+                period_order: period.period_order,
+                is_historical: false,
+            });
+        let is_historical = meta.is_historical;
+        let period_kind = if is_historical {
+            "historical"
+        } else {
+            "projected"
+        };
+        let actuals = projection_context.quarter_actuals.get(&period_end);
+
+        let mut revenue = period.revenue;
+        let mut diluted_shares = period.diluted_shares;
+        let mut net_income = period.net_income;
+        let mut gross_margin = period.gross_margin;
+        let mut net_margin = period.net_margin;
+        let mut eps = period.eps;
+
+        if is_historical {
+            if let Some(actuals) = actuals {
+                revenue = revenue.or(actuals.revenue);
+                net_income = net_income.or(actuals.net_income);
+                diluted_shares = diluted_shares.or(actuals.diluted_shares);
+                if gross_margin.is_none() {
+                    gross_margin = ratio(actuals.gross_profit, actuals.revenue);
+                }
+                if net_margin.is_none() {
+                    net_margin = ratio(actuals.net_income, actuals.revenue);
+                }
+                if eps.is_none() {
+                    eps = ratio(actuals.net_income, actuals.diluted_shares);
+                }
+            }
+        }
+
+        let revenue = match (revenue, period.revenue_growth) {
             (Some(revenue), _) => revenue,
             (None, Some(growth)) => previous_revenue * (1.0 + growth),
             (None, None) => {
@@ -419,41 +577,97 @@ fn build_scenario_json(
         let revenue_growth = period
             .revenue_growth
             .or_else(|| growth_rate(Some(revenue), Some(previous_revenue)));
-        let diluted_shares = period.diluted_shares.unwrap_or(previous_shares);
-        let net_margin = period.net_margin.or(previous_margin);
-        let net_income = period
-            .net_income
-            .or_else(|| net_margin.map(|margin| revenue * margin));
-        let eps = period
-            .eps
+        let diluted_shares = diluted_shares.unwrap_or(previous_shares);
+        let net_margin = net_margin.or(previous_margin);
+        let net_income = net_income.or_else(|| net_margin.map(|margin| revenue * margin));
+        let eps = eps
             .or_else(|| net_income.map(|income| income / diluted_shares))
             .or(previous_eps);
         let ps_multiple = band_from_parts(period.ps_low, period.ps_median, period.ps_high);
         let pe_multiple = band_from_parts(period.pe_low, period.pe_median, period.pe_high);
-        let blend_weights = normalize_weights(period.blend_ps_weight, period.blend_pe_weight)?;
         let revenue_per_share = revenue / diluted_shares;
-        let ps_implied_price = apply_multiple(Some(revenue_per_share), ps_multiple);
-        let pe_implied_price = apply_multiple(eps, pe_multiple);
+
+        if let Some(net_income) = net_income {
+            quarter_window.push(QuarterWindowEntry {
+                revenue,
+                net_income,
+            });
+            if quarter_window.len() > TTM_QUARTERS {
+                quarter_window.remove(0);
+            }
+        }
+
+        let (revenue_ttm, revenue_per_share_ttm, eps_ttm) =
+            match ttm_valuation_inputs(&quarter_window, diluted_shares) {
+                Some((revenue_ttm, revenue_per_share_ttm, eps_ttm)) => {
+                    (Some(revenue_ttm), Some(revenue_per_share_ttm), Some(eps_ttm))
+                }
+                None => (None, None, None),
+            };
+        let (blend_weights, blend_rationale) = resolve_blend_weights(
+            period.blend_ps_weight,
+            period.blend_pe_weight,
+            eps_ttm,
+            ps_multiple,
+            pe_multiple,
+        )?;
+        let ps_implied_price = apply_multiple(revenue_per_share_ttm, ps_multiple);
+        let pe_implied_price = apply_multiple(pe_eps_usable(eps_ttm), pe_multiple);
         let blended_price = blend_bands(ps_implied_price, pe_implied_price, blend_weights);
+        let multiple_basis = if (ps_multiple.is_some() || pe_multiple.is_some())
+            && (ps_implied_price.is_some() || pe_implied_price.is_some())
+        {
+            Some(VALUATION_MULTIPLE_BASIS)
+        } else {
+            None
+        };
+        let market_price = if is_historical {
+            actuals.and_then(|actuals| actuals.market_price)
+        } else {
+            None
+        };
+        let chart_price = if is_historical {
+            market_price.or(blended_price)
+        } else {
+            blended_price
+        };
 
         periods.push(json!({
+            "period_order": meta.period_order,
             "label": period.label,
             "period_end": period.period_end,
             "period_type": period.period_type,
+            "is_historical": is_historical,
+            "period_kind": period_kind,
             "revenue_growth": round_optional(revenue_growth),
             "revenue": round_float(revenue),
             "diluted_shares": round_float(diluted_shares),
             "revenue_per_share": round_float(revenue_per_share),
-            "gross_margin": period.gross_margin,
+            "revenue_ttm": round_optional(revenue_ttm),
+            "revenue_per_share_ttm": round_optional(revenue_per_share_ttm),
+            "gross_margin": gross_margin,
             "operating_margin": period.operating_margin,
             "net_margin": net_margin,
             "net_income": round_optional(net_income),
             "eps": round_optional(eps),
+            "eps_ttm": round_optional(eps_ttm),
+            "multiple_basis": multiple_basis,
             "ps_multiple": ps_multiple.map(|band| band.to_json()),
             "pe_multiple": pe_multiple.map(|band| band.to_json()),
+            "blend_weights": json!({ "ps": blend_weights.ps, "pe": blend_weights.pe }),
+            "blend_rationale": blend_rationale,
+            "market_price": market_price.map(|band| band.to_json()),
             "ps_implied_price": ps_implied_price.map(|band| band.to_json()),
             "pe_implied_price": pe_implied_price.map(|band| band.to_json()),
             "blended_price": blended_price.map(|band| band.to_json()),
+            "chart_price": chart_price.map(|band| band.to_json()),
+            "source_note": period.source_note.clone().or_else(|| {
+                if is_historical {
+                    Some("Alpha Vantage quarterly actual".to_string())
+                } else {
+                    None
+                }
+            }),
         }));
 
         previous_revenue = revenue;
@@ -573,7 +787,8 @@ fn build_monte_carlo(config: &MonteCarloConfig, scenarios: &[ScenarioOutput]) ->
         seed: config.seed,
         bins: config.bins,
         price_field: Some(
-            "terminal blended price, falling back to P/S or P/E implied price".to_string(),
+            "terminal blended price from TTM P/S and P/E multiples, falling back to P/S or P/E implied price"
+                .to_string(),
         ),
         probability_basis: Some(
             "Scenario probabilities normalized across scenarios with terminal bands.".to_string(),
@@ -747,16 +962,16 @@ async fn load_fundamentals(db: &sea_orm::DatabaseConnection) -> Result<Fundament
         if map.contains_key(&key) {
             continue;
         }
-        let value = row_opt_f64(&row, 1)?
-            .ok_or_else(|| Error::string(&format!("fundamentals metric '{key}' is not numeric")))?;
-        map.insert(
-            key,
-            FundamentalMetric {
-                value,
-                period: row_opt_string(&row, 2)?,
-                source_note: row_opt_string(&row, 3)?,
-            },
-        );
+        if let Some(value) = row_opt_f64(&row, 1)? {
+            map.insert(
+                key,
+                FundamentalMetric {
+                    value,
+                    period: row_opt_string(&row, 2)?,
+                    source_note: row_opt_string(&row, 3)?,
+                },
+            );
+        }
     }
     Ok(map)
 }
@@ -839,10 +1054,10 @@ async fn load_scenario_periods(
     let rows = query_all(
         db,
         &format!(
-            "SELECT label, period_end, period_type, revenue, revenue_growth, diluted_shares,
+            "SELECT period_order, label, period_end, period_type, revenue, revenue_growth, diluted_shares,
                     gross_margin, operating_margin, net_margin, net_income, eps,
                     ps_low, ps_median, ps_high, pe_low, pe_median, pe_high,
-                    blend_ps_weight, blend_pe_weight
+                    blend_ps_weight, blend_pe_weight, source_note
              FROM scenario_periods WHERE scenario_id = {scenario_id} ORDER BY period_order"
         ),
     )
@@ -850,25 +1065,27 @@ async fn load_scenario_periods(
     rows.into_iter()
         .map(|row| {
             Ok(ScenarioPeriodRow {
-                label: row_string(&row, 0)?,
-                period_end: row_opt_string(&row, 1)?,
-                period_type: row_opt_string(&row, 2)?,
-                revenue: row_opt_f64(&row, 3)?,
-                revenue_growth: row_opt_f64(&row, 4)?,
-                diluted_shares: row_opt_f64(&row, 5)?,
-                gross_margin: row_opt_f64(&row, 6)?,
-                operating_margin: row_opt_f64(&row, 7)?,
-                net_margin: row_opt_f64(&row, 8)?,
-                net_income: row_opt_f64(&row, 9)?,
-                eps: row_opt_f64(&row, 10)?,
-                ps_low: row_opt_f64(&row, 11)?,
-                ps_median: row_opt_f64(&row, 12)?,
-                ps_high: row_opt_f64(&row, 13)?,
-                pe_low: row_opt_f64(&row, 14)?,
-                pe_median: row_opt_f64(&row, 15)?,
-                pe_high: row_opt_f64(&row, 16)?,
-                blend_ps_weight: row_opt_f64(&row, 17)?.unwrap_or(0.5),
-                blend_pe_weight: row_opt_f64(&row, 18)?.unwrap_or(0.5),
+                period_order: row_i64(&row, 0)?,
+                label: row_string(&row, 1)?,
+                period_end: row_opt_string(&row, 2)?,
+                period_type: row_opt_string(&row, 3)?,
+                revenue: row_opt_f64(&row, 4)?,
+                revenue_growth: row_opt_f64(&row, 5)?,
+                diluted_shares: row_opt_f64(&row, 6)?,
+                gross_margin: row_opt_f64(&row, 7)?,
+                operating_margin: row_opt_f64(&row, 8)?,
+                net_margin: row_opt_f64(&row, 9)?,
+                net_income: row_opt_f64(&row, 10)?,
+                eps: row_opt_f64(&row, 11)?,
+                ps_low: row_opt_f64(&row, 12)?,
+                ps_median: row_opt_f64(&row, 13)?,
+                ps_high: row_opt_f64(&row, 14)?,
+                pe_low: row_opt_f64(&row, 15)?,
+                pe_median: row_opt_f64(&row, 16)?,
+                pe_high: row_opt_f64(&row, 17)?,
+                blend_ps_weight: row_opt_f64(&row, 18)?.unwrap_or(0.5),
+                blend_pe_weight: row_opt_f64(&row, 19)?.unwrap_or(0.5),
+                source_note: row_opt_string(&row, 20)?,
             })
         })
         .collect()
@@ -947,6 +1164,207 @@ fn required_metric(fundamentals: &Fundamentals, key: &str) -> Result<f64> {
         .ok_or_else(|| Error::string(&format!("fundamentals needs numeric metric_key '{key}'")))
 }
 
+async fn load_projection_context(db: &sea_orm::DatabaseConnection) -> Result<ProjectionContext> {
+    let Some(calendar) = load_calendar(db).await? else {
+        return Ok(ProjectionContext::default());
+    };
+
+    let period_meta = calendar
+        .periods
+        .iter()
+        .map(|period| {
+            (
+                period.period_end.clone(),
+                PeriodMeta {
+                    period_order: period.period_order,
+                    is_historical: period.is_historical,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let historical_ends = calendar
+        .periods
+        .iter()
+        .filter(|period| period.is_historical)
+        .map(|period| period.period_end.clone())
+        .collect::<Vec<_>>();
+    let quarter_actuals = load_quarter_actuals(db, &historical_ends).await?;
+
+    Ok(ProjectionContext {
+        historical_quarters: calendar.historical_quarters,
+        forward_quarters: calendar.forward_quarters,
+        historical_anchor_end: Some(calendar.historical_anchor_end.clone()),
+        terminal_period_end: Some(calendar.terminal_period_end.clone()),
+        period_meta,
+        quarter_actuals,
+    })
+}
+
+async fn load_quarter_actuals(
+    db: &sea_orm::DatabaseConnection,
+    period_ends: &[String],
+) -> Result<HashMap<String, QuarterActuals>> {
+    if period_ends.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let quoted_ends = period_ends
+        .iter()
+        .map(|period_end| sql_quote(period_end))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = query_all(
+        db,
+        &format!(
+            "SELECT period_end, field_name, metric_value
+             FROM av_raw_facts
+             WHERE report_type = 'quarterly'
+               AND period_type = 'quarter'
+               AND period_end IN ({quoted_ends})
+               AND field_name IN (
+                 'totalRevenue', 'netIncome', 'grossProfit',
+                 'weightedAverageShsOutDil', 'commonStockSharesOutstanding'
+               )"
+        ),
+    )
+    .await?;
+
+    let mut actuals = period_ends
+        .iter()
+        .map(|period_end| (period_end.clone(), QuarterActuals::default()))
+        .collect::<HashMap<_, _>>();
+
+    for row in rows {
+        let period_end = row_string(&row, 0)?;
+        let field_name = row_string(&row, 1)?;
+        let value = row_opt_f64(&row, 2)?;
+        let Some(entry) = actuals.get_mut(&period_end) else {
+            continue;
+        };
+        match field_name.as_str() {
+            "totalRevenue" => entry.revenue = value,
+            "netIncome" => entry.net_income = value,
+            "grossProfit" => entry.gross_profit = value,
+            "weightedAverageShsOutDil" => {
+                if entry.diluted_shares.is_none() {
+                    entry.diluted_shares = value;
+                }
+            }
+            "commonStockSharesOutstanding" => entry.diluted_shares = value.or(entry.diluted_shares),
+            _ => {}
+        }
+    }
+
+    let daily_bars = WorkspaceFinancialStore::new(db)
+        .load_daily_price_bars()
+        .await?;
+    let mut sorted_ends = period_ends.to_vec();
+    sorted_ends.sort();
+
+    for (index, period_end) in sorted_ends.iter().enumerate() {
+        let prev = index.checked_sub(1).map(|idx| sorted_ends[idx].as_str());
+        if let Some(entry) = actuals.get_mut(period_end) {
+            entry.market_price = quarter_close_band(&daily_bars, period_end, prev);
+        }
+    }
+
+    Ok(actuals)
+}
+
+fn quarter_close_band(
+    daily_bars: &[DailyPriceBar],
+    period_end: &str,
+    prev_period_end: Option<&str>,
+) -> Option<Band> {
+    let mut bars: Vec<&DailyPriceBar> = daily_bars
+        .iter()
+        .filter(|bar| {
+            bar.trade_date.as_str() <= period_end
+                && prev_period_end.is_none_or(|previous| bar.trade_date.as_str() > previous)
+        })
+        .collect();
+    if bars.is_empty() {
+        return None;
+    }
+    bars.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
+    let low = bars.iter().map(|bar| bar.low).fold(f64::INFINITY, f64::min);
+    let high = bars
+        .iter()
+        .map(|bar| bar.high)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let close = bars.last()?.close;
+    Some(Band {
+        low: round_float(low),
+        median: round_float(close),
+        high: round_float(high),
+    })
+}
+
+fn projection_calendar_json(context: &ProjectionContext) -> Value {
+    if context.period_meta.is_empty() {
+        return Value::Null;
+    }
+    json!({
+        "historical_quarters": context.historical_quarters,
+        "forward_quarters": context.forward_quarters,
+        "historical_anchor_end": context.historical_anchor_end,
+        "terminal_period_end": context.terminal_period_end,
+    })
+}
+
+fn build_historical_periods_json(
+    scenarios: &[ScenarioInput],
+    projection_context: &ProjectionContext,
+) -> Vec<Value> {
+    let label_by_end = scenarios
+        .first()
+        .into_iter()
+        .flat_map(|scenario| scenario.periods.iter())
+        .filter_map(|period| {
+            period
+                .period_end
+                .as_ref()
+                .map(|period_end| (period_end.clone(), period.label.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut historical: Vec<Value> = projection_context
+        .period_meta
+        .iter()
+        .filter(|(_, meta)| meta.is_historical)
+        .map(|(period_end, meta)| {
+            let actuals = projection_context
+                .quarter_actuals
+                .get(period_end)
+                .cloned()
+                .unwrap_or_default();
+            let revenue = actuals.revenue;
+            let net_income = actuals.net_income;
+            let diluted_shares = actuals.diluted_shares;
+            let eps = ratio(actuals.net_income, actuals.diluted_shares);
+            json!({
+                "period_order": meta.period_order,
+                "period_end": period_end,
+                "label": label_by_end.get(period_end).cloned().unwrap_or_else(|| period_end.clone()),
+                "period_kind": "historical",
+                "is_historical": true,
+                "revenue": revenue.map(round_float),
+                "net_income": round_optional(net_income),
+                "diluted_shares": diluted_shares.map(round_float),
+                "gross_margin": round_optional(ratio(actuals.gross_profit, actuals.revenue)),
+                "net_margin": round_optional(ratio(actuals.net_income, actuals.revenue)),
+                "eps": round_optional(eps),
+                "market_price": actuals.market_price.map(|band| band.to_json()),
+                "chart_price": actuals.market_price.map(|band| band.to_json()),
+                "source_note": "Alpha Vantage quarterly actual with quarter close from daily_price_bars",
+            })
+        })
+        .collect();
+    historical.sort_by_key(|period| period.get("period_order").and_then(Value::as_i64).unwrap_or(0));
+    historical
+}
+
 fn band_from_parts(low: Option<f64>, median: Option<f64>, high: Option<f64>) -> Option<Band> {
     let median = median?;
     Some(Band {
@@ -954,6 +1372,61 @@ fn band_from_parts(low: Option<f64>, median: Option<f64>, high: Option<f64>) -> 
         median,
         high: high.unwrap_or(median),
     })
+}
+
+fn pe_eps_usable(eps_ttm: Option<f64>) -> Option<f64> {
+    eps_ttm.filter(|eps| *eps > 0.0)
+}
+
+fn resolve_blend_weights(
+    ps_weight: f64,
+    pe_weight: f64,
+    eps_ttm: Option<f64>,
+    ps_multiple: Option<Band>,
+    pe_multiple: Option<Band>,
+) -> Result<(BlendWeights, Option<String>)> {
+    let ps_available = ps_multiple.is_some();
+    let pe_available = pe_multiple.is_some() && pe_eps_usable(eps_ttm).is_some();
+
+    let (weights, rationale) = match (ps_available, pe_available) {
+        (true, true) => (
+            normalize_weights(ps_weight, pe_weight)?,
+            None,
+        ),
+        (true, false) => {
+            let rationale = if pe_multiple.is_some() && pe_eps_usable(eps_ttm).is_none() {
+                Some(
+                    "P/E implied price suppressed: TTM EPS is zero or negative; using P/S only."
+                        .to_string(),
+                )
+            } else if pe_weight > 0.0 {
+                Some(
+                    "P/E blend unused: no usable P/E multiple on this period; using P/S only."
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            (BlendWeights { ps: 1.0, pe: 0.0 }, rationale)
+        }
+        (false, true) => {
+            let rationale = if ps_weight > 0.0 {
+                Some("P/S implied price unavailable; using P/E only.".to_string())
+            } else {
+                None
+            };
+            (BlendWeights { ps: 0.0, pe: 1.0 }, rationale)
+        }
+        (false, false) => (
+            BlendWeights {
+                ps: DEFAULT_BLEND_WEIGHT,
+                pe: DEFAULT_BLEND_WEIGHT,
+            },
+            None,
+        ),
+    };
+
+    Ok((weights, rationale))
 }
 
 fn normalize_weights(ps_weight: f64, pe_weight: f64) -> Result<BlendWeights> {
@@ -1133,10 +1606,253 @@ fn growth_rate(value: Option<f64>, previous: Option<f64>) -> Option<f64> {
     }
 }
 
+fn ratio(numerator: Option<f64>, denominator: Option<f64>) -> Option<f64> {
+    match (numerator, denominator) {
+        (Some(numerator), Some(denominator)) if denominator != 0.0 => Some(numerator / denominator),
+        _ => None,
+    }
+}
+
 fn round_float(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
 }
 
 fn round_optional(value: Option<f64>) -> Option<f64> {
     value.map(round_float)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quarter_period(
+        label: &str,
+        revenue: f64,
+        net_income: f64,
+        shares: f64,
+        ps_median: Option<f64>,
+        pe_median: Option<f64>,
+    ) -> ScenarioPeriodRow {
+        ScenarioPeriodRow {
+            period_order: 0,
+            label: label.to_string(),
+            period_end: None,
+            period_type: Some("quarter".to_string()),
+            revenue: Some(revenue),
+            revenue_growth: None,
+            diluted_shares: Some(shares),
+            gross_margin: None,
+            operating_margin: None,
+            net_margin: Some(net_income / revenue),
+            net_income: Some(net_income),
+            eps: Some(net_income / shares),
+            ps_low: ps_median,
+            ps_median,
+            ps_high: ps_median,
+            pe_low: pe_median,
+            pe_median,
+            pe_high: pe_median,
+            blend_ps_weight: 0.5,
+            blend_pe_weight: 0.5,
+            source_note: None,
+        }
+    }
+
+    fn empty_projection_context() -> ProjectionContext {
+        ProjectionContext::default()
+    }
+
+    #[test]
+    fn suppresses_pe_blend_when_ttm_eps_is_non_positive() {
+        let scenario = ScenarioInput {
+            id: 1,
+            name: "loss path".to_string(),
+            stance: "bearish".to_string(),
+            probability: Some(1.0),
+            description: String::new(),
+            assumption_summary: None,
+            crux_assumptions: Vec::new(),
+            sensitivities: Vec::new(),
+            confirming_signals: Vec::new(),
+            breaking_signals: Vec::new(),
+            periods: vec![
+                quarter_period("Q1", 100.0, -10.0, 10.0, Some(2.0), Some(10.0)),
+                quarter_period("Q2", 110.0, -11.0, 10.0, Some(2.0), Some(10.0)),
+                quarter_period("Q3", 120.0, -12.0, 10.0, Some(2.0), Some(10.0)),
+                quarter_period("Q4", 130.0, -13.0, 10.0, Some(2.0), Some(10.0)),
+            ],
+        };
+
+        let value = build_scenario_json(
+            &scenario,
+            100.0,
+            10.0,
+            Some(-0.1),
+            Some(-1.0),
+            &empty_projection_context(),
+        )
+            .expect("scenario json");
+        let terminal = value["periods"]
+            .as_array()
+            .and_then(|periods| periods.last())
+            .expect("terminal period");
+
+        assert!(terminal["pe_implied_price"].is_null());
+        assert_eq!(terminal["blend_weights"]["ps"].as_f64(), Some(1.0));
+        assert_eq!(terminal["blend_weights"]["pe"].as_f64(), Some(0.0));
+        assert!(terminal["blend_rationale"]
+            .as_str()
+            .is_some_and(|note| note.contains("TTM EPS")));
+        assert_eq!(
+            terminal["blended_price"]["median"].as_f64(),
+            terminal["ps_implied_price"]["median"].as_f64()
+        );
+    }
+
+    #[test]
+    fn applies_valuation_multiples_to_each_period_with_ttm_window() {
+        let scenario = ScenarioInput {
+            id: 1,
+            name: "test".to_string(),
+            stance: "neutral".to_string(),
+            probability: Some(1.0),
+            description: String::new(),
+            assumption_summary: None,
+            crux_assumptions: Vec::new(),
+            sensitivities: Vec::new(),
+            confirming_signals: Vec::new(),
+            breaking_signals: Vec::new(),
+            periods: vec![
+                quarter_period("Q1", 100.0, 10.0, 10.0, Some(2.0), Some(10.0)),
+                quarter_period("Q2", 110.0, 11.0, 10.0, Some(2.0), Some(10.0)),
+                quarter_period("Q3", 120.0, 12.0, 10.0, Some(2.0), Some(10.0)),
+                quarter_period("Q4", 130.0, 13.0, 10.0, Some(2.0), Some(10.0)),
+            ],
+        };
+
+        let value = build_scenario_json(
+            &scenario,
+            100.0,
+            10.0,
+            Some(0.1),
+            Some(1.0),
+            &empty_projection_context(),
+        )
+            .expect("scenario json");
+        let periods = value["periods"].as_array().expect("periods");
+
+        assert_eq!(periods.len(), 4);
+        assert!(periods[0]["blended_price"].is_null());
+        assert!(periods[2]["blended_price"].is_null());
+        assert!(periods[3]["blended_price"]["median"].is_number());
+    }
+
+    #[test]
+    fn applies_valuation_multiples_to_ttm_per_share_metrics() {
+        let scenario = ScenarioInput {
+            id: 1,
+            name: "test".to_string(),
+            stance: "neutral".to_string(),
+            probability: Some(1.0),
+            description: String::new(),
+            assumption_summary: None,
+            crux_assumptions: Vec::new(),
+            sensitivities: Vec::new(),
+            confirming_signals: Vec::new(),
+            breaking_signals: Vec::new(),
+            periods: vec![
+                quarter_period("Q1", 100.0, 10.0, 10.0, None, None),
+                quarter_period("Q2", 110.0, 11.0, 10.0, None, None),
+                quarter_period("Q3", 120.0, 12.0, 10.0, None, None),
+                quarter_period("Q4", 130.0, 13.0, 10.0, Some(2.0), Some(10.0)),
+            ],
+        };
+
+        let value = build_scenario_json(
+            &scenario,
+            440.0,
+            10.0,
+            Some(0.1),
+            Some(4.4),
+            &empty_projection_context(),
+        )
+            .expect("scenario json");
+        let terminal = value["periods"]
+            .as_array()
+            .and_then(|periods| periods.last())
+            .expect("terminal period");
+
+        assert_eq!(terminal["eps"].as_f64(), Some(1.3));
+        assert_eq!(terminal["eps_ttm"].as_f64(), Some(4.6));
+        assert_eq!(terminal["revenue_per_share_ttm"].as_f64(), Some(46.0));
+        assert_eq!(terminal["multiple_basis"].as_str(), Some(VALUATION_MULTIPLE_BASIS));
+        assert_eq!(terminal["pe_implied_price"]["median"].as_f64(), Some(46.0));
+        assert_eq!(terminal["ps_implied_price"]["median"].as_f64(), Some(92.0));
+        assert_eq!(terminal["blended_price"]["median"].as_f64(), Some(69.0));
+    }
+
+    #[test]
+    fn defers_implied_prices_until_four_quarters_are_available() {
+        let scenario = ScenarioInput {
+            id: 1,
+            name: "test".to_string(),
+            stance: "neutral".to_string(),
+            probability: Some(1.0),
+            description: String::new(),
+            assumption_summary: None,
+            crux_assumptions: Vec::new(),
+            sensitivities: Vec::new(),
+            confirming_signals: Vec::new(),
+            breaking_signals: Vec::new(),
+            periods: vec![quarter_period("Q1", 100.0, 10.0, 10.0, Some(2.0), Some(10.0))],
+        };
+
+        let value = build_scenario_json(
+            &scenario,
+            100.0,
+            10.0,
+            Some(0.1),
+            Some(1.0),
+            &empty_projection_context(),
+        )
+            .expect("scenario json");
+        let terminal = &value["periods"][0];
+
+        assert!(terminal["eps_ttm"].is_null());
+        assert!(terminal["pe_implied_price"].is_null());
+        assert!(terminal["ps_implied_price"].is_null());
+        assert!(terminal["blended_price"].is_null());
+    }
+
+    #[test]
+    fn ttm_window_uses_trailing_four_quarters_only() {
+        let window = vec![
+            QuarterWindowEntry {
+                revenue: 1.0,
+                net_income: 0.1,
+            },
+            QuarterWindowEntry {
+                revenue: 2.0,
+                net_income: 0.2,
+            },
+            QuarterWindowEntry {
+                revenue: 3.0,
+                net_income: 0.3,
+            },
+            QuarterWindowEntry {
+                revenue: 4.0,
+                net_income: 0.4,
+            },
+            QuarterWindowEntry {
+                revenue: 100.0,
+                net_income: 10.0,
+            },
+        ];
+        let (revenue_ttm, revenue_per_share_ttm, eps_ttm) =
+            ttm_valuation_inputs(&window[1..], 10.0).expect("ttm inputs");
+
+        assert_eq!(revenue_ttm, 109.0);
+        assert_eq!(revenue_per_share_ttm, 10.9);
+        assert_eq!(eps_ttm, 1.09);
+    }
 }

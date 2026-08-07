@@ -1,6 +1,7 @@
 use crate::{
     services::{
         av_canonical_mapping::{resolve_av_canonical_mappings, AvCanonicalResolution},
+        av_derived_time_series::AvDerivedTimeSeries,
         av_fundamental_deriver::{AvFundamentalDeriver, AV_SOURCE_TYPE},
         concept_catalog::ConceptCatalog,
         concept_review::ConceptReviewDecisionRecord,
@@ -111,13 +112,33 @@ pub async fn derive_starter_fundamentals_on_workspace(
         ));
     }
 
-    let derived = AvFundamentalDeriver::derive_starter_fundamentals(
+    let daily_bars = store.load_daily_price_bars().await?;
+
+    let mut derived = AvFundamentalDeriver::derive_starter_fundamentals(
         &layers.av_raw_facts,
         &mappings,
         layers.stock.currency.as_deref(),
     );
 
+    let (derived_observations, derived_quality_flags) = AvDerivedTimeSeries::derive(
+        &layers.av_raw_facts,
+        &daily_bars,
+        layers.stock.currency.as_deref(),
+    );
+    derived.observations.extend(derived_observations);
+    derived.quality_flags.extend(derived_quality_flags);
+    derived.source_notes.push(
+        "Derived quarterly valuation bands, price HLOC, per-share metrics, and TTM windows from Alpha Vantage facts and daily_price_bars.".to_string(),
+    );
+    AvDerivedTimeSeries::apply_latest_ttm_to_starter(
+        &mut derived.starter,
+        &layers.av_raw_facts,
+    );
+
     let mut run = financial_run_from_layers(&layers, derived);
+    if let Some(bar) = daily_bars.last() {
+        run.apply_latest_daily_close(bar);
+    }
     run.fundamental_source = Some(AV_SOURCE_TYPE.to_string());
     run.compute_derived_metrics();
     run.mark_gaps();
