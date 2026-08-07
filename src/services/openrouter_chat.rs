@@ -26,6 +26,8 @@ pub const DEFAULT_MAX_AGENT_ROUNDS: usize = 16;
 pub const CONCEPT_REVIEW_MAX_AGENT_ROUNDS: usize = 20;
 pub const FINANCIAL_EXPLORER_MAX_AGENT_ROUNDS: usize = 24;
 pub const FINANCIAL_MECHANICS_MAX_AGENT_ROUNDS: usize = 36;
+pub const SCENARIO_BLUEPRINT_MAX_AGENT_ROUNDS: usize = 20;
+pub const SCENARIO_DETAIL_MAX_AGENT_ROUNDS: usize = 32;
 pub const NARRATIVE_RESEARCH_MAX_AGENT_ROUNDS: usize = 28;
 
 /// Backoff delays before each retry after a transient OpenRouter failure.
@@ -502,9 +504,14 @@ async fn post_agent_chat_attempt(
         })?;
 
     let status = response.status();
-    let raw_payload: Value = response.json().await.map_err(|err| {
-        OpenRouterAttemptError::fatal(format!("OpenRouter response was not JSON: {err}"))
+    let body = response.text().await.map_err(|err| {
+        if reqwest_error_is_retryable(&err) {
+            OpenRouterAttemptError::retryable(format!("OpenRouter response body read failed: {err}"))
+        } else {
+            OpenRouterAttemptError::fatal(format!("OpenRouter response body read failed: {err}"))
+        }
     })?;
+    let raw_payload = parse_openrouter_response_body(status, &body)?;
 
     if !status.is_success() {
         let message = raw_payload
@@ -579,7 +586,32 @@ fn http_status_is_retryable(status: StatusCode) -> bool {
 }
 
 fn reqwest_error_is_retryable(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || err.is_request()
+    err.is_timeout()
+        || err.is_connect()
+        || err.is_request()
+        || err.is_body()
+        || err.is_decode()
+}
+
+fn parse_openrouter_response_body(
+    status: StatusCode,
+    body: &str,
+) -> Result<Value, OpenRouterAttemptError> {
+    match serde_json::from_str(body) {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            let message = format!("OpenRouter response was not JSON ({status}): {err}");
+            if response_body_parse_error_is_retryable(status) {
+                Err(OpenRouterAttemptError::retryable(message))
+            } else {
+                Err(OpenRouterAttemptError::fatal(message))
+            }
+        }
+    }
+}
+
+fn response_body_parse_error_is_retryable(status: StatusCode) -> bool {
+    http_status_is_retryable(status) || status.is_success()
 }
 
 fn openrouter_error_is_retryable(err: &OpenRouterError) -> bool {
@@ -732,6 +764,12 @@ fn client_tool_error_payload(tool_name: &str, err: &Error) -> String {
     .to_string()
 }
 
+pub const EMPTY_COMPLETION_ERROR_MARKER: &str = "OpenRouter returned no assistant text after";
+
+pub fn is_empty_completion_error(err: &Error) -> bool {
+    err.to_string().contains(EMPTY_COMPLETION_ERROR_MARKER)
+}
+
 fn empty_completion_error(
     finish_reason: &Option<String>,
     text: &str,
@@ -745,7 +783,7 @@ fn empty_completion_error(
         text.chars().take(240).collect()
     };
     Error::string(&format!(
-        "OpenRouter returned no assistant text after {max_agent_rounds} agent steps (finish_reason={finish_reason:?}, web_search_requests={web_search_requests}, client_tool_calls={client_tool_calls}, preview={preview})"
+        "{EMPTY_COMPLETION_ERROR_MARKER} {max_agent_rounds} agent steps (finish_reason={finish_reason:?}, web_search_requests={web_search_requests}, client_tool_calls={client_tool_calls}, preview={preview})"
     ))
 }
 
@@ -868,11 +906,47 @@ mod tests {
     }
 
     #[test]
+    fn empty_completion_error_is_detected() {
+        let err = empty_completion_error(&None, "", 0, 3, 32);
+        assert!(is_empty_completion_error(&err));
+        assert!(err.to_string().contains(EMPTY_COMPLETION_ERROR_MARKER));
+    }
+
+    #[test]
     fn http_status_retryable_for_transient_failures_only() {
         assert!(http_status_is_retryable(StatusCode::TOO_MANY_REQUESTS));
         assert!(http_status_is_retryable(StatusCode::BAD_GATEWAY));
         assert!(!http_status_is_retryable(StatusCode::UNAUTHORIZED));
         assert!(!http_status_is_retryable(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn response_body_parse_error_retries_transient_statuses_and_success() {
+        assert!(response_body_parse_error_is_retryable(StatusCode::OK));
+        assert!(response_body_parse_error_is_retryable(StatusCode::BAD_GATEWAY));
+        assert!(!response_body_parse_error_is_retryable(StatusCode::BAD_REQUEST));
+        assert!(!response_body_parse_error_is_retryable(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn non_json_gateway_response_is_retryable() {
+        let err = parse_openrouter_response_body(StatusCode::BAD_GATEWAY, "<html>bad gateway</html>")
+            .expect_err("html body should fail parse");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn non_json_success_response_is_retryable() {
+        let err = parse_openrouter_response_body(StatusCode::OK, "")
+            .expect_err("empty body should fail parse");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn non_json_client_error_response_is_fatal() {
+        let err = parse_openrouter_response_body(StatusCode::BAD_REQUEST, "not json")
+            .expect_err("invalid body should fail parse");
+        assert!(!err.is_retryable());
     }
 
     #[test]

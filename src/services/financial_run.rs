@@ -98,6 +98,15 @@ impl FinancialRun {
         self.derived = Some(derived);
     }
 
+    pub(crate) fn apply_latest_daily_close(&mut self, bar: &crate::workspace::DailyPriceBar) {
+        if self.market_headlines().current_price.is_some() {
+            return;
+        }
+        let headlines = self.market_headlines_mut();
+        headlines.current_price = Some(bar.close);
+        headlines.current_price_as_of = Some(bar.trade_date.clone());
+    }
+
     fn market_headlines(&self) -> MarketHeadlines {
         self.market
             .as_ref()
@@ -237,8 +246,14 @@ impl FinancialRun {
                 value: headlines.current_price,
                 text: None,
                 unit: self.currency.as_deref(),
-                period: None,
-                source_note: Some("Yahoo chart endpoint".to_string()),
+                period: headlines.current_price_as_of.clone(),
+                source_note: headlines.current_price.map(|_| {
+                    if let Some(as_of) = &headlines.current_price_as_of {
+                        format!("Alpha Vantage latest daily close as of {as_of}")
+                    } else {
+                        "Yahoo chart endpoint".to_string()
+                    }
+                }),
             },
             FundamentalInsert {
                 key: "market_cap",
@@ -412,7 +427,7 @@ mod tests {
             canonical_mapping::CanonicalResolutionResult, concept_catalog::ConceptCatalog,
             sec_facts_provider::extract_raw_facts_from_root,
         },
-        workspace::{DerivedFundamentals, SecIngestionResult},
+        workspace::{DerivedFundamentals, DailyPriceBar, SecIngestionResult},
     };
     use serde_json::json;
 
@@ -510,6 +525,24 @@ mod tests {
             .raw_facts
             .iter()
             .any(|fact| fact.concept_name == "CloudRemainingPerformanceObligation"));
+    }
+
+    #[test]
+    fn apply_latest_daily_close_populates_headline_price_and_as_of_date() {
+        let mut run = FinancialRun::new("ORCL");
+        run.apply_latest_daily_close(&DailyPriceBar {
+            trade_date: "2026-06-16".to_string(),
+            open: 190.0,
+            high: 195.0,
+            low: 187.0,
+            close: 188.33,
+            volume: 1_000_000.0,
+            adjusted_close: Some(188.33),
+        });
+
+        let headlines = run.market_headlines();
+        assert_eq!(headlines.current_price, Some(188.33));
+        assert_eq!(headlines.current_price_as_of.as_deref(), Some("2026-06-16"));
     }
 
     fn sec_fact_json(

@@ -143,6 +143,7 @@ pub struct DailyPriceBar {
 #[derive(Debug, Clone, Default)]
 pub struct MarketHeadlines {
     pub current_price: Option<f64>,
+    pub current_price_as_of: Option<String>,
     pub market_cap: Option<f64>,
     pub trailing_pe: Option<f64>,
     pub price_to_sales_ttm: Option<f64>,

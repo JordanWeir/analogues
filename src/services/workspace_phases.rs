@@ -136,6 +136,9 @@ pub async fn derive_starter_fundamentals_on_workspace(
     );
 
     let mut run = financial_run_from_layers(&layers, derived);
+    if let Some(bar) = daily_bars.last() {
+        run.apply_latest_daily_close(bar);
+    }
     run.fundamental_source = Some(AV_SOURCE_TYPE.to_string());
     run.compute_derived_metrics();
     run.mark_gaps();
@@ -280,6 +283,7 @@ mod tests {
                 mapping_strategy: None,
                 build_narrative_map: false,
                 build_financial_analysis: false,
+                build_scenario_generation: false,
             },
             &paths,
         )

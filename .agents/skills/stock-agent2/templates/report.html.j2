@@ -435,6 +435,63 @@
       min-height: 390px;
     }
 
+    .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      color: var(--muted);
+      font-size: 11px;
+      margin: 0 0 8px;
+    }
+
+    .chart-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .legend-swatch {
+      width: 18px;
+      height: 0;
+      border-top: 2px solid var(--ink);
+      display: inline-block;
+    }
+
+    .legend-swatch.historical-zone {
+      width: 18px;
+      height: 12px;
+      border: 0;
+      border-radius: 3px;
+      background: rgba(65, 80, 102, 0.1);
+    }
+
+    .legend-swatch.projected {
+      border-top: 2px dashed var(--accent);
+    }
+
+    .legend-swatch.observed {
+      border-top: 2px solid var(--ink);
+      opacity: 0.55;
+    }
+
+    .pill.period-historical {
+      background: rgba(65, 80, 102, 0.12);
+      color: #415066;
+    }
+
+    .pill.period-projected {
+      background: rgba(61, 92, 64, 0.12);
+      color: #3d5c40;
+    }
+
+    tr.period-row-historical td {
+      background: rgba(65, 80, 102, 0.06);
+    }
+
+    tr.period-row-projected td {
+      background: transparent;
+    }
+
     .axis text {
       fill: var(--muted);
       font-size: 11px;
@@ -722,8 +779,13 @@
       <div class="panel-header">
         <div>
           <h2>Scenario-Conditioned Implied Bands</h2>
-          <p class="panel-subtitle">Illustrative, assumption-driven ranges from the deterministic scenario calculator.</p>
+          <p class="panel-subtitle">Illustrative, assumption-driven ranges from the deterministic scenario calculator. Historical quarters use Alpha Vantage actuals and observed quarter-close prices; projected quarters apply TTM P/S and P/E multiples to trailing four-quarter revenue per share and EPS.</p>
         </div>
+      </div>
+      <div class="chart-legend" aria-hidden="true">
+        <span class="chart-legend-item"><span class="legend-swatch historical-zone"></span>Historical window</span>
+        <span class="chart-legend-item"><span class="legend-swatch observed"></span>Observed market price</span>
+        <span class="chart-legend-item"><span class="legend-swatch projected"></span>Projected implied path</span>
       </div>
       <div class="scenario-layout">
         <div class="chart-card chart-card-wide">
@@ -1039,6 +1101,32 @@
       `;
     }
 
+    function isHistoricalPeriod(period) {
+      return period?.is_historical === true || period?.period_kind === "historical";
+    }
+
+    function periodChartBand(period) {
+      if (!period) return {};
+      if (period.chart_price) return period.chart_price;
+      if (isHistoricalPeriod(period) && period.market_price) return period.market_price;
+      return period.blended_price || period.ps_implied_price || period.pe_implied_price || {};
+    }
+
+    function historicalQuarterCount(data) {
+      const calendar = data.projection_calendar || {};
+      const fromCalendar = numeric(calendar.historical_quarters);
+      if (Number.isFinite(fromCalendar) && fromCalendar > 0) return fromCalendar;
+      const sample = data.scenarios?.[0]?.periods || data.historical_periods || [];
+      return sample.filter(isHistoricalPeriod).length;
+    }
+
+    function periodKindBadge(period) {
+      const historical = isHistoricalPeriod(period);
+      const label = historical ? "Historical" : "Projected";
+      const klass = historical ? "period-historical" : "period-projected";
+      return `<span class="pill ${klass}">${label}</span>`;
+    }
+
     function renderScenarioCharts(data) {
       renderTerminalBandChart(data);
       renderScenarioPathChart(data);
@@ -1060,7 +1148,8 @@
           high: numeric(band.high),
           revenue: numeric(terminal.revenue),
           netMargin: numeric(terminal.net_margin),
-          eps: numeric(terminal.eps)
+          eps: numeric(terminal.eps),
+          epsTtm: numeric(terminal.eps_ttm)
         };
       }).filter((row) => Number.isFinite(row.median));
     }
@@ -1196,20 +1285,48 @@
         meta.textContent = monteCarlo.iterations ? `${d3.format(",")(monteCarlo.iterations)} draws; hover paths or distribution bars` : "Hover paths or distribution bars";
       }
       renderMonteCarloSummary(summary);
-      const rows = scenarios.flatMap((scenario) => {
-        const points = (scenario.periods || []).map((period, index) => ({
-          scenario: scenario.name || "Unnamed scenario",
-          stance: scenario.stance || "",
-          index: Number.isFinite(currentPrice) ? index + 1 : index,
+      const historicalCount = historicalQuarterCount(data);
+      const indexOffset = Number.isFinite(currentPrice) ? 1 : 0;
+      const historicalRows = (data.historical_periods || []).map((period, index) => {
+        const band = periodChartBand(period);
+        return {
+          scenario: "Observed market",
+          stance: "historical",
+          index: indexOffset + index,
           label: period.label || `Period ${index + 1}`,
-          low: numeric(period.blended_price?.low ?? period.ps_implied_price?.low ?? period.pe_implied_price?.low),
-          median: numeric(period.blended_price?.median ?? period.ps_implied_price?.median ?? period.pe_implied_price?.median),
-          high: numeric(period.blended_price?.high ?? period.ps_implied_price?.high ?? period.pe_implied_price?.high),
+          isHistorical: true,
+          isObserved: true,
+          low: numeric(band.low),
+          median: numeric(band.median),
+          high: numeric(band.high),
           revenue: numeric(period.revenue),
-          revenueGrowth: numeric(period.revenue_growth),
+          revenueGrowth: null,
           netMargin: numeric(period.net_margin),
-          eps: numeric(period.eps)
-        }));
+          eps: numeric(period.eps),
+          epsTtm: numeric(period.eps_ttm)
+        };
+      }).filter((row) => Number.isFinite(row.median));
+
+      const rows = scenarios.flatMap((scenario) => {
+        const points = (scenario.periods || []).map((period, index) => {
+          const band = periodChartBand(period);
+          return {
+            scenario: scenario.name || "Unnamed scenario",
+            stance: scenario.stance || "",
+            index: indexOffset + index,
+            label: period.label || `Period ${index + 1}`,
+            isHistorical: isHistoricalPeriod(period),
+            isObserved: false,
+            low: numeric(band.low),
+            median: numeric(band.median),
+            high: numeric(band.high),
+            revenue: numeric(period.revenue),
+            revenueGrowth: numeric(period.revenue_growth),
+            netMargin: numeric(period.net_margin),
+            eps: numeric(period.eps),
+            epsTtm: numeric(period.eps_ttm)
+          };
+        });
         if (!Number.isFinite(currentPrice)) return points;
         return [{
           scenario: scenario.name || "Unnamed scenario",
@@ -1219,7 +1336,9 @@
           low: currentPrice,
           median: currentPrice,
           high: currentPrice,
-          isCurrent: true
+          isCurrent: true,
+          isHistorical: false,
+          isObserved: true
         }, ...points];
       }).filter((row) => Number.isFinite(row.median));
 
@@ -1250,6 +1369,16 @@
         .range([distributionLeft, distributionRight]);
       const color = scenarioColorScale(scenarios.map((scenario) => ({ name: scenario.name })));
       const labels = new Map(rows.map((row) => [row.index, row.label]));
+
+      if (historicalCount > 0) {
+        svg.append("rect")
+          .attr("x", x(indexOffset))
+          .attr("y", margin.top - 10)
+          .attr("width", Math.max(0, x(indexOffset + historicalCount - 1) - x(indexOffset)))
+          .attr("height", height - margin.bottom - margin.top + 20)
+          .attr("fill", "rgba(65, 80, 102, 0.08)")
+          .attr("rx", 8);
+      }
 
       svg.append("g")
         .attr("class", "grid")
@@ -1302,7 +1431,7 @@
           .attr("stroke-dasharray", "4 4");
       }
 
-      const grouped = d3.group(rows, (d) => d.scenario);
+      const grouped = d3.group(rows.filter((row) => !row.isObserved), (d) => d.scenario);
       const line = d3.line().x((d) => x(d.index)).y((d) => y(d.median)).curve(d3.curveMonotoneX);
       const area = d3.area()
         .x((d) => x(d.index))
@@ -1310,17 +1439,35 @@
         .y1((d) => y(d.high ?? d.median))
         .curve(d3.curveMonotoneX);
 
-      for (const [name, values] of grouped) {
+      if (historicalRows.length) {
+        const observedLine = d3.line()
+          .x((d) => x(d.index))
+          .y((d) => y(d.median))
+          .curve(d3.curveMonotoneX);
         svg.append("path")
-          .datum(values)
+          .datum(historicalRows)
+          .attr("fill", "none")
+          .attr("stroke", "var(--ink)")
+          .attr("stroke-width", 2.5)
+          .attr("opacity", 0.55)
+          .attr("d", observedLine);
+      }
+
+      for (const [name, values] of grouped) {
+        const projected = values.filter((d) => !d.isHistorical);
+        const bridge = values.filter((d) => d.isHistorical).slice(-1).concat(projected);
+        if (!projected.length) continue;
+        svg.append("path")
+          .datum(bridge)
           .attr("fill", color(name))
-          .attr("opacity", 0.1)
+          .attr("opacity", 0.08)
           .attr("d", area);
         svg.append("path")
-          .datum(values)
+          .datum(projected)
           .attr("fill", "none")
           .attr("stroke", color(name))
           .attr("stroke-width", 2.25)
+          .attr("stroke-dasharray", "7 5")
           .attr("d", line);
       }
 
@@ -1331,7 +1478,13 @@
         .attr("cx", (d) => x(d.index))
         .attr("cy", (d) => y(d.median))
         .attr("r", (d) => d.isCurrent ? 4 : 5)
-        .attr("fill", (d) => d.isCurrent ? "var(--ink)" : color(d.scenario))
+        .attr("fill", (d) => {
+          if (d.isCurrent) return "var(--ink)";
+          if (d.isObserved) return "var(--ink)";
+          if (d.isHistorical) return "var(--ink)";
+          return color(d.scenario);
+        })
+        .attr("opacity", (d) => (d.isObserved || d.isHistorical) ? 0.55 : 1)
         .attr("stroke", "#ffffff")
         .attr("stroke-width", 1.8)
         .on("mousemove", (event, d) => showTooltip(event, pathTooltip(d)))
@@ -1414,20 +1567,34 @@
       }
       el.innerHTML = scenarios.map((scenario, index) => {
         const periodRows = (scenario.periods || []).map((period) => {
-          const band = period.blended_price || period.ps_implied_price || period.pe_implied_price || {};
-          return [
-            period.label || "",
-            compactMoney(period.revenue),
-            percent(period.revenue_growth),
-            percent(period.net_margin),
-            moneyDecimal(period.eps),
-            percent(period.eps_growth),
-            multipleBand(period.ps_multiple),
-            multipleBand(period.pe_multiple),
-            blendLabel(period.blend_weights),
-            money(band.median)
-          ];
+          const band = periodChartBand(period);
+          const rowClass = isHistoricalPeriod(period) ? "period-row-historical" : "period-row-projected";
+          return {
+            rowClass,
+            cells: [
+              `${escapeHtml(period.label || "")} ${periodKindBadge(period)}`,
+              compactMoney(period.revenue),
+              percent(period.revenue_growth),
+              percent(period.net_margin),
+              moneyDecimal(period.eps),
+              moneyDecimal(period.eps_ttm),
+              percent(period.eps_growth),
+              multipleBand(period.ps_multiple, "TTM"),
+              multipleBand(period.pe_multiple, "TTM"),
+              blendLabel(period.blend_weights),
+              money(band.median)
+            ]
+          };
         });
+        const periodTable = periodRows.length ? table(
+          ["Period", "Revenue", "Revenue Growth", "Net Margin", "EPS (Q)", "EPS (TTM)", "EPS Growth", "P/S (TTM)", "P/E (TTM)", "Blend", "Chart Price"],
+          periodRows.map((row) => row.cells),
+          {
+            htmlColumns: [0],
+            numericColumns: [1, 2, 3, 4, 5, 6, 10],
+            rowClass: (_, index) => periodRows[index]?.rowClass || ""
+          }
+        ) : "";
         return `
           <details ${index === 0 ? "open" : ""}>
             <summary>${escapeHtml(scenario.name || "Scenario")} ${scenario.stance ? `<span class="pill ${escapeAttr(scenario.stance)}">${escapeHtml(scenario.stance)}</span>` : ""}</summary>
@@ -1436,11 +1603,7 @@
               <p>${escapeHtml(scenario.description || "")}</p>
               ${scenario.assumption_summary ? `<p class="muted" style="margin-top: 8px;">${escapeHtml(scenario.assumption_summary)}</p>` : ""}
               ${renderCruxAssumptions(scenario.crux_assumptions || [])}
-              ${table(
-                ["Period", "Revenue", "Revenue Growth", "Net Margin", "EPS", "EPS Growth", "P/S", "P/E", "Blend", "Median"],
-                periodRows,
-                { numericColumns: [1, 2, 3, 4, 5, 9] }
-              )}
+              ${periodTable}
               ${scenario.sensitivities?.length ? `<h3 style="margin-top: 14px;">Key Sensitivities</h3>${renderBullets(scenario.sensitivities)}` : ""}
             </div>
           </details>
@@ -1522,13 +1685,14 @@
     function table(headers, rows, options = {}) {
       const htmlColumns = new Set(options.htmlColumns || []);
       const numericColumns = new Set(options.numericColumns || []);
+      const rowClass = options.rowClass;
       return `
         <div class="table-wrap">
           <table>
             <thead><tr>${headers.map((header, index) => `<th class="${numericColumns.has(index) ? "numeric" : ""}">${escapeHtml(header)}</th>`).join("")}</tr></thead>
             <tbody>
-              ${rows.map((row) => `
-                <tr>${row.map((cell, index) => `<td class="${numericColumns.has(index) ? "numeric" : ""}">${htmlColumns.has(index) ? cell : escapeHtml(cell)}</td>`).join("")}</tr>
+              ${rows.map((row, rowIndex) => `
+                <tr class="${rowClass ? escapeAttr(rowClass(row, rowIndex) || "") : ""}">${row.map((cell, index) => `<td class="${numericColumns.has(index) ? "numeric" : ""}">${htmlColumns.has(index) ? cell : escapeHtml(cell)}</td>`).join("")}</tr>
               `).join("")}
             </tbody>
           </table>
@@ -1571,7 +1735,8 @@
         ${Number.isFinite(d.probability) ? `<div>Scenario probability: ${probability(d.probability)}</div>` : ""}
         <div>${escapeHtml(d.label)} band: ${money(d.low)} / ${money(d.median)} / ${money(d.high)}</div>
         <div>Revenue: ${compactMoney(d.revenue)} | Net margin: ${percent(d.netMargin)}</div>
-        <div>EPS: ${moneyDecimal(d.eps)}</div>
+        ${Number.isFinite(d.eps) ? `<div>EPS (Q): ${moneyDecimal(d.eps)}</div>` : ""}
+        ${Number.isFinite(d.epsTtm) ? `<div>EPS (TTM): ${moneyDecimal(d.epsTtm)}</div>` : ""}
       `;
     }
 
@@ -1585,13 +1750,22 @@
     }
 
     function pathTooltip(d) {
+      const kind = d.isCurrent
+        ? "Current price"
+        : d.isObserved
+          ? "Observed market"
+          : d.isHistorical
+            ? "Historical actual"
+            : "Projected implied";
       return `
         <strong>${escapeHtml(d.scenario)}</strong>
-        <div>${escapeHtml(d.label)} median: ${money(d.median)}</div>
+        <div>${escapeHtml(kind)} · ${escapeHtml(d.label)}</div>
+        <div>Price median: ${money(d.median)}</div>
         <div>Band: ${money(d.low)} / ${money(d.high)}</div>
-        ${Number.isFinite(d.revenue) ? `<div>Revenue: ${compactMoney(d.revenue)} (${percent(d.revenueGrowth)})</div>` : ""}
+        ${Number.isFinite(d.revenue) ? `<div>Revenue: ${compactMoney(d.revenue)}${Number.isFinite(d.revenueGrowth) ? ` (${percent(d.revenueGrowth)})` : ""}</div>` : ""}
         ${Number.isFinite(d.netMargin) ? `<div>Net margin: ${percent(d.netMargin)}</div>` : ""}
-        ${Number.isFinite(d.eps) ? `<div>EPS: ${moneyDecimal(d.eps)}</div>` : ""}
+        ${Number.isFinite(d.eps) ? `<div>EPS (Q): ${moneyDecimal(d.eps)}</div>` : ""}
+        ${Number.isFinite(d.epsTtm) ? `<div>EPS (TTM): ${moneyDecimal(d.epsTtm)}</div>` : ""}
       `;
     }
 
@@ -1674,9 +1848,10 @@
       return Number.isFinite(value) ? `${d3.format(",.1f")(value * 100)}%` : "";
     }
 
-    function multipleBand(band) {
+    function multipleBand(band, basis) {
       if (!band) return "";
-      const values = [band.low, band.median, band.high].map((value) => Number.isFinite(value) ? `${d3.format(",.1f")(value)}x` : "");
+      const suffix = basis ? ` ${basis}` : "";
+      const values = [band.low, band.median, band.high].map((value) => Number.isFinite(value) ? `${d3.format(",.1f")(value)}x${suffix}` : "");
       return values.filter(Boolean).join(" / ");
     }
 

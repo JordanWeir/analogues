@@ -348,6 +348,7 @@ fn build_market_headlines_from_overview(
         market_cap,
         trailing_pe,
         price_to_sales_ttm,
+        ..MarketHeadlines::default()
     }
 }
 

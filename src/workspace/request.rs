@@ -17,6 +17,8 @@ pub struct InitWorkspaceRequest {
     pub build_narrative_map: bool,
     /// Run crux identification and mechanics experiments after narrative map.
     pub build_financial_analysis: bool,
+    /// Run scenario blueprint fan-out and Monte Carlo after financial analysis.
+    pub build_scenario_generation: bool,
 }
 
 impl Default for InitWorkspaceRequest {
@@ -29,13 +31,14 @@ impl Default for InitWorkspaceRequest {
             mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
             build_narrative_map: true,
             build_financial_analysis: true,
+            build_scenario_generation: true,
         }
     }
 }
 
 impl InitWorkspaceRequest {
     pub fn runs_narrative_map(&self) -> bool {
-        self.build_narrative_map || self.build_financial_analysis
+        self.build_narrative_map || self.build_financial_analysis || self.build_scenario_generation
     }
 
     pub fn normalized(&self) -> Result<Self> {
@@ -48,6 +51,7 @@ impl InitWorkspaceRequest {
             mapping_strategy: self.mapping_strategy,
             build_narrative_map: self.build_narrative_map,
             build_financial_analysis: self.build_financial_analysis,
+            build_scenario_generation: self.build_scenario_generation,
         })
     }
 }

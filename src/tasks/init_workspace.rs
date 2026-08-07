@@ -88,6 +88,7 @@ impl InitWorkspaceRequest {
 
         let build_narrative_map = lane_enabled(vars, "build_narrative_map");
         let build_financial_analysis = lane_enabled(vars, "build_financial_analysis");
+        let build_scenario_generation = lane_enabled(vars, "build_scenario_generation");
 
         Ok(Self {
             ticker: normalize_ticker(ticker)?,
@@ -97,6 +98,7 @@ impl InitWorkspaceRequest {
             mapping_strategy,
             build_narrative_map,
             build_financial_analysis,
+            build_scenario_generation,
         })
     }
 }

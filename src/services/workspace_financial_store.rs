@@ -34,6 +34,51 @@ pub struct FundamentalInsert<'a> {
     pub source_note: Option<String>,
 }
 
+/// Spot market metrics resolved from persisted fundamentals with daily-bar fallback.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpotMarketSnapshot {
+    pub current_price: Option<f64>,
+    pub current_price_period: Option<String>,
+    pub current_price_source_note: Option<String>,
+    pub market_cap: Option<f64>,
+    pub market_cap_source_note: Option<String>,
+}
+
+pub async fn resolve_spot_market_snapshot(
+    db: &DatabaseConnection,
+    fundamentals_price: Option<f64>,
+    fundamentals_market_cap: Option<f64>,
+    shares_outstanding: Option<f64>,
+) -> Result<SpotMarketSnapshot> {
+    let mut snapshot = SpotMarketSnapshot {
+        current_price: fundamentals_price,
+        market_cap: fundamentals_market_cap,
+        ..SpotMarketSnapshot::default()
+    };
+
+    if snapshot.current_price.is_none() {
+        if let Some(bar) = WorkspaceFinancialStore::new(db).latest_daily_close_bar().await? {
+            snapshot.current_price = Some(bar.close);
+            snapshot.current_price_period = Some(bar.trade_date.clone());
+            snapshot.current_price_source_note = Some(format!(
+                "Alpha Vantage latest daily close as of {}",
+                bar.trade_date
+            ));
+        }
+    }
+
+    if snapshot.market_cap.is_none() {
+        if let (Some(price), Some(shares)) = (snapshot.current_price, shares_outstanding) {
+            snapshot.market_cap = Some(price * shares);
+            snapshot.market_cap_source_note = Some(
+                "Derived from latest daily close and shares outstanding.".to_string(),
+            );
+        }
+    }
+
+    Ok(snapshot)
+}
+
 /// Phase 1 persistence: raw AV/SEC facts and stock metadata only.
 pub struct RawIngestPersist<'a> {
     pub fetched_at: &'a str,
@@ -266,6 +311,21 @@ impl<'a> WorkspaceFinancialStore<'a> {
         )
         .await?;
         rows.into_iter().map(row_to_daily_price_bar).collect()
+    }
+
+    pub async fn latest_daily_close_bar(&self) -> Result<Option<DailyPriceBar>> {
+        let rows = query_all(
+            self.db,
+            "SELECT trade_date, open, high, low, close, volume, adjusted_close
+             FROM daily_price_bars
+             ORDER BY trade_date DESC
+             LIMIT 1",
+        )
+        .await?;
+        rows.into_iter()
+            .next()
+            .map(row_to_daily_price_bar)
+            .transpose()
     }
 
     pub async fn insert_daily_price_bars(
@@ -1185,6 +1245,7 @@ mod tests {
                 ),
                 build_narrative_map: false,
                 build_financial_analysis: false,
+                build_scenario_generation: false,
             },
             &WorkspacePaths {
                 run_slug: "MSFT-2026-06-07-1".to_string(),
@@ -1196,6 +1257,37 @@ mod tests {
         .await
         .expect("seed");
         db
+    }
+
+    #[tokio::test]
+    async fn resolve_spot_market_snapshot_uses_latest_daily_close_when_price_missing() {
+        let db = test_db().await;
+        WorkspaceFinancialStore::insert_daily_price_bars(
+                &db,
+                &[DailyPriceBar {
+                    trade_date: "2026-06-16".to_string(),
+                    open: 190.0,
+                    high: 195.0,
+                    low: 187.0,
+                    close: 188.33,
+                    volume: 1_000_000.0,
+                    adjusted_close: Some(188.33),
+                }],
+                "Alpha Vantage",
+                "2026-06-17T00:00:00Z",
+            )
+            .await
+            .expect("insert bars");
+
+        let snapshot = resolve_spot_market_snapshot(&db, None, None, Some(2_876_046_000.0))
+            .await
+            .expect("snapshot");
+
+        assert_eq!(snapshot.current_price, Some(188.33));
+        assert_eq!(snapshot.current_price_period.as_deref(), Some("2026-06-16"));
+        assert!(snapshot
+            .market_cap
+            .is_some_and(|cap| (cap - 541_000_000_000.0).abs() < 2_000_000_000.0));
     }
 
     #[tokio::test]
