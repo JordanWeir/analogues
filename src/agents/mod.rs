@@ -1,3 +1,4 @@
+pub mod financial_mechanics_validator;
 pub mod financial_model_explorer;
 pub mod fundamental_catalog_manager;
 pub mod narrative_researcher;

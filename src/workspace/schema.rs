@@ -594,6 +594,26 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_analysis_runs_status_created
         ON analysis_runs(status, created_at)",
+    "CREATE TABLE IF NOT EXISTS mechanics_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        review_scope_key TEXT NOT NULL,
+        scope_type TEXT NOT NULL
+            CHECK (scope_type IN ('crux_key', 'scout')),
+        crux_key TEXT,
+        verdict TEXT NOT NULL
+            CHECK (verdict IN ('approved', 'changes_requested')),
+        summary TEXT NOT NULL,
+        findings_json TEXT NOT NULL DEFAULT '[]',
+        experiments_reviewed_json TEXT NOT NULL DEFAULT '[]',
+        review_round INTEGER NOT NULL DEFAULT 1,
+        worker_run_id TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (json_valid(findings_json)),
+        CHECK (json_valid(experiments_reviewed_json)),
+        UNIQUE(review_scope_key, review_round)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_mechanics_reviews_scope_round
+        ON mechanics_reviews(review_scope_key, review_round)",
 ];
 
 /// Idempotent column additions for workspaces created before schema version 4.
@@ -618,4 +638,24 @@ pub const SCHEMA_MIGRATION_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_av_raw_facts_field_period
         ON av_raw_facts(endpoint, field_name, period_end, report_type)",
+    "CREATE TABLE IF NOT EXISTS mechanics_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        review_scope_key TEXT NOT NULL,
+        scope_type TEXT NOT NULL
+            CHECK (scope_type IN ('crux_key', 'scout')),
+        crux_key TEXT,
+        verdict TEXT NOT NULL
+            CHECK (verdict IN ('approved', 'changes_requested')),
+        summary TEXT NOT NULL,
+        findings_json TEXT NOT NULL DEFAULT '[]',
+        experiments_reviewed_json TEXT NOT NULL DEFAULT '[]',
+        review_round INTEGER NOT NULL DEFAULT 1,
+        worker_run_id TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (json_valid(findings_json)),
+        CHECK (json_valid(experiments_reviewed_json)),
+        UNIQUE(review_scope_key, review_round)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_mechanics_reviews_scope_round
+        ON mechanics_reviews(review_scope_key, review_round)",
 ];

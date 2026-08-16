@@ -301,6 +301,12 @@ impl Gate for PromotedLinkedToSourcesGate {
 
 struct RejectedExperimentsExplainedGate;
 
+struct MechanicsReviewsApprovedGate;
+
+pub fn mechanics_reviews_approved_gates() -> Vec<Arc<dyn Gate>> {
+    vec![Arc::new(MechanicsReviewsApprovedGate)]
+}
+
 #[async_trait]
 impl Gate for RejectedExperimentsExplainedGate {
     fn name(&self) -> &'static str {
@@ -333,6 +339,54 @@ impl Gate for RejectedExperimentsExplainedGate {
             return GateResult::reject(
                 self.name(),
                 "rejected experiments must include rejection_reason",
+            );
+        }
+
+        GateResult::pass(self.name())
+    }
+}
+
+#[async_trait]
+impl Gate for MechanicsReviewsApprovedGate {
+    fn name(&self) -> &'static str {
+        "mechanics_reviews_approved"
+    }
+
+    async fn check(&self, ctx: &LaneContext, result: &LaneResult) -> GateResult {
+        if result.status == LaneStatus::Skipped {
+            return GateResult::pass(self.name());
+        }
+
+        let reviews = match crate::services::mechanics_review::MechanicsReviewService::load_latest_reviews(
+            ctx.workspace.connection(),
+        )
+        .await
+        {
+            Ok(reviews) => reviews,
+            Err(err) => {
+                return GateResult::reject(
+                    self.name(),
+                    format!("mechanics review query failed: {err}"),
+                )
+            }
+        };
+
+        if reviews.is_empty() {
+            return GateResult::pass(self.name());
+        }
+
+        let pending: Vec<String> = reviews
+            .iter()
+            .filter(|review| review.verdict != crate::services::mechanics_review::VERDICT_APPROVED)
+            .map(|review| format!("{}={}", review.review_scope_key, review.verdict))
+            .collect();
+        if !pending.is_empty() {
+            return GateResult::reject(
+                self.name(),
+                format!(
+                    "all mechanics reviews must be approved; pending: {}",
+                    pending.join(", ")
+                ),
             );
         }
 
