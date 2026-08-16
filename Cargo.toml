@@ -1,4 +1,6 @@
 [workspace]
+members = [".", "migration", "crates/blackboard-swarm"]
+resolver = "2"
 
 [package]
 name = "analogues"
