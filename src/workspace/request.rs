@@ -17,6 +17,8 @@ pub struct InitWorkspaceRequest {
     pub build_narrative_map: bool,
     /// Run crux identification and mechanics experiments after narrative map.
     pub build_financial_analysis: bool,
+    /// Copy `run.sqlite` into `checkpoints/` after each lane completes.
+    pub checkpoints: bool,
 }
 
 impl Default for InitWorkspaceRequest {
@@ -29,6 +31,7 @@ impl Default for InitWorkspaceRequest {
             mapping_strategy: Some(ConceptMappingStrategy::CandidateScoring),
             build_narrative_map: true,
             build_financial_analysis: true,
+            checkpoints: false,
         }
     }
 }
@@ -48,6 +51,7 @@ impl InitWorkspaceRequest {
             mapping_strategy: self.mapping_strategy,
             build_narrative_map: self.build_narrative_map,
             build_financial_analysis: self.build_financial_analysis,
+            checkpoints: self.checkpoints,
         })
     }
 }

@@ -281,6 +281,7 @@ mod tests {
                 mapping_strategy: None,
                 build_narrative_map: false,
                 build_financial_analysis: false,
+                checkpoints: false,
             },
             &paths,
         )
@@ -339,6 +340,7 @@ mod tests {
             mapping_strategy: None,
             build_narrative_map: false,
             build_financial_analysis: false,
+            checkpoints: false,
         });
         assert_eq!(Lane::gates(&lane).len(), 4);
     }

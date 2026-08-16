@@ -155,6 +155,9 @@ impl WorkspaceStore {
             ))
         })?;
         ensure_generated_dir(&paths)?;
+        if request.checkpoints {
+            ensure_checkpoints_dir(&paths)?;
+        }
 
         let db = Database::connect(sqlite_uri(&paths.sqlite_path))
             .await
@@ -252,6 +255,16 @@ fn ensure_generated_dir(paths: &WorkspacePaths) -> Result<()> {
         Error::string(&format!(
             "failed to create generated directory {}: {err}",
             paths.generated_dir.display()
+        ))
+    })
+}
+
+fn ensure_checkpoints_dir(paths: &WorkspacePaths) -> Result<()> {
+    let checkpoints_dir = paths.workspace_dir.join("checkpoints");
+    fs::create_dir_all(&checkpoints_dir).map_err(|err| {
+        Error::string(&format!(
+            "failed to create checkpoints directory {}: {err}",
+            checkpoints_dir.display()
         ))
     })
 }

@@ -296,6 +296,7 @@ mod tests {
                 mapping_strategy: None,
                 build_narrative_map: false,
                 build_financial_analysis: false,
+                checkpoints: false,
             },
             &paths,
         )

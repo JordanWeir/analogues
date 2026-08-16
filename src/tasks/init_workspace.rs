@@ -49,6 +49,13 @@ fn lane_enabled(vars: &task::Vars, key: &str) -> bool {
         .unwrap_or(true)
 }
 
+fn flag_enabled(vars: &task::Vars, key: &str) -> bool {
+    vars.cli
+        .get(key)
+        .map(|value| matches!(value.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false)
+}
+
 impl InitWorkspaceRequest {
     pub fn from_vars(vars: &task::Vars) -> Result<Self> {
         let ticker = vars
@@ -88,6 +95,7 @@ impl InitWorkspaceRequest {
 
         let build_narrative_map = lane_enabled(vars, "build_narrative_map");
         let build_financial_analysis = lane_enabled(vars, "build_financial_analysis");
+        let checkpoints = flag_enabled(vars, "checkpoints");
 
         Ok(Self {
             ticker: normalize_ticker(ticker)?,
@@ -97,6 +105,7 @@ impl InitWorkspaceRequest {
             mapping_strategy,
             build_narrative_map,
             build_financial_analysis,
+            checkpoints,
         })
     }
 }
@@ -105,7 +114,10 @@ pub async fn initialize_workspace(request: &InitWorkspaceRequest) -> Result<Work
     let normalized_request = request.normalized()?;
     let store = WorkspaceStore;
     let handle = store.create_workspace(&normalized_request).await?;
-    let mut ctx = LaneContext::new(handle, LaneConfig::new(&normalized_request.ticker));
+    let mut ctx = LaneContext::new(
+        handle,
+        LaneConfig::new(&normalized_request.ticker).with_checkpoints(normalized_request.checkpoints),
+    );
 
     let report = LinearRunner::new(lanes_for_request(&normalized_request))
         .run(&mut ctx)
